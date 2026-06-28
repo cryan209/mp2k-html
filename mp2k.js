@@ -5226,7 +5226,11 @@ function populateSongList(songs) {
 document.getElementById('btnPlay').addEventListener('click', async () => {
   if (document.getElementById('engineSelect')?.value === 'gsf-lle') {
     try {
-      await standardGsfEngine?.play();
+      const diagnostics = await standardGsfEngine?.play();
+      const cpu = diagnostics?.cpu;
+      setStatus(cpu
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}`
+        : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);
     }
@@ -5412,6 +5416,7 @@ window.gs1Debug = {
   state: () => player.debugSnapshot(),
   gsf: () => standardGsfEngine,
   gsfReport: () => standardGsfEngine?.decodeReport || null,
+  gsfDiagnostics: (maxInstructions = 20000) => standardGsfEngine?.runDiagnostics?.(maxInstructions) || null,
   profiles: () => Object.fromEntries(Object.entries(ENGINE_PROFILES).map(([id, profile]) => [id, profile.label])),
   profile: (id = null) => {
     if (id == null) return player.profile || DEFAULT_ENGINE_PROFILE;

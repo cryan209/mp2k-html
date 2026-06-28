@@ -6101,10 +6101,10 @@ document.getElementById('tableSelect').addEventListener('change', e => {
   setStatus(`${player.songs.length} songs loaded — select one and press ▶`);
 });
 
-// Try auto-loading from the repository root when served at /music-player/.
-fetch('../baserom.gba')
+// Try auto-loading a local baserom when it exists beside the app.
+fetch('baserom.gba')
   .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
-  .then(buf => initWithBuffer(buf, { name: '../baserom.gba' }))
+  .then(buf => initWithBuffer(buf, { name: 'baserom.gba' }))
   .catch(() => {
     setStatus('Drop a GBA ROM, GSF dump, minigsf, gsflib, or ZIP to begin');
   });

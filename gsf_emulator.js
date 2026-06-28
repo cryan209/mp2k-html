@@ -160,10 +160,12 @@
       this.bus = bus;
       this.regs = new Uint32Array(16);
       this.cpsr = MODE_SYSTEM;
+      this.spsr = 0;
       this.halted = false;
       this.reason = '';
       this.instructions = 0;
       this.unsupported = new Map();
+      this.psrWrites = [];
       this.regs[15] = entryAddr >>> 0;
       if (entryAddr & 1) {
         this.regs[15] = entryAddr & ~1;
@@ -197,9 +199,11 @@
         reason: this.reason,
         instructions: this.instructions,
         cpsr: this.cpsr >>> 0,
+        spsr: this.spsr >>> 0,
         thumb: !!(this.cpsr & CPSR_T),
         pc: this.regs[15] >>> 0,
         regs: Array.from(this.regs, v => v >>> 0),
+        psrWrites: this.psrWrites.slice(-32),
         unsupported: Object.fromEntries([...this.unsupported.entries()].slice(0, 24)),
       };
     }
@@ -233,8 +237,8 @@
       if ((instr & 0x0e000000) === 0x0a000000) return this._branch(instr, pc);
       if ((instr & 0x0ffffff0) === 0x012fff10) return this._bx(instr);
       if ((instr & 0x0fc000f0) === 0x00000090) return this._unsupported(instr, pc); // MUL/MLA family
-      if ((instr & 0x0fbf0fff) === 0x010f0000) return this._unsupported(instr, pc); // MRS
-      if ((instr & 0x0fb0fff0) === 0x0120f000) return this._unsupported(instr, pc); // MSR register
+      if ((instr & 0x0fbf0fff) === 0x010f0000) return this._mrs(instr);
+      if ((instr & 0x0db0f000) === 0x0120f000) return this._msr(instr);
       if ((instr & 0x0e000090) === 0x00000090) return this._unsupported(instr, pc); // halfword/signed transfer
       if ((instr & 0x0e000000) === 0x08000000) return this._blockDataTransfer(instr);
       if ((instr & 0x0c000000) === 0x04000000) return this._singleDataTransfer(instr);
@@ -350,6 +354,44 @@
         else this.bus.write32(addr & ~3, value);
       }
       if (writeBack || !pre) this._setReg(rn, finalBase);
+    }
+
+    _mrs(instr) {
+      const useSpsr = !!(instr & 0x00400000);
+      const rd = (instr >>> 12) & 0xf;
+      this._setReg(rd, useSpsr ? this.spsr : this.cpsr);
+    }
+
+    _msr(instr) {
+      const useSpsr = !!(instr & 0x00400000);
+      const fieldMask = (instr >>> 16) & 0xf;
+      let value;
+      if (instr & 0x02000000) {
+        value = ror32(instr & 0xff, ((instr >>> 8) & 0xf) * 2);
+      } else {
+        value = this._reg(instr & 0xf);
+      }
+      const before = useSpsr ? this.spsr : this.cpsr;
+      const after = this._applyPsrFields(before, value, fieldMask);
+      if (useSpsr) this.spsr = after;
+      else this.cpsr = after;
+      this.psrWrites.push({
+        target: useSpsr ? 'spsr' : 'cpsr',
+        fieldMask,
+        value,
+        before,
+        after,
+      });
+      if (this.psrWrites.length > 128) this.psrWrites.shift();
+    }
+
+    _applyPsrFields(before, value, fieldMask) {
+      let mask = 0;
+      if (fieldMask & 0x1) mask |= 0x000000ff;
+      if (fieldMask & 0x2) mask |= 0x0000ff00;
+      if (fieldMask & 0x4) mask |= 0x00ff0000;
+      if (fieldMask & 0x8) mask |= 0xff000000;
+      return ((before & ~mask) | (value & mask)) >>> 0;
     }
 
     _blockDataTransfer(instr) {

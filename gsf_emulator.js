@@ -249,7 +249,7 @@
     _execArm(instr, pc) {
       if ((instr & 0x0e000000) === 0x0a000000) return this._branch(instr, pc);
       if ((instr & 0x0ffffff0) === 0x012fff10) return this._bx(instr);
-      if ((instr & 0x0fc000f0) === 0x00000090) return this._unsupported(instr, pc); // MUL/MLA family
+      if ((instr & 0x0fc000f0) === 0x00000090) return this._multiply(instr);
       if ((instr & 0x0fbf0fff) === 0x010f0000) return this._mrs(instr);
       if ((instr & 0x0db0f000) === 0x0120f000) return this._msr(instr);
       if ((instr & 0x0e000090) === 0x00000090) return this._halfwordDataTransfer(instr);
@@ -348,6 +348,22 @@
         this._setNZ(result);
         this.cpsr = (this.cpsr & ~(CPSR_C | CPSR_V)) | (carry ? CPSR_C : 0) | (overflow ? CPSR_V : 0);
       }
+    }
+
+    _multiply(instr) {
+      const accumulate = !!(instr & 0x00200000);
+      const setFlags = !!(instr & 0x00100000);
+      const rd = (instr >>> 16) & 0xf;
+      const rn = (instr >>> 12) & 0xf;
+      const rs = (instr >>> 8) & 0xf;
+      const rm = instr & 0xf;
+      if (rd === 15 || rs === 15 || rm === 15 || (accumulate && rn === 15)) {
+        return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
+      }
+      let result = Math.imul(this._reg(rm), this._reg(rs)) >>> 0;
+      if (accumulate) result = (result + this._reg(rn)) >>> 0;
+      this._setReg(rd, result);
+      if (setFlags) this._setNZ(result);
     }
 
     _singleDataTransfer(instr) {

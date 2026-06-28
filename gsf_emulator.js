@@ -59,6 +59,14 @@
     return (v & 0x00800000) ? (v | 0xff000000) : v;
   }
 
+  function signExtend8(v) {
+    return (v & 0x80) ? (v | 0xffffff00) : v;
+  }
+
+  function signExtend16(v) {
+    return (v & 0x8000) ? (v | 0xffff0000) : v;
+  }
+
   function ror32(value, amount) {
     amount &= 31;
     value >>>= 0;
@@ -244,7 +252,7 @@
       if ((instr & 0x0fc000f0) === 0x00000090) return this._unsupported(instr, pc); // MUL/MLA family
       if ((instr & 0x0fbf0fff) === 0x010f0000) return this._mrs(instr);
       if ((instr & 0x0db0f000) === 0x0120f000) return this._msr(instr);
-      if ((instr & 0x0e000090) === 0x00000090) return this._unsupported(instr, pc); // halfword/signed transfer
+      if ((instr & 0x0e000090) === 0x00000090) return this._halfwordDataTransfer(instr);
       if ((instr & 0x0e000000) === 0x08000000) return this._blockDataTransfer(instr);
       if ((instr & 0x0c000000) === 0x04000000) return this._singleDataTransfer(instr);
       if ((instr & 0x0c000000) === 0x00000000) return this._dataProcessing(instr);
@@ -363,6 +371,36 @@
         const value = this._reg(rd);
         if (byte) this.bus.write8(addr, value);
         else this.bus.write32(addr & ~3, value);
+      }
+      if (writeBack || !pre) this._setReg(rn, finalBase);
+    }
+
+    _halfwordDataTransfer(instr) {
+      const immediateOffset = !!(instr & 0x00400000);
+      const pre = !!(instr & 0x01000000);
+      const up = !!(instr & 0x00800000);
+      const writeBack = !!(instr & 0x00200000);
+      const load = !!(instr & 0x00100000);
+      const rn = (instr >>> 16) & 0xf;
+      const rd = (instr >>> 12) & 0xf;
+      const sign = !!(instr & 0x00000040);
+      const halfword = !!(instr & 0x00000020);
+      const offset = immediateOffset ? (((instr >>> 4) & 0xf0) | (instr & 0xf)) : this._reg(instr & 0xf);
+      const base = this._reg(rn);
+      const offsetAddr = up ? (base + offset) >>> 0 : (base - offset) >>> 0;
+      const addr = pre ? offsetAddr : base;
+      const finalBase = pre ? offsetAddr : (up ? (base + offset) >>> 0 : (base - offset) >>> 0);
+
+      if (!load && sign) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
+      if (!load && !halfword) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
+
+      if (load) {
+        if (sign && halfword) this._setReg(rd, signExtend16(this.bus.read16(addr & ~1)) >>> 0);
+        else if (sign) this._setReg(rd, signExtend8(this.bus.read8(addr)) >>> 0);
+        else if (halfword) this._setReg(rd, this.bus.read16(addr & ~1));
+        else return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
+      } else {
+        this.bus.write16(addr & ~1, this._reg(rd));
       }
       if (writeBack || !pre) this._setReg(rn, finalBase);
     }

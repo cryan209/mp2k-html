@@ -181,8 +181,11 @@
 
     step() {
       if (this.cpsr & CPSR_T) {
-        this.halted = true;
-        this.reason = 'thumb-not-implemented';
+        const pc = this.regs[15] >>> 0;
+        const instr = this.bus.read16(pc);
+        this.regs[15] = (pc + 2) >>> 0;
+        this.instructions++;
+        this._execThumb(instr, pc);
         return;
       }
       const pc = this.regs[15] >>> 0;
@@ -254,6 +257,12 @@
       value >>>= 0;
       this.regs[idx] = value;
       if (idx === 15) this.regs[15] = value & ~3;
+    }
+
+    _setRegThumb(idx, value) {
+      value >>>= 0;
+      this.regs[idx] = value;
+      if (idx === 15) this.regs[15] = value & ~1;
     }
 
     _setNZ(result) {
@@ -427,6 +436,297 @@
         addr = (addr + 4) >>> 0;
       }
       if (writeBack && !writeBackFirst) this._setReg(rn, finalBase);
+    }
+
+    _execThumb(instr, pc) {
+      if ((instr & 0xf800) === 0x1800) return this._thumbAddSub(instr);
+      if ((instr & 0xe000) === 0x0000) return this._thumbShift(instr);
+      if ((instr & 0xe000) === 0x2000) return this._thumbImm(instr);
+      if ((instr & 0xfc00) === 0x4000) return this._thumbAlu(instr);
+      if ((instr & 0xfc00) === 0x4400) return this._thumbHiRegBx(instr);
+      if ((instr & 0xf800) === 0x4800) return this._thumbPcLoad(instr, pc);
+      if ((instr & 0xf200) === 0x5000) return this._thumbRegOffsetLoadStore(instr);
+      if ((instr & 0xe000) === 0x6000) return this._thumbImmLoadStore(instr);
+      if ((instr & 0xf000) === 0x8000) return this._thumbHalfwordLoadStore(instr);
+      if ((instr & 0xf000) === 0x9000) return this._thumbSpLoadStore(instr);
+      if ((instr & 0xf000) === 0xa000) return this._thumbLoadAddress(instr, pc);
+      if ((instr & 0xff00) === 0xb000) return this._thumbAddSp(instr);
+      if ((instr & 0xf600) === 0xb400) return this._thumbPushPop(instr);
+      if ((instr & 0xf000) === 0xc000) return this._thumbMultiLoadStore(instr);
+      if ((instr & 0xf000) === 0xd000) return this._thumbCondBranch(instr, pc);
+      if ((instr & 0xf800) === 0xe000) return this._thumbBranch(instr, pc);
+      if ((instr & 0xf800) === 0xf000 || (instr & 0xf800) === 0xf800) return this._thumbLongBranchLink(instr, pc);
+      this._unsupportedThumb(instr, pc);
+    }
+
+    _thumbShift(instr) {
+      const op = (instr >>> 11) & 3;
+      if (op === 3) return this._unsupportedThumb(instr, (this.regs[15] - 2) >>> 0);
+      const offset = (instr >>> 6) & 0x1f;
+      const rs = (instr >>> 3) & 7;
+      const rd = instr & 7;
+      const value = this.regs[rs] >>> 0;
+      let result = value;
+      let carry = !!(this.cpsr & CPSR_C);
+      if (op === 0) {
+        carry = offset ? !!(value & (1 << (32 - offset))) : carry;
+        result = offset ? (value << offset) >>> 0 : value;
+      } else if (op === 1) {
+        carry = offset ? !!(value & (1 << (offset - 1))) : !!(value & 0x80000000);
+        result = offset ? value >>> offset : 0;
+      } else {
+        carry = offset ? !!(value & (1 << (offset - 1))) : !!(value & 0x80000000);
+        result = offset ? (value >> offset) >>> 0 : (value & 0x80000000 ? 0xffffffff : 0);
+      }
+      this.regs[rd] = result >>> 0;
+      this._setNZ(result);
+      this.cpsr = (this.cpsr & ~CPSR_C) | (carry ? CPSR_C : 0);
+    }
+
+    _thumbAddSub(instr) {
+      const immediate = !!(instr & 0x0400);
+      const subtract = !!(instr & 0x0200);
+      const rnOrImm = (instr >>> 6) & 7;
+      const rs = (instr >>> 3) & 7;
+      const rd = instr & 7;
+      const a = this.regs[rs] >>> 0;
+      const b = immediate ? rnOrImm : (this.regs[rnOrImm] >>> 0);
+      const result = subtract ? (a - b) >>> 0 : (a + b) >>> 0;
+      this.regs[rd] = result;
+      this._setNZ(result);
+      const carry = subtract ? a >= b : result < a;
+      const overflow = subtract ? subOverflow(a, b, result) : addOverflow(a, b, result);
+      this.cpsr = (this.cpsr & ~(CPSR_C | CPSR_V)) | (carry ? CPSR_C : 0) | (overflow ? CPSR_V : 0);
+    }
+
+    _thumbImm(instr) {
+      const op = (instr >>> 11) & 3;
+      const rd = (instr >>> 8) & 7;
+      const imm = instr & 0xff;
+      const a = this.regs[rd] >>> 0;
+      let result = imm;
+      let carry = !!(this.cpsr & CPSR_C);
+      let overflow = false;
+      if (op === 1) {
+        result = (a - imm) >>> 0;
+        carry = a >= imm;
+        overflow = subOverflow(a, imm, result);
+      } else if (op === 2) {
+        result = (a + imm) >>> 0;
+        carry = result < a;
+        overflow = addOverflow(a, imm, result);
+        this.regs[rd] = result;
+      } else if (op === 3) {
+        result = (a - imm) >>> 0;
+        carry = a >= imm;
+        overflow = subOverflow(a, imm, result);
+        this.regs[rd] = result;
+      } else {
+        this.regs[rd] = result;
+      }
+      this._setNZ(result);
+      if (op !== 0) this.cpsr = (this.cpsr & ~(CPSR_C | CPSR_V)) | (carry ? CPSR_C : 0) | (overflow ? CPSR_V : 0);
+    }
+
+    _thumbAlu(instr) {
+      const op = (instr >>> 6) & 0xf;
+      const rs = (instr >>> 3) & 7;
+      const rd = instr & 7;
+      const a = this.regs[rd] >>> 0;
+      const b = this.regs[rs] >>> 0;
+      let result = a;
+      let write = true;
+      let carry = !!(this.cpsr & CPSR_C);
+      let overflow = false;
+      switch (op) {
+        case 0x0: result = a & b; break;
+        case 0x1: result = a ^ b; break;
+        case 0x2: result = b >= 32 ? 0 : a << b; carry = b ? !!(a & (1 << (32 - b))) : carry; break;
+        case 0x3: result = b >= 32 ? 0 : a >>> b; carry = b ? !!(a & (1 << (b - 1))) : carry; break;
+        case 0x4: result = b >= 32 ? (a & 0x80000000 ? 0xffffffff : 0) : (a >> b) >>> 0; carry = b ? !!(a & (1 << (b - 1))) : carry; break;
+        case 0x5: result = (a + b + (this.cpsr & CPSR_C ? 1 : 0)) >>> 0; carry = result < a; overflow = addOverflow(a, b, result); break;
+        case 0x6: result = (a - b - (this.cpsr & CPSR_C ? 0 : 1)) >>> 0; carry = a >= (b + (this.cpsr & CPSR_C ? 0 : 1)); overflow = subOverflow(a, b, result); break;
+        case 0x7: result = ror32(a, b); carry = b ? !!(result & 0x80000000) : carry; break;
+        case 0x8: result = a & b; write = false; break;
+        case 0x9: result = (-b) >>> 0; overflow = b === 0x80000000; carry = b === 0; break;
+        case 0xa: result = (a - b) >>> 0; carry = a >= b; overflow = subOverflow(a, b, result); write = false; break;
+        case 0xb: result = (a + b) >>> 0; carry = result < a; overflow = addOverflow(a, b, result); write = false; break;
+        case 0xc: result = a | b; break;
+        case 0xd: result = Math.imul(a, b) >>> 0; break;
+        case 0xe: result = a & (~b); break;
+        case 0xf: result = (~b) >>> 0; break;
+      }
+      if (write) this.regs[rd] = result >>> 0;
+      this._setNZ(result);
+      if ([0x5, 0x6, 0x9, 0xa, 0xb].includes(op)) {
+        this.cpsr = (this.cpsr & ~(CPSR_C | CPSR_V)) | (carry ? CPSR_C : 0) | (overflow ? CPSR_V : 0);
+      } else if ([0x2, 0x3, 0x4, 0x7].includes(op)) {
+        this.cpsr = (this.cpsr & ~CPSR_C) | (carry ? CPSR_C : 0);
+      }
+    }
+
+    _thumbHiRegBx(instr) {
+      const op = (instr >>> 8) & 3;
+      const h1 = (instr >>> 7) & 1;
+      const h2 = (instr >>> 6) & 1;
+      const rs = ((h2 << 3) | ((instr >>> 3) & 7)) & 0xf;
+      const rd = ((h1 << 3) | (instr & 7)) & 0xf;
+      const a = this._reg(rd);
+      const b = this._reg(rs);
+      if (op === 0) this._setRegThumb(rd, (a + b) >>> 0);
+      else if (op === 1) {
+        const result = (a - b) >>> 0;
+        this._setNZ(result);
+        this.cpsr = (this.cpsr & ~(CPSR_C | CPSR_V)) | (a >= b ? CPSR_C : 0) | (subOverflow(a, b, result) ? CPSR_V : 0);
+      } else if (op === 2) this._setRegThumb(rd, b);
+      else {
+        const target = b;
+        if (target & 1) {
+          this.cpsr |= CPSR_T;
+          this.regs[15] = target & ~1;
+        } else {
+          this.cpsr &= ~CPSR_T;
+          this.regs[15] = target & ~3;
+        }
+      }
+    }
+
+    _thumbPcLoad(instr, pc) {
+      const rd = (instr >>> 8) & 7;
+      const addr = ((pc + 4) & ~3) + ((instr & 0xff) << 2);
+      this.regs[rd] = this.bus.read32(addr) >>> 0;
+    }
+
+    _thumbRegOffsetLoadStore(instr) {
+      const load = !!(instr & 0x0800);
+      const byte = !!(instr & 0x0400);
+      const ro = (instr >>> 6) & 7;
+      const rb = (instr >>> 3) & 7;
+      const rd = instr & 7;
+      const addr = (this.regs[rb] + this.regs[ro]) >>> 0;
+      if (load) this.regs[rd] = byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3);
+      else if (byte) this.bus.write8(addr, this.regs[rd]);
+      else this.bus.write32(addr & ~3, this.regs[rd]);
+    }
+
+    _thumbImmLoadStore(instr) {
+      const load = !!(instr & 0x0800);
+      const byte = !!(instr & 0x1000);
+      const imm = (instr >>> 6) & 0x1f;
+      const rb = (instr >>> 3) & 7;
+      const rd = instr & 7;
+      const off = byte ? imm : imm << 2;
+      const addr = (this.regs[rb] + off) >>> 0;
+      if (load) this.regs[rd] = byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3);
+      else if (byte) this.bus.write8(addr, this.regs[rd]);
+      else this.bus.write32(addr & ~3, this.regs[rd]);
+    }
+
+    _thumbHalfwordLoadStore(instr) {
+      const load = !!(instr & 0x0800);
+      const imm = ((instr >>> 6) & 0x1f) << 1;
+      const rb = (instr >>> 3) & 7;
+      const rd = instr & 7;
+      const addr = (this.regs[rb] + imm) >>> 0;
+      if (load) this.regs[rd] = this.bus.read16(addr & ~1);
+      else this.bus.write16(addr & ~1, this.regs[rd]);
+    }
+
+    _thumbSpLoadStore(instr) {
+      const load = !!(instr & 0x0800);
+      const rd = (instr >>> 8) & 7;
+      const addr = (this.regs[13] + ((instr & 0xff) << 2)) >>> 0;
+      if (load) this.regs[rd] = this.bus.read32(addr & ~3);
+      else this.bus.write32(addr & ~3, this.regs[rd]);
+    }
+
+    _thumbLoadAddress(instr, pc) {
+      const sp = !!(instr & 0x0800);
+      const rd = (instr >>> 8) & 7;
+      const off = (instr & 0xff) << 2;
+      this.regs[rd] = ((sp ? this.regs[13] : ((pc + 4) & ~3)) + off) >>> 0;
+    }
+
+    _thumbAddSp(instr) {
+      const sign = !!(instr & 0x0080);
+      const off = (instr & 0x7f) << 2;
+      this.regs[13] = sign ? (this.regs[13] - off) >>> 0 : (this.regs[13] + off) >>> 0;
+    }
+
+    _thumbPushPop(instr) {
+      const pop = !!(instr & 0x0800);
+      const extra = !!(instr & 0x0100);
+      const list = instr & 0xff;
+      if (pop) {
+        for (let r = 0; r < 8; r++) {
+          if (!(list & (1 << r))) continue;
+          this.regs[r] = this.bus.read32(this.regs[13] & ~3);
+          this.regs[13] = (this.regs[13] + 4) >>> 0;
+        }
+        if (extra) {
+          this._setRegThumb(15, this.bus.read32(this.regs[13] & ~3));
+          this.regs[13] = (this.regs[13] + 4) >>> 0;
+        }
+      } else {
+        let count = this._bitCount(list) + (extra ? 1 : 0);
+        this.regs[13] = (this.regs[13] - count * 4) >>> 0;
+        let addr = this.regs[13];
+        for (let r = 0; r < 8; r++) {
+          if (!(list & (1 << r))) continue;
+          this.bus.write32(addr & ~3, this.regs[r]);
+          addr = (addr + 4) >>> 0;
+        }
+        if (extra) this.bus.write32(addr & ~3, this.regs[14]);
+      }
+    }
+
+    _thumbMultiLoadStore(instr) {
+      const load = !!(instr & 0x0800);
+      const rb = (instr >>> 8) & 7;
+      const list = instr & 0xff;
+      let addr = this.regs[rb] >>> 0;
+      for (let r = 0; r < 8; r++) {
+        if (!(list & (1 << r))) continue;
+        if (load) this.regs[r] = this.bus.read32(addr & ~3);
+        else this.bus.write32(addr & ~3, this.regs[r]);
+        addr = (addr + 4) >>> 0;
+      }
+      this.regs[rb] = addr >>> 0;
+    }
+
+    _thumbCondBranch(instr, pc) {
+      const cond = (instr >>> 8) & 0xf;
+      if (cond === 0xf) return this._unsupportedThumb(instr, pc); // SWI
+      if (cond === 0xe) return this._unsupportedThumb(instr, pc);
+      if (!this._conditionPassed(cond)) return;
+      const imm = instr & 0xff;
+      const off = ((imm & 0x80 ? imm | 0xffffff00 : imm) << 1) >> 0;
+      this.regs[15] = (pc + 4 + off) >>> 0;
+    }
+
+    _thumbBranch(instr, pc) {
+      const imm = instr & 0x7ff;
+      const off = ((imm & 0x400 ? imm | 0xfffff800 : imm) << 1) >> 0;
+      this.regs[15] = (pc + 4 + off) >>> 0;
+    }
+
+    _thumbLongBranchLink(instr, pc) {
+      const off = instr & 0x7ff;
+      if ((instr & 0xf800) === 0xf000) {
+        const signed = off & 0x400 ? off | 0xfffff800 : off;
+        this.regs[14] = (pc + 4 + (signed << 12)) >>> 0;
+      } else {
+        const target = (this.regs[14] + (off << 1)) >>> 0;
+        this.regs[14] = ((pc + 2) | 1) >>> 0;
+        this.regs[15] = target & ~1;
+      }
+    }
+
+    _unsupportedThumb(instr, pc) {
+      const key = `thumb:0x${(instr >>> 8).toString(16).padStart(2, '0')}`;
+      this.unsupported.set(key, (this.unsupported.get(key) || 0) + 1);
+      this.halted = true;
+      this.reason = `unsupported THUMB 0x${instr.toString(16).padStart(4, '0')} at ${tools.hex(pc)}`;
     }
 
     _bitCount(v) {

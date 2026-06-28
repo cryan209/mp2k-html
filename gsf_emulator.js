@@ -868,7 +868,11 @@
       } else if (op === 2) this._setRegThumb(rd, b);
       else {
         const target = b;
-        this._recordBranch('thumb-bx', (this.regs[15] - 2) >>> 0, target, { rs });
+        this._recordBranch('thumb-bx', (this.regs[15] - 2) >>> 0, target, {
+          rs,
+          rsName: `r${rs}`,
+          rsValueHex: tools.hex(this._reg(rs)),
+        });
         if (target & 1) {
           this.cpsr |= CPSR_T;
           this.regs[15] = target & ~1;
@@ -1306,6 +1310,7 @@
       const faultSourceBranch = lastBranch?.kind === 'fetch-fault'
         ? (lastBranch.source || cpu.branches?.slice(0, -1).reverse().find(branch => branch.kind !== 'fetch-fault') || null)
         : null;
+      const branchTrail = (cpu.branches || []).filter(branch => branch.kind !== 'fetch-fault').slice(-6);
       const soundWrites = events.filter(ev => ev.kind === 'sound');
       const timerWrites = events.filter(ev => ev.kind === 'timer');
       const dmaWrites = events.filter(ev => ev.kind === 'dma');
@@ -1329,6 +1334,7 @@
           hotPcHits: cpu.pcHotspots?.[0]?.hits || 0,
           lastBranch,
           faultSourceBranch,
+          branchTrail,
         },
         io: {
           totalWrites: events.length,

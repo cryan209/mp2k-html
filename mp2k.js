@@ -5238,8 +5238,12 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const branch = run?.lastBranch;
       const sourceBranch = run?.faultSourceBranch;
       const branchSummary = branch ? ` via:${branch.kind}@${branch.pcHex}->${branch.targetHex || branch.pcHex}` : '';
-      const sourceSummary = sourceBranch ? ` from:${sourceBranch.kind}@${sourceBranch.pcHex}->${sourceBranch.targetHex}` : '';
-      const pcSummary = run ? ` | +${run.ranInstructions} pc:${run.pcHex}${run.hotPcHex ? ` hot:${run.hotPcHex}/${run.hotPcHits}` : ''}${branchSummary}${sourceSummary}` : '';
+      const sourceReg = sourceBranch?.rsName ? ` ${sourceBranch.rsName}=${sourceBranch.rsValueHex}` : '';
+      const sourceSummary = sourceBranch ? ` from:${sourceBranch.kind}@${sourceBranch.pcHex}->${sourceBranch.targetHex}${sourceReg}` : '';
+      const trailSummary = run?.branchTrail?.length
+        ? ` trail:${run.branchTrail.map(b => `${b.kind}@${b.pcHex}->${b.targetHex}${b.rsName ? `(${b.rsName}=${b.rsValueHex})` : ''}`).join(',')}`
+        : '';
+      const pcSummary = run ? ` | +${run.ranInstructions} pc:${run.pcHex}${run.hotPcHex ? ` hot:${run.hotPcHex}/${run.hotPcHits}` : ''}${branchSummary}${sourceSummary}${trailSummary}` : '';
       setStatus(cpu
         ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${pcSummary}`
         : 'GSF CPU diagnostics unavailable.');

@@ -211,6 +211,8 @@
       this.unsupported = new Map();
       this.psrWrites = [];
       this.swiCalls = [];
+      this.pcHits = new Map();
+      this.recentPcs = [];
       this.regs[15] = entryAddr >>> 0;
       if (entryAddr & 1) {
         this.regs[15] = entryAddr & ~1;
@@ -227,6 +229,7 @@
     step() {
       if (this.cpsr & CPSR_T) {
         const pc = this.regs[15] >>> 0;
+        this._tracePc(pc);
         const instr = this.bus.read16(pc);
         this.regs[15] = (pc + 2) >>> 0;
         this.instructions++;
@@ -234,6 +237,7 @@
         return;
       }
       const pc = this.regs[15] >>> 0;
+      this._tracePc(pc);
       const instr = this.bus.read32(pc);
       this.regs[15] = (pc + 4) >>> 0;
       this.instructions++;
@@ -250,11 +254,30 @@
         spsr: this.spsr >>> 0,
         thumb: !!(this.cpsr & CPSR_T),
         pc: this.regs[15] >>> 0,
+        pcHex: tools.hex(this.regs[15]),
         regs: Array.from(this.regs, v => v >>> 0),
+        recentPcs: this.recentPcs.slice(-32).map(pc => tools.hex(pc)),
+        pcHotspots: [...this.pcHits.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 12)
+          .map(([pc, hits]) => ({ pc, pcHex: tools.hex(pc), hits })),
         psrWrites: this.psrWrites.slice(-32),
         swiCalls: this.swiCalls.slice(-32),
         unsupported: Object.fromEntries([...this.unsupported.entries()].slice(0, 24)),
       };
+    }
+
+    _tracePc(pc) {
+      pc >>>= 0;
+      this.recentPcs.push(pc);
+      if (this.recentPcs.length > 128) this.recentPcs.shift();
+      this.pcHits.set(pc, (this.pcHits.get(pc) || 0) + 1);
+      if (this.pcHits.size > 4096 && (this.instructions & 0xfff) === 0) this._trimPcHits();
+    }
+
+    _trimPcHits() {
+      const keep = [...this.pcHits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2048);
+      this.pcHits = new Map(keep);
     }
 
     _conditionPassed(cond) {
@@ -1056,7 +1079,7 @@
 
     async play() {
       if (!this.cpu) throw new Error('No GSF CPU image loaded.');
-      this.runDiagnostics();
+      this.runDiagnostics(220000);
       return this.diagnostics;
     }
 
@@ -1075,7 +1098,10 @@
 
     runDiagnostics(maxInstructions = 20000) {
       if (!this.cpu) this._initCpu();
+      const startInstructions = this.cpu.instructions;
+      const startEvents = this.bus.events.length;
       const cpu = this.cpu.run(maxInstructions);
+      const ranInstructions = cpu.instructions - startInstructions;
       const events = this.bus.events;
       const soundWrites = events.filter(ev => ev.kind === 'sound');
       const timerWrites = events.filter(ev => ev.kind === 'timer');
@@ -1091,6 +1117,14 @@
           sound: soundWrites.length > 0,
         },
         cpu,
+        run: {
+          requestedInstructions: maxInstructions,
+          ranInstructions,
+          newIoWrites: Math.max(0, events.length - startEvents),
+          pcHex: cpu.pcHex,
+          hotPcHex: cpu.pcHotspots?.[0]?.pcHex || null,
+          hotPcHits: cpu.pcHotspots?.[0]?.hits || 0,
+        },
         io: {
           totalWrites: events.length,
           soundWrites: soundWrites.length,

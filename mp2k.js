@@ -5229,11 +5229,13 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const diagnostics = await standardGsfEngine?.play();
       const cpu = diagnostics?.cpu;
       const audio = diagnostics?.audio;
+      const run = diagnostics?.run;
       const audioSummary = audio
         ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} fifoA:${audio.sound.directSoundA.fifoWrites} fifoB:${audio.sound.directSoundB.fifoWrites}`
         : '';
+      const pcSummary = run ? ` | +${run.ranInstructions} pc:${run.pcHex}${run.hotPcHex ? ` hot:${run.hotPcHex}/${run.hotPcHits}` : ''}` : '';
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${pcSummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

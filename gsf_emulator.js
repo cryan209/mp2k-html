@@ -56,6 +56,7 @@
   const IO_DMA_END = 0x040000e0;
   const GBA_CPU_HZ = 16777216;
   const GBA_CYCLES_PER_FRAME = 280896;
+  const GBA_SYSTEM_STACK = 0x03007f00;
   const TIMER_PRESCALERS = [1, 64, 256, 1024];
   const IRQ_VBLANK = 0x0001;
 
@@ -332,6 +333,7 @@
         kind: 'init',
         pcHex: null,
       }));
+      this._writeReg(13, GBA_SYSTEM_STACK, 'init-sp', null);
       this.regs[15] = entryAddr >>> 0;
       this._writeReg(15, entryAddr, 'entry', entryAddr);
       if (entryAddr & 1) {
@@ -970,7 +972,7 @@
     _thumbAddSp(instr) {
       const sign = !!(instr & 0x0080);
       const off = (instr & 0x7f) << 2;
-      this.regs[13] = sign ? (this.regs[13] - off) >>> 0 : (this.regs[13] + off) >>> 0;
+      this._writeReg(13, sign ? (this.regs[13] - off) >>> 0 : (this.regs[13] + off) >>> 0, 'thumb-add-sp', (this.regs[15] - 2) >>> 0, { sign, off });
     }
 
     _thumbPushPop(instr) {
@@ -981,17 +983,17 @@
         for (let r = 0; r < 8; r++) {
           if (!(list & (1 << r))) continue;
           this._writeReg(r, this.bus.read32(this.regs[13] & ~3), 'thumb-pop', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(this.regs[13] & ~3) });
-          this.regs[13] = (this.regs[13] + 4) >>> 0;
+          this._writeReg(13, (this.regs[13] + 4) >>> 0, 'thumb-pop-sp', (this.regs[15] - 2) >>> 0);
         }
         if (extra) {
           const target = this.bus.read32(this.regs[13] & ~3);
           this._recordBranch('thumb-pop-pc', (this.regs[15] - 2) >>> 0, target);
           this._setRegThumb(15, target);
-          this.regs[13] = (this.regs[13] + 4) >>> 0;
+          this._writeReg(13, (this.regs[13] + 4) >>> 0, 'thumb-pop-sp', (this.regs[15] - 2) >>> 0);
         }
       } else {
         let count = this._bitCount(list) + (extra ? 1 : 0);
-        this.regs[13] = (this.regs[13] - count * 4) >>> 0;
+        this._writeReg(13, (this.regs[13] - count * 4) >>> 0, 'thumb-push-sp', (this.regs[15] - 2) >>> 0, { count });
         let addr = this.regs[13];
         for (let r = 0; r < 8; r++) {
           if (!(list & (1 << r))) continue;

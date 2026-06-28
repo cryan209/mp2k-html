@@ -166,6 +166,7 @@
       this.instructions = 0;
       this.unsupported = new Map();
       this.psrWrites = [];
+      this.swiCalls = [];
       this.regs[15] = entryAddr >>> 0;
       if (entryAddr & 1) {
         this.regs[15] = entryAddr & ~1;
@@ -207,6 +208,7 @@
         pc: this.regs[15] >>> 0,
         regs: Array.from(this.regs, v => v >>> 0),
         psrWrites: this.psrWrites.slice(-32),
+        swiCalls: this.swiCalls.slice(-32),
         unsupported: Object.fromEntries([...this.unsupported.entries()].slice(0, 24)),
       };
     }
@@ -696,12 +698,85 @@
 
     _thumbCondBranch(instr, pc) {
       const cond = (instr >>> 8) & 0xf;
-      if (cond === 0xf) return this._unsupportedThumb(instr, pc); // SWI
+      if (cond === 0xf) return this._swi(instr & 0xff, pc, 'thumb');
       if (cond === 0xe) return this._unsupportedThumb(instr, pc);
       if (!this._conditionPassed(cond)) return;
       const imm = instr & 0xff;
       const off = ((imm & 0x80 ? imm | 0xffffff00 : imm) << 1) >> 0;
       this.regs[15] = (pc + 4 + off) >>> 0;
+    }
+
+    _swi(num, pc, state) {
+      const call = {
+        num,
+        name: this._swiName(num),
+        pc,
+        state,
+        r0: this.regs[0] >>> 0,
+        r1: this.regs[1] >>> 0,
+        r2: this.regs[2] >>> 0,
+      };
+      try {
+        if (num === 0x0b) call.result = this._biosCpuSet();
+        else call.result = 'stubbed';
+      } catch (err) {
+        call.result = 'error';
+        call.error = err.message;
+        this.halted = true;
+        this.reason = `SWI ${tools.hex(num, 2)} ${call.name} failed at ${tools.hex(pc)}: ${err.message}`;
+      }
+      this.swiCalls.push(call);
+      if (this.swiCalls.length > 128) this.swiCalls.shift();
+    }
+
+    _swiName(num) {
+      const names = {
+        0x00: 'SoftReset',
+        0x01: 'RegisterRamReset',
+        0x02: 'Halt',
+        0x03: 'Stop',
+        0x04: 'IntrWait',
+        0x05: 'VBlankIntrWait',
+        0x06: 'Div',
+        0x07: 'DivArm',
+        0x08: 'Sqrt',
+        0x09: 'ArcTan',
+        0x0a: 'ArcTan2',
+        0x0b: 'CpuSet',
+        0x0c: 'CpuFastSet',
+        0x0e: 'BgAffineSet',
+        0x0f: 'ObjAffineSet',
+        0x10: 'BitUnPack',
+        0x11: 'LZ77UnCompWram',
+        0x12: 'LZ77UnCompVram',
+        0x13: 'HuffUnComp',
+        0x14: 'RLUnCompWram',
+        0x15: 'RLUnCompVram',
+        0x16: 'Diff8bitUnFilterWram',
+        0x17: 'Diff8bitUnFilterVram',
+        0x18: 'Diff16bitUnFilter',
+        0x19: 'SoundBias',
+        0x1f: 'MidiKey2Freq',
+      };
+      return names[num] || `SWI_${tools.hex(num, 2)}`;
+    }
+
+    _biosCpuSet() {
+      const src = this.regs[0] >>> 0;
+      const dst = this.regs[1] >>> 0;
+      const mode = this.regs[2] >>> 0;
+      const count = mode & 0x001fffff;
+      const fill = !!(mode & 0x01000000);
+      const word = !!(mode & 0x04000000);
+      const bytes = word ? 4 : 2;
+      if (count > 0x100000) throw new Error(`unreasonable CpuSet count ${count}`);
+      const fillValue = word ? this.bus.read32(src & ~3) : this.bus.read16(src & ~1);
+      for (let i = 0; i < count; i++) {
+        const value = fill ? fillValue : (word ? this.bus.read32((src + i * bytes) & ~3) : this.bus.read16((src + i * bytes) & ~1));
+        if (word) this.bus.write32((dst + i * bytes) & ~3, value);
+        else this.bus.write16((dst + i * bytes) & ~1, value);
+      }
+      return `${fill ? 'fill' : 'copy'} ${count} ${word ? 'words' : 'halfwords'}`;
     }
 
     _thumbBranch(instr, pc) {
@@ -903,6 +978,7 @@
       const soundWrites = events.filter(ev => ev.kind === 'sound');
       const timerWrites = events.filter(ev => ev.kind === 'timer');
       const dmaWrites = events.filter(ev => ev.kind === 'dma');
+      const swiCalls = this.cpu.swiCalls || [];
       this.diagnostics = {
         status: cpu.halted ? 'cpu-halted' : 'cpu-ran',
         hooks: {
@@ -925,6 +1001,16 @@
           })),
           unmappedReads: this.bus.unmappedReads,
           unmappedWrites: this.bus.unmappedWrites,
+        },
+        bios: {
+          swiCalls: swiCalls.length,
+          recent: swiCalls.slice(-32).map(call => ({
+            ...call,
+            pcHex: tools.hex(call.pc),
+            r0Hex: tools.hex(call.r0),
+            r1Hex: tools.hex(call.r1),
+            r2Hex: tools.hex(call.r2),
+          })),
         },
         patchPoints: [],
         notes: [

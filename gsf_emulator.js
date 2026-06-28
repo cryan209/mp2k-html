@@ -145,6 +145,11 @@
       return null;
     }
 
+    executableRegion(addr) {
+      const r = this.region(addr);
+      return r && ['ewram', 'iwram', 'rom'].includes(r.id) && r.off < r.data.length ? r : null;
+    }
+
     read8(addr) {
       const r = this.region(addr);
       if (!r || r.off >= r.data.length) {
@@ -213,6 +218,7 @@
       this.swiCalls = [];
       this.pcHits = new Map();
       this.recentPcs = [];
+      this.branches = [];
       this.regs[15] = entryAddr >>> 0;
       if (entryAddr & 1) {
         this.regs[15] = entryAddr & ~1;
@@ -229,6 +235,7 @@
     step() {
       if (this.cpsr & CPSR_T) {
         const pc = this.regs[15] >>> 0;
+        if (!this._canFetch(pc, 2)) return;
         this._tracePc(pc);
         const instr = this.bus.read16(pc);
         this.regs[15] = (pc + 2) >>> 0;
@@ -237,6 +244,7 @@
         return;
       }
       const pc = this.regs[15] >>> 0;
+      if (!this._canFetch(pc, 4)) return;
       this._tracePc(pc);
       const instr = this.bus.read32(pc);
       this.regs[15] = (pc + 4) >>> 0;
@@ -261,10 +269,28 @@
           .sort((a, b) => b[1] - a[1])
           .slice(0, 12)
           .map(([pc, hits]) => ({ pc, pcHex: tools.hex(pc), hits })),
+        branches: this.branches.slice(-32),
         psrWrites: this.psrWrites.slice(-32),
         swiCalls: this.swiCalls.slice(-32),
         unsupported: Object.fromEntries([...this.unsupported.entries()].slice(0, 24)),
       };
+    }
+
+    _canFetch(pc, bytes) {
+      const r = this.bus.executableRegion(pc);
+      if (r && r.off + bytes <= r.data.length) return true;
+      this.halted = true;
+      this.reason = `pc-out-of-range fetch ${bytes * 8}-bit at ${tools.hex(pc)}`;
+      this.branches.push({
+        kind: 'fetch-fault',
+        pc: pc >>> 0,
+        pcHex: tools.hex(pc),
+        thumb: !!(this.cpsr & CPSR_T),
+        lrHex: tools.hex(this.regs[14]),
+        spHex: tools.hex(this.regs[13]),
+      });
+      if (this.branches.length > 128) this.branches.shift();
+      return false;
     }
 
     _tracePc(pc) {
@@ -278,6 +304,21 @@
     _trimPcHits() {
       const keep = [...this.pcHits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2048);
       this.pcHits = new Map(keep);
+    }
+
+    _recordBranch(kind, pc, target, detail = {}) {
+      this.branches.push({
+        kind,
+        pc: pc >>> 0,
+        pcHex: tools.hex(pc),
+        target: target >>> 0,
+        targetHex: tools.hex(target),
+        thumb: !!(this.cpsr & CPSR_T),
+        lrHex: tools.hex(this.regs[14]),
+        spHex: tools.hex(this.regs[13]),
+        ...detail,
+      });
+      if (this.branches.length > 128) this.branches.shift();
     }
 
     _conditionPassed(cond) {
@@ -325,13 +366,19 @@
     _setReg(idx, value) {
       value >>>= 0;
       this.regs[idx] = value;
-      if (idx === 15) this.regs[15] = value & ~3;
+      if (idx === 15) {
+        this._recordBranch('set-pc', (this.regs[15] - 4) >>> 0, value);
+        this.regs[15] = value & ~3;
+      }
     }
 
     _setRegThumb(idx, value) {
       value >>>= 0;
       this.regs[idx] = value;
-      if (idx === 15) this.regs[15] = value & ~1;
+      if (idx === 15) {
+        this._recordBranch('set-pc-thumb', (this.regs[15] - 2) >>> 0, value);
+        this.regs[15] = value & ~1;
+      }
     }
 
     _setNZ(result) {
@@ -708,6 +755,7 @@
       } else if (op === 2) this._setRegThumb(rd, b);
       else {
         const target = b;
+        this._recordBranch('thumb-bx', (this.regs[15] - 2) >>> 0, target, { rs });
         if (target & 1) {
           this.cpsr |= CPSR_T;
           this.regs[15] = target & ~1;
@@ -791,7 +839,9 @@
           this.regs[13] = (this.regs[13] + 4) >>> 0;
         }
         if (extra) {
-          this._setRegThumb(15, this.bus.read32(this.regs[13] & ~3));
+          const target = this.bus.read32(this.regs[13] & ~3);
+          this._recordBranch('thumb-pop-pc', (this.regs[15] - 2) >>> 0, target);
+          this._setRegThumb(15, target);
           this.regs[13] = (this.regs[13] + 4) >>> 0;
         }
       } else {
@@ -828,7 +878,9 @@
       if (!this._conditionPassed(cond)) return;
       const imm = instr & 0xff;
       const off = ((imm & 0x80 ? imm | 0xffffff00 : imm) << 1) >> 0;
-      this.regs[15] = (pc + 4 + off) >>> 0;
+      const target = (pc + 4 + off) >>> 0;
+      this._recordBranch('thumb-cond-branch', pc, target, { cond });
+      this.regs[15] = target;
     }
 
     _swi(num, pc, state) {
@@ -907,7 +959,9 @@
     _thumbBranch(instr, pc) {
       const imm = instr & 0x7ff;
       const off = ((imm & 0x400 ? imm | 0xfffff800 : imm) << 1) >> 0;
-      this.regs[15] = (pc + 4 + off) >>> 0;
+      const target = (pc + 4 + off) >>> 0;
+      this._recordBranch('thumb-branch', pc, target);
+      this.regs[15] = target;
     }
 
     _thumbLongBranchLink(instr, pc) {
@@ -918,6 +972,7 @@
       } else {
         const target = (this.regs[14] + (off << 1)) >>> 0;
         this.regs[14] = ((pc + 2) | 1) >>> 0;
+        this._recordBranch('thumb-bl', pc, target);
         this.regs[15] = target & ~1;
       }
     }
@@ -943,11 +998,14 @@
       const link = !!(instr & 0x01000000);
       const offset = (signExtend24(instr & 0x00ffffff) << 2) >> 0;
       if (link) this.regs[14] = (pc + 4) >>> 0;
-      this.regs[15] = (pc + 8 + offset) >>> 0;
+      const target = (pc + 8 + offset) >>> 0;
+      this._recordBranch(link ? 'arm-bl' : 'arm-b', pc, target);
+      this.regs[15] = target;
     }
 
     _bx(instr) {
       const target = this._reg(instr & 0xf);
+      this._recordBranch('arm-bx', (this.regs[15] - 4) >>> 0, target, { rm: instr & 0xf });
       if (target & 1) {
         this.cpsr |= CPSR_T;
         this.regs[15] = target & ~1;
@@ -1103,6 +1161,7 @@
       const cpu = this.cpu.run(maxInstructions);
       const ranInstructions = cpu.instructions - startInstructions;
       const events = this.bus.events;
+      const lastBranch = cpu.branches?.slice(-1)[0] || null;
       const soundWrites = events.filter(ev => ev.kind === 'sound');
       const timerWrites = events.filter(ev => ev.kind === 'timer');
       const dmaWrites = events.filter(ev => ev.kind === 'dma');
@@ -1124,6 +1183,7 @@
           pcHex: cpu.pcHex,
           hotPcHex: cpu.pcHotspots?.[0]?.pcHex || null,
           hotPcHits: cpu.pcHotspots?.[0]?.hits || 0,
+          lastBranch,
         },
         io: {
           totalWrites: events.length,

@@ -7,6 +7,9 @@
 
 (function () {
   const GSF_MAGIC = [0x50, 0x53, 0x46, 0x22]; // "PSF", version 0x22
+  const SEVEN_ZIP_MAGIC = [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c];
+  const SEVEN_ZIP_MODULE_URL = 'https://cdn.jsdelivr.net/npm/7z-wasm@1.2.0/7zz.es6.js';
+  const SEVEN_ZIP_WASM_URL = 'https://cdn.jsdelivr.net/npm/7z-wasm@1.2.0/7zz.wasm';
   const GBA_ROM_BASE = 0x08000000;
   const GBA_ROM_LIMIT = 32 * 1024 * 1024;
   const GBA_REGIONS = [
@@ -52,6 +55,12 @@
     if (!buf || buf.byteLength < 4) return false;
     const u8 = new Uint8Array(buf, 0, 4);
     return u8[0] === 0x50 && u8[1] === 0x4b && u8[2] === 0x03 && u8[3] === 0x04;
+  }
+
+  function isSevenZip(buf) {
+    if (!buf || buf.byteLength < SEVEN_ZIP_MAGIC.length) return false;
+    const u8 = new Uint8Array(buf, 0, SEVEN_ZIP_MAGIC.length);
+    return SEVEN_ZIP_MAGIC.every((v, i) => u8[i] === v);
   }
 
   async function inflate(u8compressed, format = 'deflate') {
@@ -281,6 +290,66 @@
     return files;
   }
 
+  async function loadSevenZipModule() {
+    const output = [];
+    const errors = [];
+    const mod = await import(SEVEN_ZIP_MODULE_URL);
+    const sevenZip = await mod.default({
+      locateFile: name => name === '7zz.wasm' ? SEVEN_ZIP_WASM_URL : name,
+      print: str => output.push(str),
+      printErr: str => errors.push(str),
+    });
+    sevenZip.output = output;
+    sevenZip.errors = errors;
+    return sevenZip;
+  }
+
+  function readSevenZipTree(FS, dir = '/out', prefix = '') {
+    const files = {};
+    for (const name of FS.readdir(dir)) {
+      if (name === '.' || name === '..') continue;
+      const fullPath = `${dir}/${name}`;
+      const relPath = prefix ? `${prefix}/${name}` : name;
+      const stat = FS.stat(fullPath);
+      if (FS.isDir(stat.mode)) {
+        Object.assign(files, readSevenZipTree(FS, fullPath, relPath));
+      } else if (FS.isFile(stat.mode)) {
+        const data = FS.readFile(fullPath, { encoding: 'binary' });
+        files[relPath.split('/').pop()] = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+      }
+    }
+    return files;
+  }
+
+  async function sevenZipFiles(buf) {
+    if (!isSevenZip(buf)) return null;
+    const sevenZip = await loadSevenZipModule();
+    const FS = sevenZip.FS;
+    try { FS.mkdir('/out'); } catch (_) {}
+    FS.writeFile('/input.7z', new Uint8Array(buf));
+    let result = 0;
+    try {
+      result = sevenZip.callMain(['x', '/input.7z', '-o/out', '-y', '-bso0', '-bsp0']);
+    } catch (err) {
+      if (err?.name === 'ExitStatus' && err.status === 0) {
+        result = 0;
+      } else {
+        const detail = sevenZip.errors?.join('\n') || err?.message || String(err);
+        throw new Error(`7z extraction failed: ${detail}`);
+      }
+    }
+    if (typeof result === 'number' && result !== 0) throw new Error(`7z extraction failed with exit code ${result}`);
+    const files = readSevenZipTree(FS);
+    if (!Object.keys(files).length) throw new Error('7z archive did not contain any supported files');
+    return files;
+  }
+
+  async function archiveFiles(buf) {
+    if (isZip(buf)) return zipFiles(buf);
+    if (isSevenZip(buf)) return sevenZipFiles(buf);
+    return null;
+  }
+
   class StandardGsfEngine {
     constructor() {
       this.id = 'gsf-lle';
@@ -307,7 +376,7 @@
     async loadBuffer(buf, source = {}) {
       this.reset();
       try {
-        if (isZip(buf)) return await this._loadZip(buf, source);
+        if (isZip(buf) || isSevenZip(buf)) return await this._loadArchive(buf, source);
         if (!isValid(buf)) return null;
         const decoded = await decodeProgram(buf, {
           kind: /\.minigsf$/i.test(source.name || '') ? 'minigsf' : 'gsf',
@@ -338,11 +407,11 @@
       }
     }
 
-    async _loadZip(buf, source = {}) {
-      const files = await zipFiles(buf);
+    async _loadArchive(buf, source = {}) {
+      const files = await archiveFiles(buf);
       if (!files) return null;
       const libKey = Object.keys(files).find(k => /\.gsflib$/i.test(k));
-      if (!libKey) throw new Error('No .gsflib found in ZIP');
+      if (!libKey) throw new Error('No .gsflib found in archive');
       const libDecoded = await decodeProgram(files[libKey], { kind: 'gsflib', name: libKey });
       const libInfo = await programInfo(files[libKey]);
       this.library = {
@@ -369,8 +438,8 @@
         });
       }
       this.source = {
-        kind: 'gsf-zip',
-        name: source.name || 'Dropped ZIP',
+        kind: isSevenZip(buf) ? 'gsf-7z' : 'gsf-zip',
+        name: source.name || (isSevenZip(buf) ? 'Dropped 7z' : 'Dropped ZIP'),
         library: libKey,
         tags: this.library.tags,
         minigsfCount: miniKeys.length,
@@ -456,6 +525,7 @@
   window.GsfTools = {
     isValid,
     isZip,
+    isSevenZip,
     inflate,
     tags,
     tagSummary,
@@ -468,6 +538,8 @@
     romImage,
     miniPatch,
     zipFiles,
+    sevenZipFiles,
+    archiveFiles,
   };
   window.StandardGsfEngine = StandardGsfEngine;
 })();

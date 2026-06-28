@@ -1,6 +1,6 @@
 # GBA MP2k Music Player
 
-Standalone HTML MP2k music player for inspecting and playing music from compatible GBA ROMs and GSF dumps. It auto-detects MP2k song tables in full ROMs and can also load `.gsf`, `.gsflib`, `.minigsf`, and ZIP archives containing GSF dumps.
+Standalone HTML MP2k music player for inspecting and playing music from compatible GBA ROMs and GSF dumps. It auto-detects MP2k song tables in full ROMs and can also load `.gsf`, `.gsflib`, `.minigsf`, ZIP, and 7z archives containing GSF dumps.
 
 ## Run
 
@@ -16,13 +16,13 @@ Then open:
 http://localhost:8000/
 ```
 
-You can drag and drop a `.gba`, `.bin`, `.gsf`, `.gsflib`, `.minigsf`, or `.zip` file onto the page.
+You can drag and drop a `.gba`, `.bin`, `.gsf`, `.gsflib`, `.minigsf`, `.zip`, or `.7z` file onto the page.
 
 No install step is required; the npm script only wraps Python's built-in static file server.
 
 ## GSF Decoder
 
-`gsf.js` includes a minimum viable GSF decoder. It parses the PSF/GSF container header, decompresses the executable payload, decodes the GBA entry/load/data header, maps loads to GBA memory regions, materializes ROM-backed payloads, and applies minigsf patches from ZIP/gsflib sets into a decode report.
+`gsf.js` includes a minimum viable GSF decoder. It parses the PSF/GSF container header, decompresses the executable payload, decodes the GBA entry/load/data header, maps loads to GBA memory regions, materializes ROM-backed payloads, and applies minigsf patches from ZIP/7z/gsflib sets into a decode report.
 
 Playback through the standard GSF LLE path is not emulated yet. The decoder state is exposed for inspection with:
 

@@ -5890,21 +5890,24 @@ async function parseZip(buf) {
   return files;
 }
 
-async function loadGsfZip(buf, source = {}) {
-  const files = await parseZip(buf);
+async function loadGsfArchive(buf, source = {}) {
+  const files = window.GsfTools?.archiveFiles
+    ? await window.GsfTools.archiveFiles(buf)
+    : await parseZip(buf);
   if (!files) return false;
 
   const libKey = Object.keys(files).find(k => /\.gsflib$/i.test(k));
-  if (!libKey) throw new Error('No .gsflib found in ZIP');
+  if (!libKey) throw new Error('No .gsflib found in archive');
   setStatus('Decompressing gsflib…');
   const libTags = parseGsfTags(files[libKey]);
   const baseRom = await parseGsfBuffer(files[libKey]);
   if (!baseRom) throw new Error('Could not parse gsflib');
 
   const miniKeys = Object.keys(files).filter(k => /\.minigsf$/i.test(k)).sort();
+  const archiveKind = window.GsfTools?.isSevenZip?.(buf) ? 'GSF 7z' : 'GSF ZIP';
   await player.loadROM(baseRom, {
-    kind: 'GSF ZIP',
-    name: source.name || 'Dropped ZIP',
+    kind: archiveKind,
+    name: source.name || `Dropped ${archiveKind}`,
     gsfLibrary: libKey,
     gsfTags: libTags,
     minigsfCount: miniKeys.length,
@@ -6015,20 +6018,21 @@ function updateInfoText() {
 
 async function initWithBuffer(buf, source = {}) {
   try {
-    const u8 = new Uint8Array(buf, 0, 4);
-    const isZip = u8[0] === 0x50 && u8[1] === 0x4b && u8[2] === 0x03 && u8[3] === 0x04;
+    const isZip = window.GsfTools?.isZip?.(buf) || false;
+    const isSevenZip = window.GsfTools?.isSevenZip?.(buf) || false;
+    const isArchive = isZip || isSevenZip;
     const isGsf = window.GsfTools?.isValid?.(buf) || false;
     if (standardGsfEngine) {
-      if (isZip || isGsf) {
+      if (isArchive || isGsf) {
         await standardGsfEngine.loadBuffer(buf, source);
       } else {
         standardGsfEngine.reset();
       }
     }
     let count;
-    if (isZip) {
-      setStatus('Reading ZIP…');
-      count = await loadGsfZip(buf, source);
+    if (isArchive) {
+      setStatus(isSevenZip ? 'Reading 7z…' : 'Reading ZIP…');
+      count = await loadGsfArchive(buf, source);
     } else {
       setStatus('Parsing ROM…');
       const gsfTags = parseGsfTags(buf);
@@ -6106,7 +6110,7 @@ fetch('baserom.gba')
   .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
   .then(buf => initWithBuffer(buf, { name: 'baserom.gba' }))
   .catch(() => {
-    setStatus('Drop a GBA ROM, GSF dump, minigsf, gsflib, or ZIP to begin');
+    setStatus('Drop a GBA ROM, GSF dump, minigsf, gsflib, ZIP, or 7z to begin');
   });
 
 // Drag-and-drop

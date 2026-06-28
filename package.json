@@ -1,0 +1,9 @@
+{
+  "name": "gba-mp2k-music-player",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Standalone HTML MP2k music player for GBA ROMs and GSF dumps.",
+  "scripts": {
+    "start": "python3 -m http.server 8000 --directory .."
+  }
+}

@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GBA MP2k Music Player</title>
+<style>
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:#111; display:flex; flex-direction:column; align-items:center; padding:20px; font-family:'Menlo','Monaco',monospace; color:#94a3b8; min-height:100vh; }
+h1 { font-size:13px; color:#6366f1; margin-bottom:12px; letter-spacing:2px; text-transform:uppercase; }
+
+.player-panel {
+  background:#0a0a14;
+  border:1px solid #1e2235;
+  border-radius:6px;
+  padding:12px;
+  width:min(460px, calc(100vw - 32px));
+}
+
+.song-row { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+#songSelect { flex:1; background:#0d1117; border:1px solid #1e2235; color:#94a3b8; border-radius:4px; padding:4px 8px; font-family:inherit; font-size:11px; height:28px; }
+.btn-play { width:28px; height:28px; background:#16a34a; border:none; border-radius:50%; cursor:pointer; font-size:13px; color:#fff; display:flex; align-items:center; justify-content:center; }
+.btn-play:disabled { background:#374151; cursor:default; }
+.btn-stop { width:28px; height:28px; background:#374151; border:none; border-radius:4px; cursor:pointer; font-size:11px; color:#94a3b8; }
+.btn-stop:hover { background:#4b5563; }
+
+#status { font-size:10px; color:#4b5563; min-height:14px; margin-bottom:8px; }
+
+.poly-row { display:flex; align-items:center; gap:8px; margin-top:6px; }
+.poly-bar-wrap { position:relative; flex:1; height:5px; background:#1a1e2e; border-radius:3px; }
+.poly-bar-fill { height:100%; background:#6366f1; border-radius:3px; width:0; transition:width 60ms linear; }
+.poly-bar-peak { position:absolute; top:-2px; width:2px; height:9px; background:#f59e0b; border-radius:1px; left:0; }
+.poly-label { font-size:9px; color:#4b5563; white-space:nowrap; min-width:52px; text-align:right; }
+.tracks-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:3px; margin-top:6px; }
+.track-cell { --track-color:#6366f1; --track-color-soft:rgba(99,102,241,.18); background:#0d1117; border:1px solid #1a1e2e; border-radius:3px; padding:4px; min-height:58px; position:relative; }
+.track-cell.active { border-color:var(--track-color); background:linear-gradient(180deg, var(--track-color-soft), #0d1117 62%); }
+.track-cell.muted { opacity:.45; }
+.track-cell.solo { border-color:#f59e0b; background:#17120a; }
+.track-label { font-size:8px; color:var(--track-color); margin-bottom:2px; }
+.track-top { display:flex; align-items:center; justify-content:space-between; gap:3px; margin-bottom:2px; }
+.track-buttons { display:flex; gap:2px; }
+.track-toggle { width:19px; height:16px; border:1px solid #252b42; border-radius:2px; background:#111827; color:#64748b; cursor:pointer; font-family:inherit; font-size:8px; line-height:1; padding:0; }
+.track-toggle.active { background:#6366f1; border-color:#818cf8; color:#fff; }
+.track-toggle.solo.active { background:#f59e0b; border-color:#fbbf24; color:#111; }
+.track-inst { font-size:9px; color:#4b5563; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-height:11px; }
+.track-meter { height:4px; background:#1a1e2e; border-radius:2px; margin-top:3px; overflow:hidden; }
+.track-meter-fill { height:100%; background:var(--track-color); border-radius:2px; width:0%; transition:width 50ms; }
+.track-note { font-size:8px; color:var(--track-color); min-height:10px; margin-top:2px; }
+.live-keyboard { margin-top:8px; border:1px solid #1a1e2e; border-radius:4px; background:#05070d; overflow:hidden; }
+.live-keyboard-head { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:5px 6px; border-bottom:1px solid #151a2a; background:#0d1117; }
+.live-keyboard-title { color:#94a3b8; font-size:9px; letter-spacing:.6px; text-transform:uppercase; }
+.live-keyboard-active { color:#64748b; font-size:8px; text-align:right; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.live-keyboard-canvas { display:block; width:100%; height:84px; }
+
+.controls-row { display:flex; gap:8px; margin-top:12px; justify-content:center; flex-wrap:wrap; }
+button.ctrl, select.ctrl { background:#1e2235; border:1px solid #2d3158; color:#94a3b8; border-radius:4px; padding:4px 10px; cursor:pointer; font-family:inherit; font-size:11px; }
+button.ctrl:hover { background:#6366f1; border-color:#6366f1; color:#fff; }
+button.ctrl.active { background:#6366f1; border-color:#6366f1; color:#fff; }
+
+.synth-panel { width:min(980px, calc(100vw - 32px)); margin-top:12px; border:1px solid #1e2235; border-radius:6px; background:#0a0a14; overflow:hidden; }
+.synth-head { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 10px; background:#101322; border-bottom:1px solid #1e2235; }
+.synth-title { font-size:10px; color:#f59e0b; letter-spacing:1px; text-transform:uppercase; }
+.synth-hint { font-size:9px; color:#64748b; }
+.synth-body { display:grid; grid-template-columns:1fr 1.2fr; gap:10px; padding:10px; }
+.synth-control { display:flex; align-items:center; gap:6px; flex-wrap:wrap; min-width:0; }
+.synth-control label { font-size:9px; color:#64748b; }
+.synth-control select, .synth-control input { background:#0d1117; border:1px solid #252b42; color:#94a3b8; border-radius:4px; padding:4px 6px; font-family:inherit; font-size:10px; height:24px; }
+.synth-control input { width:56px; }
+.synth-rows { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:6px; }
+.synth-row { display:flex; align-items:center; justify-content:space-between; gap:6px; background:#0d1117; border:1px solid #1a1e2e; border-radius:4px; padding:5px; min-width:0; }
+.synth-row b { font-size:10px; color:#94a3b8; white-space:nowrap; }
+.synth-row span { font-size:8px; color:#4b5563; display:block; margin-top:1px; }
+.synth-row select { min-width:92px; }
+.synth-status { grid-column:1 / -1; color:#64748b; font-size:9px; min-height:12px; }
+.preview-panel { grid-column:1 / -1; display:grid; grid-template-columns:minmax(260px, 0.85fr) 1fr; gap:10px; border-top:1px solid #1e2235; padding-top:10px; min-width:0; }
+.preview-controls { display:flex; align-items:center; gap:6px; flex-wrap:wrap; min-width:0; }
+.preview-controls label { font-size:9px; color:#64748b; }
+.preview-controls input, .preview-controls select { background:#0d1117; border:1px solid #252b42; color:#94a3b8; border-radius:4px; padding:4px 6px; font-family:inherit; font-size:10px; height:24px; }
+.preview-controls input { width:58px; }
+.waveform-box { min-height:126px; background:#050816; border:1px solid #1a1e2e; border-radius:4px; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+.waveform-box img { width:100%; height:126px; object-fit:fill; image-rendering:auto; display:block; }
+.preview-status { grid-column:1 / -1; color:#64748b; font-size:9px; min-height:12px; }
+
+#info { font-size:10px; margin-top:10px; color:#374151; text-align:center; line-height:1.6; max-width:min(980px, calc(100vw - 32px)); white-space:pre-line; }
+#dropmsg { font-size:10px; color:#4b5563; margin-top:12px; text-align:center; }
+
+.debug-panel { display:none; width:min(980px, calc(100vw - 32px)); margin-top:14px; border:1px solid #1e2235; border-radius:6px; background:#0a0a14; overflow:hidden; }
+.debug-panel.open { display:block; }
+.debug-head { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 10px; background:#101322; border-bottom:1px solid #1e2235; }
+.debug-title { font-size:10px; color:#818cf8; letter-spacing:1px; text-transform:uppercase; }
+.debug-actions { display:flex; gap:6px; }
+.debug-body { display:grid; grid-template-columns:1.2fr .8fr; gap:0; }
+.debug-section { padding:10px; border-right:1px solid #1e2235; min-width:0; }
+.debug-section:last-child { border-right:0; }
+.debug-stats { display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; margin-bottom:8px; }
+.debug-stat { background:#0d1117; border:1px solid #1a1e2e; border-radius:4px; padding:5px; min-width:0; }
+.debug-stat span { display:block; font-size:8px; color:#4b5563; margin-bottom:2px; }
+.debug-stat b { display:block; font-size:10px; color:#94a3b8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.debug-table-wrap { overflow:auto; border:1px solid #1a1e2e; border-radius:4px; }
+.debug-table { width:100%; border-collapse:collapse; font-size:9px; }
+.debug-table th, .debug-table td { padding:4px 5px; border-bottom:1px solid #151a2a; text-align:left; white-space:nowrap; }
+.debug-table th { color:#6366f1; background:#0d1117; position:sticky; top:0; }
+.debug-table td { color:#94a3b8; }
+.scope-cell { width:188px; min-width:188px; padding:3px 5px !important; }
+.scope-stack { display:flex; flex-direction:column; gap:3px; }
+.scope-canvas { display:block; width:172px; height:30px; background:#05070d; border:1px solid #1a1e2e; border-radius:3px; image-rendering:pixelated; }
+.voice-scope-row { display:grid; grid-template-columns:38px 1fr; align-items:center; gap:4px; }
+.voice-scope-label { font-size:8px; color:#64748b; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.voice-scope { width:128px; height:18px; }
+.piano-roll-wrap { margin-bottom:8px; border:1px solid #1a1e2e; border-radius:4px; background:#05070d; overflow:hidden; }
+.piano-roll-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:5px 6px; border-bottom:1px solid #151a2a; background:#0d1117; }
+.piano-roll-title { color:#818cf8; font-size:9px; letter-spacing:.6px; text-transform:uppercase; }
+.piano-roll-legend { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; min-width:0; }
+.piano-roll-legend span { display:inline-flex; align-items:center; gap:3px; color:#64748b; font-size:8px; white-space:nowrap; }
+.piano-roll-legend i { display:block; width:8px; height:8px; border-radius:2px; }
+.piano-roll-canvas { display:block; width:100%; height:210px; image-rendering:pixelated; }
+.debug-log { height:218px; overflow:auto; background:#05070d; border:1px solid #1a1e2e; border-radius:4px; padding:6px; font-size:9px; line-height:1.45; color:#64748b; white-space:pre-wrap; }
+.debug-info { margin-top:8px; color:#64748b; font-size:9px; line-height:1.45; white-space:pre-wrap; }
+@media (max-width: 760px) {
+  .synth-body, .preview-panel { grid-template-columns:1fr; }
+  .synth-rows { grid-template-columns:1fr; }
+  .debug-body { grid-template-columns:1fr; }
+  .debug-section { border-right:0; border-bottom:1px solid #1e2235; }
+  .debug-stats { grid-template-columns:repeat(2, 1fr); }
+}
+</style>
+</head>
+<body>
+<h1>GBA MP2k Music Player</h1>
+
+<div class="player-panel">
+  <div id="status">Loading ROM…</div>
+  <div class="song-row" id="tableRow" style="display:none">
+    <select id="tableSelect" class="ctrl" style="flex:1" title="Detected song tables — music tables have higher average track count"></select>
+  </div>
+  <div class="song-row">
+    <select id="songSelect" disabled></select>
+    <button class="btn-play" id="btnPlay" disabled>▶</button>
+    <button class="btn-stop" id="btnStop">■</button>
+  </div>
+  <div class="poly-row" id="polyRow" style="display:none">
+    <div class="poly-bar-wrap">
+      <div class="poly-bar-fill" id="polyFill"></div>
+      <div class="poly-bar-peak" id="polyPeak"></div>
+    </div>
+    <span class="poly-label" id="polyLabel">0 / 8</span>
+  </div>
+  <div class="tracks-grid" id="tracksGrid"></div>
+  <div class="live-keyboard">
+    <div class="live-keyboard-head">
+      <div class="live-keyboard-title">Live Keyboard</div>
+      <div class="live-keyboard-active" id="liveKeyboardActive"></div>
+    </div>
+    <canvas class="live-keyboard-canvas" id="liveKeyboardCanvas" width="840" height="140"></canvas>
+  </div>
+</div>
+
+<div class="controls-row">
+  <button class="ctrl" id="btnPrev">◀ Prev</button>
+  <button class="ctrl" id="btnNext">Next ▶</button>
+  <button class="ctrl" id="btnAllTracks">All Tracks</button>
+  <button class="ctrl" id="btnDebug">Debug</button>
+  <select class="ctrl" id="engineSelect" title="Playback engine">
+    <option value="mp2k-hle" selected>MP2K HLE</option>
+    <option value="gsf-lle">GSF LLE</option>
+  </select>
+  <select class="ctrl" id="backendSelect" title="Playback backend">
+    <option value="webaudio" selected>Web Audio graph</option>
+    <option value="software">Software mixer (experimental)</option>
+  </select>
+  <select class="ctrl" id="voicePoolSelect" title="Voice pool (instrument bank) — override per-song default" style="display:none"></select>
+  <select class="ctrl" id="voiceLimitSelect" title="Polyphony — max simultaneous PCM voices">
+    <option value="1">1 voice</option>
+    <option value="2">2 voices</option>
+    <option value="4">4 voices</option>
+    <option value="6">6 voices</option>
+    <option value="8" selected>8 voices</option>
+    <option value="10">10 voices</option>
+    <option value="12">12 voices</option>
+    <option value="16">16 voices</option>
+    <option value="20">20 voices</option>
+    <option value="24">24 voices</option>
+    <option value="9999">Unlimited</option>
+  </select>
+  <select class="ctrl" id="mixRateSelect" title="MP2k mixer output rate — adjust for each ROM">
+    <option value="5734">5734 Hz</option>
+    <option value="7884">7884 Hz</option>
+    <option value="10512">10512 Hz</option>
+    <option value="13379">13379 Hz</option>
+    <option value="15768">15768 Hz</option>
+    <option value="18157" selected>18157 Hz</option>
+    <option value="21024">21024 Hz</option>
+    <option value="26758">26758 Hz</option>
+    <option value="31536">31536 Hz</option>
+    <option value="36314">36314 Hz</option>
+    <option value="40137">40137 Hz</option>
+    <option value="42048">42048 Hz</option>
+  </select>
+</div>
+
+<div class="synth-panel" id="synthPanel">
+  <div class="synth-head">
+    <div class="synth-title">Synth Instrument Overrides</div>
+    <div class="synth-hint">Changes restart the playing song for A/B</div>
+  </div>
+  <div class="synth-body">
+    <div class="synth-control">
+      <label for="synthGlobal">Global</label>
+      <select id="synthGlobal"></select>
+      <button class="ctrl" id="btnSynthReset">Reset</button>
+    </div>
+    <div class="synth-control">
+      <label for="synthCustomInst">Instrument</label>
+      <select id="synthCustomInst"></select>
+      <select id="synthCustomMode"></select>
+      <button class="ctrl" id="btnSynthApply">Apply</button>
+      <button class="ctrl" id="btnSynthClearInst">Clear Inst</button>
+    </div>
+    <div class="synth-rows" id="synthRows"></div>
+    <div class="preview-panel">
+      <div class="preview-controls">
+        <label for="previewInst">Preview Inst</label>
+        <select id="previewInst"></select>
+        <label for="previewNote">Note</label>
+        <input id="previewNote" type="number" min="0" max="127" value="60">
+        <label for="previewVelocity">Vel</label>
+        <input id="previewVelocity" type="number" min="1" max="127" value="100">
+        <select id="previewMode"></select>
+        <button class="ctrl" id="btnPreviewPlay">Play</button>
+        <button class="ctrl" id="btnPreviewStop">Stop</button>
+        <button class="ctrl" id="btnPreviewWaveRaw">Raw Wave</button>
+        <button class="ctrl" id="btnPreviewWaveRendered">Rendered Wave</button>
+      </div>
+      <div class="waveform-box"><img id="previewWaveform" alt="Instrument waveform preview"></div>
+      <div class="preview-status" id="previewStatus">Preview a single instrument and inspect its sample waveform.</div>
+    </div>
+    <div class="synth-status" id="synthStatus"></div>
+  </div>
+</div>
+
+<div class="debug-panel" id="debugPanel">
+  <div class="debug-head">
+    <div class="debug-title">Sequencer Debug</div>
+    <div class="debug-actions">
+      <button class="ctrl" id="btnRefreshDebug">Refresh</button>
+      <button class="ctrl" id="btnClearLog">Clear Log</button>
+    </div>
+  </div>
+  <div class="debug-body">
+    <div class="debug-section">
+      <div class="debug-stats" id="debugStats"></div>
+      <div class="piano-roll-wrap">
+        <div class="piano-roll-head">
+          <div class="piano-roll-title">Piano Roll</div>
+          <div class="piano-roll-legend" id="pianoRollLegend"></div>
+        </div>
+        <canvas class="piano-roll-canvas" id="pianoRollCanvas" width="920" height="210"></canvas>
+      </div>
+      <div class="debug-table-wrap">
+        <table class="debug-table">
+          <thead><tr><th>T</th><th>State</th><th>Ptr</th><th>Next</th><th>Wait</th><th>Inst</th><th>Src</th><th>Scope</th><th>Vol</th><th>Vel</th><th>Pan</th><th>Pitch</th><th>Bend</th><th>LFO</th><th>Note</th><th>Rate</th><th>Voices</th></tr></thead>
+          <tbody id="debugTracks"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="debug-section">
+      <div class="debug-log" id="debugLog"></div>
+      <div class="debug-info" id="debugInfo">Open the console and use window.gs1Debug for state, song audit, synth overrides, mute/solo, track, instrument, resolveInst, sample, synthWave, and byte dump helpers.</div>
+    </div>
+  </div>
+</div>
+
+<div id="info"></div>
+<div id="dropmsg">Drop a GBA ROM, GSF dump, minigsf, gsflib, or ZIP here, or run from the repo root to auto-load ../baserom.gba</div>
+
+<script src="gsf.js"></script>
+<script src="mp2k.js"></script>
+</body>
+</html>

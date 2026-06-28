@@ -138,6 +138,8 @@
       this.vblankCount = 0;
       this.irqEvents = [];
       this.dmaTransfers = [];
+      this.memoryWrites = [];
+      this.wordWrites = new Map();
     }
 
     region(addr) {
@@ -209,6 +211,29 @@
       this.write8((addr + 1) >>> 0, value >>> 8);
       this.write8((addr + 2) >>> 0, value >>> 16);
       this.write8((addr + 3) >>> 0, value >>> 24);
+    }
+
+    noteMemoryWrite(addr, value, bytes, source = {}) {
+      addr >>>= 0;
+      value >>>= 0;
+      const r = this.region(addr);
+      if (!r || r.id === 'io' || r.id === 'rom') return;
+      const entry = {
+        addr,
+        addrHex: tools.hex(addr),
+        value,
+        valueHex: tools.hex(value, bytes * 2),
+        bytes,
+        region: r.id,
+        ...source,
+      };
+      this.memoryWrites.push(entry);
+      if (this.memoryWrites.length > 256) this.memoryWrites.shift();
+      if (bytes === 4) this.wordWrites.set(addr & ~3, entry);
+    }
+
+    lastWordWrite(addr) {
+      return this.wordWrites.get((addr >>> 0) & ~3) || null;
     }
 
     stepCycles(cycles) {
@@ -463,6 +488,32 @@
       return value;
     }
 
+    _writeMem32(addr, value, kind, detail = {}) {
+      addr >>>= 0;
+      value >>>= 0;
+      const pc = (this.regs[15] - (this.cpsr & CPSR_T ? 2 : 4)) >>> 0;
+      this.bus.write32(addr & ~3, value);
+      this.bus.noteMemoryWrite(addr & ~3, value, 4, {
+        kind,
+        pc,
+        pcHex: tools.hex(pc),
+        ...detail,
+      });
+    }
+
+    _writeMem16(addr, value, kind, detail = {}) {
+      addr >>>= 0;
+      value &= 0xffff;
+      const pc = (this.regs[15] - (this.cpsr & CPSR_T ? 2 : 4)) >>> 0;
+      this.bus.write16(addr & ~1, value);
+      this.bus.noteMemoryWrite(addr & ~1, value, 2, {
+        kind,
+        pc,
+        pcHex: tools.hex(pc),
+        ...detail,
+      });
+    }
+
     _conditionPassed(cond) {
       const n = !!(this.cpsr & CPSR_N);
       const z = !!(this.cpsr & CPSR_Z);
@@ -634,7 +685,7 @@
       } else {
         const value = this._reg(rd);
         if (byte) this.bus.write8(addr, value);
-        else this.bus.write32(addr & ~3, value);
+        else this._writeMem32(addr, value, 'arm-store', { rd, rn });
       }
       if (writeBack || !pre) this._setReg(rn, finalBase);
     }
@@ -676,7 +727,7 @@
         else if (halfword) this._setReg(rd, this.bus.read16(addr & ~1));
         else return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
       } else {
-        this.bus.write16(addr & ~1, this._reg(rd));
+        this._writeMem16(addr, this._reg(rd), 'arm-halfword-store', { rd, rn });
       }
       if (writeBack || !pre) this._setReg(rn, finalBase);
     }
@@ -747,7 +798,7 @@
         if (load) {
           this._setReg(reg, this.bus.read32(addr & ~3));
         } else {
-          this.bus.write32(addr & ~3, this._reg(reg));
+          this._writeMem32(addr, this._reg(reg), 'arm-block-store', { reg, rn });
         }
         addr = (addr + 4) >>> 0;
       }
@@ -928,7 +979,7 @@
       const addr = (this.regs[rb] + this.regs[ro]) >>> 0;
       if (load) this._writeReg(rd, byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3), 'thumb-reg-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr), byte });
       else if (byte) this.bus.write8(addr, this.regs[rd]);
-      else this.bus.write32(addr & ~3, this.regs[rd]);
+      else this._writeMem32(addr, this.regs[rd], 'thumb-reg-store', { rd, rb, ro });
     }
 
     _thumbImmLoadStore(instr) {
@@ -941,7 +992,7 @@
       const addr = (this.regs[rb] + off) >>> 0;
       if (load) this._writeReg(rd, byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3), 'thumb-imm-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr), byte });
       else if (byte) this.bus.write8(addr, this.regs[rd]);
-      else this.bus.write32(addr & ~3, this.regs[rd]);
+      else this._writeMem32(addr, this.regs[rd], 'thumb-imm-store', { rd, rb });
     }
 
     _thumbHalfwordLoadStore(instr) {
@@ -951,7 +1002,7 @@
       const rd = instr & 7;
       const addr = (this.regs[rb] + imm) >>> 0;
       if (load) this._writeReg(rd, this.bus.read16(addr & ~1), 'thumb-halfword-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~1) });
-      else this.bus.write16(addr & ~1, this.regs[rd]);
+      else this._writeMem16(addr, this.regs[rd], 'thumb-halfword-store', { rd, rb });
     }
 
     _thumbSpLoadStore(instr) {
@@ -959,7 +1010,7 @@
       const rd = (instr >>> 8) & 7;
       const addr = (this.regs[13] + ((instr & 0xff) << 2)) >>> 0;
       if (load) this._writeReg(rd, this.bus.read32(addr & ~3), 'thumb-sp-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~3) });
-      else this.bus.write32(addr & ~3, this.regs[rd]);
+      else this._writeMem32(addr, this.regs[rd], 'thumb-sp-store', { rd });
     }
 
     _thumbLoadAddress(instr, pc) {
@@ -987,6 +1038,7 @@
           this._writeReg(r, value, 'thumb-pop', (this.regs[15] - 2) >>> 0, {
             addrHex: tools.hex(addr),
             readValueHex: tools.hex(value),
+            slotWrite: this.bus.lastWordWrite(addr),
             spBeforeHex: tools.hex(this.regs[13]),
             spWrite: this.regWrites[13] ? { ...this.regWrites[13] } : null,
           });
@@ -998,6 +1050,7 @@
           this._recordBranch('thumb-pop-pc', (this.regs[15] - 2) >>> 0, target, {
             addrHex: tools.hex(addr),
             readValueHex: tools.hex(target),
+            slotWrite: this.bus.lastWordWrite(addr),
             spBeforeHex: tools.hex(this.regs[13]),
             spWrite: this.regWrites[13] ? { ...this.regWrites[13] } : null,
           });
@@ -1010,10 +1063,10 @@
         let addr = this.regs[13];
         for (let r = 0; r < 8; r++) {
           if (!(list & (1 << r))) continue;
-          this.bus.write32(addr & ~3, this.regs[r]);
+          this._writeMem32(addr, this.regs[r], 'thumb-push', { reg: r });
           addr = (addr + 4) >>> 0;
         }
-        if (extra) this.bus.write32(addr & ~3, this.regs[14]);
+        if (extra) this._writeMem32(addr, this.regs[14], 'thumb-push-lr', { reg: 14 });
       }
     }
 
@@ -1025,7 +1078,7 @@
       for (let r = 0; r < 8; r++) {
         if (!(list & (1 << r))) continue;
         if (load) this._writeReg(r, this.bus.read32(addr & ~3), 'thumb-multi-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~3), rb });
-        else this.bus.write32(addr & ~3, this.regs[r]);
+        else this._writeMem32(addr, this.regs[r], 'thumb-multi-store', { r, rb });
         addr = (addr + 4) >>> 0;
       }
       this.regs[rb] = addr >>> 0;
@@ -1138,8 +1191,8 @@
       const fillValue = word ? this.bus.read32(src & ~3) : this.bus.read16(src & ~1);
       for (let i = 0; i < count; i++) {
         const value = fill ? fillValue : (word ? this.bus.read32((src + i * bytes) & ~3) : this.bus.read16((src + i * bytes) & ~1));
-        if (word) this.bus.write32((dst + i * bytes) & ~3, value);
-        else this.bus.write16((dst + i * bytes) & ~1, value);
+        if (word) this._writeMem32((dst + i * bytes) & ~3, value, 'bios-cpuset', { srcHex: tools.hex(src), dstHex: tools.hex(dst), fill, word });
+        else this._writeMem16((dst + i * bytes) & ~1, value, 'bios-cpuset', { srcHex: tools.hex(src), dstHex: tools.hex(dst), fill, word });
       }
       return `${fill ? 'fill' : 'copy'} ${count} ${word ? 'words' : 'halfwords'}`;
     }

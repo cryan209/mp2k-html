@@ -5241,13 +5241,14 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const sourceReg = sourceBranch?.rsName ? ` ${sourceBranch.rsName}=${sourceBranch.rsValueHex}` : '';
       const writeSummary = write => write ? `${write.kind}@${write.pcHex}->${write.valueHex}` : '';
       const stackReadSummary = write => write?.addrHex ? ` read:${write.addrHex}=${write.readValueHex || write.valueHex}` : '';
+      const slotWriteSummary = write => write?.addrHex ? ` slot:${write.slotWrite ? `${write.slotWrite.kind}@${write.slotWrite.pcHex}->${write.slotWrite.valueHex}` : '<never>'}` : '';
       const stackSpSummary = write => write?.spBeforeHex ? ` sp:${write.spBeforeHex}${write.spWrite ? `<-${writeSummary(write.spWrite)}` : ''}` : '';
-      const sourceWrite = sourceBranch?.rsWrite ? ` last:${writeSummary(sourceBranch.rsWrite)}${stackReadSummary(sourceBranch.rsWrite)}${stackSpSummary(sourceBranch.rsWrite)}` : '';
+      const sourceWrite = sourceBranch?.rsWrite ? ` last:${writeSummary(sourceBranch.rsWrite)}${stackReadSummary(sourceBranch.rsWrite)}${slotWriteSummary(sourceBranch.rsWrite)}${stackSpSummary(sourceBranch.rsWrite)}` : '';
       const sourceStack = sourceBranch?.addrHex ? ` read:${sourceBranch.addrHex}=${sourceBranch.readValueHex || sourceBranch.targetHex}` : '';
       const sourceSp = sourceBranch?.spBeforeHex ? ` sp:${sourceBranch.spBeforeHex}${sourceBranch.spWrite ? `<-${writeSummary(sourceBranch.spWrite)}` : ''}` : '';
       const sourceSummary = sourceBranch ? ` from:${sourceBranch.kind}@${sourceBranch.pcHex}->${sourceBranch.targetHex}${sourceReg}${sourceWrite}${sourceStack}${sourceSp}` : '';
       const trailSummary = run?.branchTrail?.length
-        ? ` trail:${run.branchTrail.map(b => `${b.kind}@${b.pcHex}->${b.targetHex}${b.rsName ? `(${b.rsName}=${b.rsValueHex}${b.rsWrite ? `<-${b.rsWrite.kind}@${b.rsWrite.pcHex}${stackReadSummary(b.rsWrite)}${stackSpSummary(b.rsWrite)}` : ''})` : ''}${b.addrHex ? `(read:${b.addrHex}=${b.readValueHex || b.targetHex}${b.spBeforeHex ? ` sp:${b.spBeforeHex}` : ''})` : ''}`).join(',')}`
+        ? ` trail:${run.branchTrail.map(b => `${b.kind}@${b.pcHex}->${b.targetHex}${b.rsName ? `(${b.rsName}=${b.rsValueHex}${b.rsWrite ? `<-${b.rsWrite.kind}@${b.rsWrite.pcHex}${stackReadSummary(b.rsWrite)}${slotWriteSummary(b.rsWrite)}${stackSpSummary(b.rsWrite)}` : ''})` : ''}${b.addrHex ? `(read:${b.addrHex}=${b.readValueHex || b.targetHex}${b.spBeforeHex ? ` sp:${b.spBeforeHex}` : ''})` : ''}`).join(',')}`
         : '';
       const pcSummary = run ? ` | +${run.ranInstructions} pc:${run.pcHex}${run.hotPcHex ? ` hot:${run.hotPcHex}/${run.hotPcHits}` : ''}${branchSummary}${sourceSummary}${trailSummary}` : '';
       setStatus(cpu

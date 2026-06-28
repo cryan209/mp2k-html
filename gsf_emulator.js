@@ -324,9 +324,19 @@
       this.pcHits = new Map();
       this.recentPcs = [];
       this.branches = [];
+      this.regWrites = Array.from({ length: 16 }, (_, reg) => ({
+        reg,
+        regName: `r${reg}`,
+        value: this.regs[reg] >>> 0,
+        valueHex: tools.hex(this.regs[reg]),
+        kind: 'init',
+        pcHex: null,
+      }));
       this.regs[15] = entryAddr >>> 0;
+      this._writeReg(15, entryAddr, 'entry', entryAddr);
       if (entryAddr & 1) {
         this.regs[15] = entryAddr & ~1;
+        this._writeReg(15, this.regs[15], 'entry-thumb', this.regs[15]);
         this.cpsr |= CPSR_T;
       }
     }
@@ -380,6 +390,7 @@
           .slice(0, 12)
           .map(([pc, hits]) => ({ pc, pcHex: tools.hex(pc), hits })),
         branches: this.branches.slice(-32),
+        regWrites: this.regWrites.map(write => ({ ...write })),
         psrWrites: this.psrWrites.slice(-32),
         swiCalls: this.swiCalls.slice(-32),
         unsupported: Object.fromEntries([...this.unsupported.entries()].slice(0, 24)),
@@ -434,6 +445,22 @@
       if (this.branches.length > 128) this.branches.shift();
     }
 
+    _writeReg(idx, value, kind, pc = null, detail = {}) {
+      value >>>= 0;
+      this.regs[idx] = value;
+      this.regWrites[idx] = {
+        reg: idx,
+        regName: `r${idx}`,
+        value,
+        valueHex: tools.hex(value),
+        kind,
+        pc: pc == null ? null : pc >>> 0,
+        pcHex: pc == null ? null : tools.hex(pc),
+        ...detail,
+      };
+      return value;
+    }
+
     _conditionPassed(cond) {
       const n = !!(this.cpsr & CPSR_N);
       const z = !!(this.cpsr & CPSR_Z);
@@ -478,19 +505,19 @@
 
     _setReg(idx, value) {
       value >>>= 0;
-      this.regs[idx] = value;
+      this._writeReg(idx, value, 'arm-set-reg', (this.regs[15] - 4) >>> 0);
       if (idx === 15) {
         this._recordBranch('set-pc', (this.regs[15] - 4) >>> 0, value);
-        this.regs[15] = value & ~3;
+        this._writeReg(15, value & ~3, 'arm-set-pc', (this.regs[15] - 4) >>> 0, { rawValueHex: tools.hex(value) });
       }
     }
 
     _setRegThumb(idx, value) {
       value >>>= 0;
-      this.regs[idx] = value;
+      this._writeReg(idx, value, 'thumb-set-reg', (this.regs[15] - 2) >>> 0);
       if (idx === 15) {
         this._recordBranch('set-pc-thumb', (this.regs[15] - 2) >>> 0, value);
-        this.regs[15] = value & ~1;
+        this._writeReg(15, value & ~1, 'thumb-set-pc', (this.regs[15] - 2) >>> 0, { rawValueHex: tools.hex(value) });
       }
     }
 
@@ -765,7 +792,7 @@
         carry = offset ? !!(value & (1 << (offset - 1))) : !!(value & 0x80000000);
         result = offset ? (value >> offset) >>> 0 : (value & 0x80000000 ? 0xffffffff : 0);
       }
-      this.regs[rd] = result >>> 0;
+      this._writeReg(rd, result, 'thumb-shift', (this.regs[15] - 2) >>> 0, { instrClass: 'shift' });
       this._setNZ(result);
       this.cpsr = (this.cpsr & ~CPSR_C) | (carry ? CPSR_C : 0);
     }
@@ -779,7 +806,7 @@
       const a = this.regs[rs] >>> 0;
       const b = immediate ? rnOrImm : (this.regs[rnOrImm] >>> 0);
       const result = subtract ? (a - b) >>> 0 : (a + b) >>> 0;
-      this.regs[rd] = result;
+      this._writeReg(rd, result, 'thumb-add-sub', (this.regs[15] - 2) >>> 0, { subtract, immediate });
       this._setNZ(result);
       const carry = subtract ? a >= b : result < a;
       const overflow = subtract ? subOverflow(a, b, result) : addOverflow(a, b, result);
@@ -802,14 +829,14 @@
         result = (a + imm) >>> 0;
         carry = result < a;
         overflow = addOverflow(a, imm, result);
-        this.regs[rd] = result;
+        this._writeReg(rd, result, 'thumb-imm', (this.regs[15] - 2) >>> 0, { op });
       } else if (op === 3) {
         result = (a - imm) >>> 0;
         carry = a >= imm;
         overflow = subOverflow(a, imm, result);
-        this.regs[rd] = result;
+        this._writeReg(rd, result, 'thumb-imm', (this.regs[15] - 2) >>> 0, { op });
       } else {
-        this.regs[rd] = result;
+        this._writeReg(rd, result, 'thumb-imm', (this.regs[15] - 2) >>> 0, { op });
       }
       this._setNZ(result);
       if (op !== 0) this.cpsr = (this.cpsr & ~(CPSR_C | CPSR_V)) | (carry ? CPSR_C : 0) | (overflow ? CPSR_V : 0);
@@ -843,7 +870,7 @@
         case 0xe: result = a & (~b); break;
         case 0xf: result = (~b) >>> 0; break;
       }
-      if (write) this.regs[rd] = result >>> 0;
+      if (write) this._writeReg(rd, result, 'thumb-alu', (this.regs[15] - 2) >>> 0, { op });
       this._setNZ(result);
       if ([0x5, 0x6, 0x9, 0xa, 0xb].includes(op)) {
         this.cpsr = (this.cpsr & ~(CPSR_C | CPSR_V)) | (carry ? CPSR_C : 0) | (overflow ? CPSR_V : 0);
@@ -872,6 +899,7 @@
           rs,
           rsName: `r${rs}`,
           rsValueHex: tools.hex(this._reg(rs)),
+          rsWrite: this.regWrites[rs] ? { ...this.regWrites[rs] } : null,
         });
         if (target & 1) {
           this.cpsr |= CPSR_T;
@@ -886,7 +914,7 @@
     _thumbPcLoad(instr, pc) {
       const rd = (instr >>> 8) & 7;
       const addr = ((pc + 4) & ~3) + ((instr & 0xff) << 2);
-      this.regs[rd] = this.bus.read32(addr) >>> 0;
+      this._writeReg(rd, this.bus.read32(addr) >>> 0, 'thumb-pc-load', pc, { addrHex: tools.hex(addr) });
     }
 
     _thumbRegOffsetLoadStore(instr) {
@@ -896,7 +924,7 @@
       const rb = (instr >>> 3) & 7;
       const rd = instr & 7;
       const addr = (this.regs[rb] + this.regs[ro]) >>> 0;
-      if (load) this.regs[rd] = byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3);
+      if (load) this._writeReg(rd, byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3), 'thumb-reg-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr), byte });
       else if (byte) this.bus.write8(addr, this.regs[rd]);
       else this.bus.write32(addr & ~3, this.regs[rd]);
     }
@@ -909,7 +937,7 @@
       const rd = instr & 7;
       const off = byte ? imm : imm << 2;
       const addr = (this.regs[rb] + off) >>> 0;
-      if (load) this.regs[rd] = byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3);
+      if (load) this._writeReg(rd, byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3), 'thumb-imm-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr), byte });
       else if (byte) this.bus.write8(addr, this.regs[rd]);
       else this.bus.write32(addr & ~3, this.regs[rd]);
     }
@@ -920,7 +948,7 @@
       const rb = (instr >>> 3) & 7;
       const rd = instr & 7;
       const addr = (this.regs[rb] + imm) >>> 0;
-      if (load) this.regs[rd] = this.bus.read16(addr & ~1);
+      if (load) this._writeReg(rd, this.bus.read16(addr & ~1), 'thumb-halfword-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~1) });
       else this.bus.write16(addr & ~1, this.regs[rd]);
     }
 
@@ -928,7 +956,7 @@
       const load = !!(instr & 0x0800);
       const rd = (instr >>> 8) & 7;
       const addr = (this.regs[13] + ((instr & 0xff) << 2)) >>> 0;
-      if (load) this.regs[rd] = this.bus.read32(addr & ~3);
+      if (load) this._writeReg(rd, this.bus.read32(addr & ~3), 'thumb-sp-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~3) });
       else this.bus.write32(addr & ~3, this.regs[rd]);
     }
 
@@ -936,7 +964,7 @@
       const sp = !!(instr & 0x0800);
       const rd = (instr >>> 8) & 7;
       const off = (instr & 0xff) << 2;
-      this.regs[rd] = ((sp ? this.regs[13] : ((pc + 4) & ~3)) + off) >>> 0;
+      this._writeReg(rd, ((sp ? this.regs[13] : ((pc + 4) & ~3)) + off) >>> 0, 'thumb-load-address', pc, { sp });
     }
 
     _thumbAddSp(instr) {
@@ -952,7 +980,7 @@
       if (pop) {
         for (let r = 0; r < 8; r++) {
           if (!(list & (1 << r))) continue;
-          this.regs[r] = this.bus.read32(this.regs[13] & ~3);
+          this._writeReg(r, this.bus.read32(this.regs[13] & ~3), 'thumb-pop', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(this.regs[13] & ~3) });
           this.regs[13] = (this.regs[13] + 4) >>> 0;
         }
         if (extra) {
@@ -981,7 +1009,7 @@
       let addr = this.regs[rb] >>> 0;
       for (let r = 0; r < 8; r++) {
         if (!(list & (1 << r))) continue;
-        if (load) this.regs[r] = this.bus.read32(addr & ~3);
+        if (load) this._writeReg(r, this.bus.read32(addr & ~3), 'thumb-multi-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~3), rb });
         else this.bus.write32(addr & ~3, this.regs[r]);
         addr = (addr + 4) >>> 0;
       }

@@ -5239,9 +5239,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const sourceBranch = run?.faultSourceBranch;
       const branchSummary = branch ? ` via:${branch.kind}@${branch.pcHex}->${branch.targetHex || branch.pcHex}` : '';
       const sourceReg = sourceBranch?.rsName ? ` ${sourceBranch.rsName}=${sourceBranch.rsValueHex}` : '';
-      const sourceSummary = sourceBranch ? ` from:${sourceBranch.kind}@${sourceBranch.pcHex}->${sourceBranch.targetHex}${sourceReg}` : '';
+      const sourceWrite = sourceBranch?.rsWrite ? ` last:${sourceBranch.rsWrite.kind}@${sourceBranch.rsWrite.pcHex}->${sourceBranch.rsWrite.valueHex}` : '';
+      const sourceSummary = sourceBranch ? ` from:${sourceBranch.kind}@${sourceBranch.pcHex}->${sourceBranch.targetHex}${sourceReg}${sourceWrite}` : '';
       const trailSummary = run?.branchTrail?.length
-        ? ` trail:${run.branchTrail.map(b => `${b.kind}@${b.pcHex}->${b.targetHex}${b.rsName ? `(${b.rsName}=${b.rsValueHex})` : ''}`).join(',')}`
+        ? ` trail:${run.branchTrail.map(b => `${b.kind}@${b.pcHex}->${b.targetHex}${b.rsName ? `(${b.rsName}=${b.rsValueHex}${b.rsWrite ? `<-${b.rsWrite.kind}@${b.rsWrite.pcHex}` : ''})` : ''}`).join(',')}`
         : '';
       const pcSummary = run ? ` | +${run.ranInstructions} pc:${run.pcHex}${run.hotPcHex ? ` hot:${run.hotPcHex}/${run.hotPcHits}` : ''}${branchSummary}${sourceSummary}${trailSummary}` : '';
       setStatus(cpu

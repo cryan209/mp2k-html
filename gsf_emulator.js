@@ -236,6 +236,7 @@
       if ((instr & 0x0fbf0fff) === 0x010f0000) return this._unsupported(instr, pc); // MRS
       if ((instr & 0x0fb0fff0) === 0x0120f000) return this._unsupported(instr, pc); // MSR register
       if ((instr & 0x0e000090) === 0x00000090) return this._unsupported(instr, pc); // halfword/signed transfer
+      if ((instr & 0x0e000000) === 0x08000000) return this._blockDataTransfer(instr);
       if ((instr & 0x0c000000) === 0x04000000) return this._singleDataTransfer(instr);
       if ((instr & 0x0c000000) === 0x00000000) return this._dataProcessing(instr);
       this._unsupported(instr, pc);
@@ -349,6 +350,51 @@
         else this.bus.write32(addr & ~3, value);
       }
       if (writeBack || !pre) this._setReg(rn, finalBase);
+    }
+
+    _blockDataTransfer(instr) {
+      const pre = !!(instr & 0x01000000);
+      const up = !!(instr & 0x00800000);
+      const psr = !!(instr & 0x00400000);
+      const writeBack = !!(instr & 0x00200000);
+      const load = !!(instr & 0x00100000);
+      const rn = (instr >>> 16) & 0xf;
+      const list = instr & 0xffff;
+      if (psr) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
+      const count = this._bitCount(list);
+      if (count === 0) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
+      const base = this._reg(rn);
+      let addr;
+      let finalBase;
+      if (up) {
+        addr = pre ? (base + 4) >>> 0 : base;
+        finalBase = (base + count * 4) >>> 0;
+      } else {
+        addr = pre ? (base - count * 4) >>> 0 : (base - (count - 1) * 4) >>> 0;
+        finalBase = (base - count * 4) >>> 0;
+      }
+      const writeBackFirst = writeBack && (!load || !(list & (1 << rn)));
+      if (writeBackFirst) this._setReg(rn, finalBase);
+      for (let reg = 0; reg < 16; reg++) {
+        if (!(list & (1 << reg))) continue;
+        if (load) {
+          this._setReg(reg, this.bus.read32(addr & ~3));
+        } else {
+          this.bus.write32(addr & ~3, this._reg(reg));
+        }
+        addr = (addr + 4) >>> 0;
+      }
+      if (writeBack && !writeBackFirst) this._setReg(rn, finalBase);
+    }
+
+    _bitCount(v) {
+      v &= 0xffff;
+      let c = 0;
+      while (v) {
+        v &= v - 1;
+        c++;
+      }
+      return c;
     }
 
     _branch(instr, pc) {
@@ -625,11 +671,38 @@
     }
   }
 
+  function selfTest() {
+    const memory = createMemoryImage();
+    const base = tools.GBA_ROM_BASE;
+    const view = new DataView(memory.rom.buffer);
+    const words = [
+      0xe3a0d403, // mov sp, #0x03000000
+      0xe28dd902, // add sp, sp, #0x00008000
+      0xe3a0e001, // mov lr, #1
+      0xe92d4000, // stmdb sp!, {lr}
+      0xe3a0002a, // mov r0, #42
+      0xe8bd0002, // ldmia sp!, {r1}
+    ];
+    words.forEach((word, i) => view.setUint32(i * 4, word >>> 0, true));
+    const bus = new GbaMemoryBus(memory);
+    const cpu = new Arm7Cpu(bus, base);
+    cpu.run(16);
+    return {
+      cpu: cpu.snapshot(),
+      sp: cpu.regs[13] >>> 0,
+      r0: cpu.regs[0] >>> 0,
+      r1: cpu.regs[1] >>> 0,
+      stackWord: bus.read32(0x03007ffc),
+      events: bus.events,
+    };
+  }
+
   window.GsfEmulator = {
     GbaMemoryBus,
     Arm7Cpu,
     createMemoryImage,
     applyDecodedProgram,
+    selfTest,
     StandardGsfEngine,
   };
   window.StandardGsfEngine = StandardGsfEngine;

@@ -1,9 +1,4 @@
-// Standard GSF container/LLE engine boundary.
-//
-// GSF playback is low-level by design: the compressed payload is a GBA program
-// image that must be executed by an ARM/Thumb + GBA audio emulator. This module
-// owns the GSF format and exposes a distinct LLE engine slot so the MP2K HLE
-// player can be compared against the standard path without conflating them.
+// Standard GSF container, decoder, and archive utilities.
 
 (function () {
   const GSF_MAGIC = [0x50, 0x53, 0x46, 0x22]; // "PSF", version 0x22
@@ -166,39 +161,6 @@
     };
   }
 
-  function createMemoryImage(size = GBA_ROM_LIMIT) {
-    return {
-      rom: new Uint8Array(size),
-      segments: [],
-      warnings: [],
-    };
-  }
-
-  function applyDecodedProgram(memory, decoded, label = decoded?.program?.name || 'program') {
-    const program = decoded?.program || decoded;
-    if (!program?.data) return false;
-    const region = program.region || gbaRegionFor(program.loadAddr, program.clippedSize);
-    const segment = {
-      label,
-      region: region?.id || 'unknown',
-      loadAddr: program.loadAddr,
-      dataSize: program.clippedSize,
-      endAddr: program.endAddr,
-    };
-    memory.segments.push(segment);
-    if (region?.id !== 'rom') {
-      memory.warnings.push(`${label} loads into ${region?.label || 'unknown memory'}, not ROM; stored as segment only`);
-      return false;
-    }
-    const romOffset = program.loadAddr - GBA_ROM_BASE;
-    if (romOffset < 0 || romOffset + program.clippedSize > memory.rom.length) {
-      memory.warnings.push(`${label} ROM write ${hex(program.loadAddr)} +${program.clippedSize} is out of range`);
-      return false;
-    }
-    memory.rom.set(program.data, romOffset);
-    return true;
-  }
-
   async function programInfo(buf) {
     if (!isValid(buf)) return null;
     const decoded = await decodeProgram(buf);
@@ -350,179 +312,12 @@
     return null;
   }
 
-  class StandardGsfEngine {
-    constructor() {
-      this.id = 'gsf-lle';
-      this.label = 'Standard GSF LLE';
-      this.state = 'empty';
-      this.source = null;
-      this.library = null;
-      this.entries = [];
-      this.memory = null;
-      this.decodeReport = null;
-      this.lastError = null;
-    }
-
-    reset() {
-      this.state = 'empty';
-      this.source = null;
-      this.library = null;
-      this.entries = [];
-      this.memory = null;
-      this.decodeReport = null;
-      this.lastError = null;
-    }
-
-    async loadBuffer(buf, source = {}) {
-      this.reset();
-      try {
-        if (isZip(buf) || isSevenZip(buf)) return await this._loadArchive(buf, source);
-        if (!isValid(buf)) return null;
-        const decoded = await decodeProgram(buf, {
-          kind: /\.minigsf$/i.test(source.name || '') ? 'minigsf' : 'gsf',
-          name: source.name || 'Dropped GSF',
-        });
-        const info = await programInfo(buf);
-        this.source = {
-          kind: /\.minigsf$/i.test(source.name || '') ? 'minigsf' : 'gsf',
-          name: source.name || 'Dropped GSF',
-          tags: tags(buf),
-          ...(info || {}),
-        };
-        this.memory = createMemoryImage();
-        applyDecodedProgram(this.memory, decoded, this.source.name);
-        this.entries = [{
-          name: this.source.tags.title || this.source.name,
-          tags: this.source.tags,
-          decoded,
-          patch: await miniPatch(buf),
-        }];
-        this.decodeReport = this._makeDecodeReport();
-        this.state = 'loaded-no-emulator';
-        return this.source;
-      } catch (err) {
-        this.state = 'error';
-        this.lastError = err;
-        throw err;
-      }
-    }
-
-    async _loadArchive(buf, source = {}) {
-      const files = await archiveFiles(buf);
-      if (!files) return null;
-      const libKey = Object.keys(files).find(k => /\.gsflib$/i.test(k));
-      if (!libKey) throw new Error('No .gsflib found in archive');
-      const libDecoded = await decodeProgram(files[libKey], { kind: 'gsflib', name: libKey });
-      const libInfo = await programInfo(files[libKey]);
-      this.library = {
-        key: libKey,
-        tags: tags(files[libKey]),
-        decoded: libDecoded,
-        ...(libInfo || {}),
-      };
-      this.memory = createMemoryImage();
-      applyDecodedProgram(this.memory, libDecoded, libKey);
-      const miniKeys = Object.keys(files).filter(k => /\.minigsf$/i.test(k)).sort();
-      this.entries = [];
-      for (const key of miniKeys) {
-        const patch = await miniPatch(files[key]);
-        const decoded = await decodeProgram(files[key], { kind: 'minigsf', name: key });
-        applyDecodedProgram(this.memory, decoded, key);
-        const entryTags = tags(files[key]);
-        this.entries.push({
-          key,
-          name: entryTags.title || key.replace(/\.minigsf$/i, ''),
-          tags: entryTags,
-          decoded,
-          patch,
-        });
-      }
-      this.source = {
-        kind: isSevenZip(buf) ? 'gsf-7z' : 'gsf-zip',
-        name: source.name || (isSevenZip(buf) ? 'Dropped 7z' : 'Dropped ZIP'),
-        library: libKey,
-        tags: this.library.tags,
-        minigsfCount: miniKeys.length,
-        ...(libInfo || {}),
-      };
-      this.decodeReport = this._makeDecodeReport();
-      this.state = 'loaded-no-emulator';
-      return this.source;
-    }
-
-    canPlay() {
-      return false;
-    }
-
-    async play() {
-      throw new Error('Standard GSF LLE playback needs a GBA CPU/APU emulator; this engine currently parses and compares payloads only.');
-    }
-
-    stop() {}
-
-    _makeDecodeReport() {
-      const segments = this.memory?.segments || [];
-      const warnings = [
-        ...(this.memory?.warnings || []),
-        ...(this.library?.decoded?.program?.warnings || []),
-        ...this.entries.flatMap(entry => entry.decoded?.program?.warnings || []),
-      ];
-      return {
-        source: this.source,
-        library: this.library ? {
-          key: this.library.key,
-          loadAddr: this.library.loadAddr,
-          dataSize: this.library.dataSize,
-          region: this.library.region,
-        } : null,
-        entries: this.entries.map(entry => ({
-          key: entry.key,
-          name: entry.name,
-          loadAddr: entry.patch?.loadAddr,
-          dataSize: entry.patch?.size,
-          region: entry.patch?.region,
-          tags: entry.tags,
-        })),
-        segments,
-        romBytesTouched: segments
-          .filter(segment => segment.region === 'rom')
-          .reduce((sum, segment) => sum + segment.dataSize, 0),
-        warnings,
-      };
-    }
-
-    reportText() {
-      const report = this.decodeReport;
-      if (!report) return this.summary();
-      const parts = [];
-      if (report.source?.kind) parts.push(`decoded ${report.source.kind}`);
-      if (report.library?.key) parts.push(`library ${report.library.key}`);
-      if (report.entries.length) parts.push(`${report.entries.length} entries`);
-      parts.push(`${report.segments.length} load segment${report.segments.length === 1 ? '' : 's'}`);
-      if (report.romBytesTouched) parts.push(`${report.romBytesTouched} ROM bytes`);
-      if (report.warnings.length) parts.push(`${report.warnings.length} warning${report.warnings.length === 1 ? '' : 's'}`);
-      return parts.join(' | ');
-    }
-
-    summary() {
-      if (this.state === 'empty') return 'GSF LLE: no GSF loaded';
-      if (this.state === 'error') return `GSF LLE: error ${this.lastError?.message || 'unknown'}`;
-      const parts = [`GSF LLE: ${this.label} payload decoded`];
-      if (this.source?.name) parts.push(this.source.name);
-      if (this.library?.key) parts.push(`library ${this.library.key}`);
-      if (this.entries.length) parts.push(`${this.entries.length} minigsf entries`);
-      if (this.source?.loadAddr != null && this.source?.dataSize != null) {
-        parts.push(`load 0x${this.source.loadAddr.toString(16).padStart(8, '0')} +${this.source.dataSize}`);
-      }
-      if (this.decodeReport) parts.push(this.reportText());
-      const summaryText = tagSummary(this.source?.tags);
-      if (summaryText) parts.push(summaryText);
-      parts.push('playback: not emulated yet');
-      return parts.join(' | ');
-    }
-  }
-
   window.GsfTools = {
+    GBA_ROM_BASE,
+    GBA_ROM_LIMIT,
+    GBA_REGIONS,
+    hex,
+    gbaRegionFor,
     isValid,
     isZip,
     isSevenZip,
@@ -532,8 +327,6 @@
     decompress,
     decodeProgram,
     decodeProgramBytes,
-    createMemoryImage,
-    applyDecodedProgram,
     programInfo,
     romImage,
     miniPatch,
@@ -541,5 +334,4 @@
     sevenZipFiles,
     archiveFiles,
   };
-  window.StandardGsfEngine = StandardGsfEngine;
 })();

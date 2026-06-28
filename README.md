@@ -22,7 +22,9 @@ No install step is required; the npm script only wraps Python's built-in static 
 
 ## GSF Decoder
 
-`gsf.js` includes a minimum viable GSF decoder. It parses the PSF/GSF container header, decompresses the executable payload, decodes the GBA entry/load/data header, maps loads to GBA memory regions, materializes ROM-backed payloads, and applies minigsf patches from ZIP/7z/gsflib sets into a decode report.
+`gsf.js` includes a minimum viable GSF decoder. It parses the PSF/GSF container header, decompresses the executable payload, decodes the GBA entry/load/data header, maps loads to GBA memory regions, and extracts ZIP/7z archive contents.
+
+`gsf_emulator.js` owns the LLE emulator boundary. It materializes ROM-backed payloads, applies minigsf patches from ZIP/7z/gsflib sets into a memory image, and exposes the first diagnostics scaffold for future CPU, IO hook, hot patch, timer, DMA, and sound register work.
 
 Playback through the standard GSF LLE path is not emulated yet. The decoder state is exposed for inspection with:
 
@@ -34,5 +36,6 @@ window.gs1Debug.gsfReport()
 
 - `index.html` - the player UI.
 - `mp2k.js` - the MP2K HLE player and Web Audio/software mixer paths.
-- `gsf.js` - the standard GSF decoder and LLE engine boundary for payload comparison.
+- `gsf.js` - the standard GSF decoder and archive utilities.
+- `gsf_emulator.js` - the GSF LLE emulator boundary and diagnostics scaffold.
 - `package.json` - convenience scripts for serving the project locally.

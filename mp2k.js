@@ -6011,7 +6011,7 @@ function updateInfoText() {
   }
   const selectedEngine = document.getElementById('engineSelect')?.value || 'mp2k-hle';
   const engine = `MP2k HLE engine | Backend: ${player.audioEng?.backendLabel || 'Web Audio graph'} | Song table: ROM ${hex(player.songTableAddr, 6)} (${player.songs.length} songs) | Mix rate: ${GBA_MIX_RATE} Hz | Tick: ${AGB_EXACT_FPS.toFixed(4)} Hz x tempo`;
-  const gsfEngine = standardGsfEngine ? standardGsfEngine.summary() : 'GSF LLE: gsf.js not loaded';
+  const gsfEngine = standardGsfEngine ? standardGsfEngine.summary() : 'GSF LLE: gsf_emulator.js not loaded';
   const compare = `Compare: selected ${selectedEngine === 'gsf-lle' ? 'GSF LLE' : 'MP2K HLE'} | HLE playable: ${player.songs.length ? 'yes' : 'no'} | LLE playable: ${standardGsfEngine?.canPlay() ? 'yes' : 'no'}`;
   document.getElementById('info').textContent = [...sourceParts, engine, gsfEngine, compare].join('\n');
 }

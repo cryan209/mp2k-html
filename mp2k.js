@@ -5231,13 +5231,15 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const audio = diagnostics?.audio;
       const run = diagnostics?.run;
       const audioSummary = audio
-        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} fifoA:${audio.sound.directSoundA.fifoWrites} fifoB:${audio.sound.directSoundB.fifoWrites}`
+        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites} fifoB:${audio.sound.directSoundB.fifoWrites}`
         : '';
+      const irq = diagnostics?.interrupts;
+      const irqSummary = irq ? ` | vbl:${irq.vblankCount} irq:${irq.pendingHex} ime:${irq.ime}` : '';
       const branch = run?.lastBranch;
       const branchSummary = branch ? ` via:${branch.kind}@${branch.pcHex}->${branch.targetHex || branch.pcHex}` : '';
       const pcSummary = run ? ` | +${run.ranInstructions} pc:${run.pcHex}${run.hotPcHex ? ` hot:${run.hotPcHex}/${run.hotPcHits}` : ''}${branchSummary}` : '';
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${pcSummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${pcSummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

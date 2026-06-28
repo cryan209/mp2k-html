@@ -55,7 +55,9 @@
   const IO_DMA_START = 0x040000b0;
   const IO_DMA_END = 0x040000e0;
   const GBA_CPU_HZ = 16777216;
+  const GBA_CYCLES_PER_FRAME = 280896;
   const TIMER_PRESCALERS = [1, 64, 256, 1024];
+  const IRQ_VBLANK = 0x0001;
 
   function signExtend24(v) {
     return (v & 0x00800000) ? (v | 0xff000000) : v;
@@ -130,6 +132,11 @@
       this.events = [];
       this.unmappedReads = 0;
       this.unmappedWrites = 0;
+      this.cycles = 0;
+      this.frameCycles = 0;
+      this.vblankCount = 0;
+      this.irqEvents = [];
+      this.dmaTransfers = [];
     }
 
     region(addr) {
@@ -182,8 +189,18 @@
     }
 
     write16(addr, value) {
+      addr >>>= 0;
+      value &= 0xffff;
+      if (addr === 0x04000202) {
+        const current = this.read16(addr);
+        const next = current & ~value;
+        this.write8(addr, next);
+        this.write8((addr + 1) >>> 0, next >>> 8);
+        return;
+      }
       this.write8(addr, value);
       this.write8((addr + 1) >>> 0, value >>> 8);
+      if (addr >= IO_DMA_START && addr < IO_DMA_END && ((addr - IO_DMA_START) % 12) === 10) this._maybeRunDma((addr - IO_DMA_START) / 12);
     }
 
     write32(addr, value) {
@@ -191,6 +208,94 @@
       this.write8((addr + 1) >>> 0, value >>> 8);
       this.write8((addr + 2) >>> 0, value >>> 16);
       this.write8((addr + 3) >>> 0, value >>> 24);
+    }
+
+    stepCycles(cycles) {
+      cycles = Math.max(1, cycles | 0);
+      this.cycles += cycles;
+      this.frameCycles += cycles;
+      while (this.frameCycles >= GBA_CYCLES_PER_FRAME) {
+        this.frameCycles -= GBA_CYCLES_PER_FRAME;
+        this._enterVBlank();
+      }
+    }
+
+    forceVBlank(reason = 'forced') {
+      this._enterVBlank(reason);
+    }
+
+    _enterVBlank(reason = 'frame') {
+      this.vblankCount++;
+      this.write16(0x04000006, 160);
+      this.write16(0x04000004, this.read16(0x04000004) | 0x0001);
+      this.requestIrq(IRQ_VBLANK, `vblank:${reason}`);
+    }
+
+    requestIrq(mask, reason = 'irq') {
+      const next = this.read16(0x04000202) | (mask & 0xffff);
+      this.write8(0x04000202, next);
+      this.write8(0x04000203, next >>> 8);
+      this.irqEvents.push({
+        mask: mask & 0xffff,
+        maskHex: tools.hex(mask & 0xffff, 4),
+        reason,
+        cycles: this.cycles,
+        ime: this.read16(0x04000208) & 1,
+        ieHex: tools.hex(this.read16(0x04000200), 4),
+        ifHex: tools.hex(this.read16(0x04000202), 4),
+      });
+      if (this.irqEvents.length > 128) this.irqEvents.shift();
+    }
+
+    pendingIrq(mask = 0xffff) {
+      const ime = this.read16(0x04000208) & 1;
+      const ie = this.read16(0x04000200);
+      const flags = this.read16(0x04000202);
+      return !!(ime && (ie & flags & mask));
+    }
+
+    _maybeRunDma(chFloat) {
+      const ch = chFloat | 0;
+      const base = 0x040000b0 + ch * 12;
+      const control = this.read16(base + 10);
+      if (!(control & 0x8000)) return;
+      const timing = (control >>> 12) & 3;
+      if (timing !== 0) return;
+      this._runDma(ch, 'immediate');
+    }
+
+    _runDma(ch, reason = 'manual') {
+      const base = 0x040000b0 + ch * 12;
+      let src = this.read32(base);
+      let dst = this.read32(base + 4);
+      let count = this.read16(base + 8);
+      const control = this.read16(base + 10);
+      const width = (control & 0x0400) ? 4 : 2;
+      if (!count) count = ch === 3 ? 0x10000 : 0x4000;
+      const maxCount = Math.min(count, 0x10000);
+      for (let i = 0; i < maxCount; i++) {
+        const value = width === 4 ? this.read32(src) : this.read16(src);
+        if (width === 4) this.write32(dst, value);
+        else this.write16(dst, value);
+        src = (src + width) >>> 0;
+        dst = (dst + width) >>> 0;
+      }
+      if (!(control & 0x0200)) {
+        const disabled = control & ~0x8000;
+        this.write8(base + 10, disabled);
+        this.write8(base + 11, disabled >>> 8);
+      }
+      this.dmaTransfers.push({
+        ch,
+        reason,
+        srcHex: tools.hex(this.read32(base)),
+        dstHex: tools.hex(this.read32(base + 4)),
+        count: maxCount,
+        width: width * 8,
+        controlHex: tools.hex(control, 4),
+      });
+      if (this.dmaTransfers.length > 64) this.dmaTransfers.shift();
+      if (control & 0x4000) this.requestIrq(1 << (8 + ch), `dma${ch}`);
     }
 
     _logIoWrite(addr, value, bytes) {
@@ -241,6 +346,7 @@
         this.regs[15] = (pc + 2) >>> 0;
         this.instructions++;
         this._execThumb(instr, pc);
+        this.bus.stepCycles(4);
         return;
       }
       const pc = this.regs[15] >>> 0;
@@ -249,8 +355,12 @@
       const instr = this.bus.read32(pc);
       this.regs[15] = (pc + 4) >>> 0;
       this.instructions++;
-      if (!this._conditionPassed(instr >>> 28)) return;
+      if (!this._conditionPassed(instr >>> 28)) {
+        this.bus.stepCycles(4);
+        return;
+      }
       this._execArm(instr, pc);
+      this.bus.stepCycles(4);
     }
 
     snapshot() {
@@ -894,7 +1004,10 @@
         r2: this.regs[2] >>> 0,
       };
       try {
-        if (num === 0x0b) call.result = this._biosCpuSet();
+        if (num === 0x02) call.result = this._biosHalt();
+        else if (num === 0x04) call.result = this._biosIntrWait();
+        else if (num === 0x05) call.result = this._biosVBlankIntrWait();
+        else if (num === 0x0b) call.result = this._biosCpuSet();
         else call.result = 'stubbed';
       } catch (err) {
         call.result = 'error';
@@ -936,6 +1049,31 @@
         0x1f: 'MidiKey2Freq',
       };
       return names[num] || `SWI_${tools.hex(num, 2)}`;
+    }
+
+    _biosHalt() {
+      this.bus.forceVBlank('halt');
+      return 'advanced to vblank';
+    }
+
+    _biosIntrWait() {
+      const discardOld = !!this.regs[0];
+      const mask = this.regs[1] & 0xffff;
+      if (discardOld) this.bus.write16(0x04000202, mask);
+      let frames = 0;
+      while (!this.bus.pendingIrq(mask) && frames < 8) {
+        this.bus.forceVBlank('intrwait');
+        frames++;
+      }
+      return `waited ${frames} frame${frames === 1 ? '' : 's'} for ${tools.hex(mask, 4)}`;
+    }
+
+    _biosVBlankIntrWait() {
+      this.bus.write16(0x04000200, this.bus.read16(0x04000200) | IRQ_VBLANK);
+      this.bus.write16(0x04000208, 1);
+      this.bus.write16(0x04000202, IRQ_VBLANK);
+      this.bus.forceVBlank('vblankintrwait');
+      return 'vblank';
     }
 
     _biosCpuSet() {
@@ -1200,6 +1338,7 @@
           unmappedWrites: this.bus.unmappedWrites,
         },
         audio: this._makeAudioDiagnostics(soundWrites, timerWrites, dmaWrites),
+        interrupts: this._makeInterruptDiagnostics(),
         bios: {
           swiCalls: swiCalls.length,
           recent: swiCalls.slice(-32).map(call => ({
@@ -1217,6 +1356,22 @@
         ],
       };
       return this.diagnostics;
+    }
+
+    _makeInterruptDiagnostics() {
+      const ime = this.bus.read16(0x04000208) & 1;
+      const ie = this.bus.read16(0x04000200);
+      const flags = this.bus.read16(0x04000202);
+      return {
+        ime,
+        ieHex: tools.hex(ie, 4),
+        ifHex: tools.hex(flags, 4),
+        pendingHex: tools.hex(ime ? (ie & flags) : 0, 4),
+        vblankCount: this.bus.vblankCount,
+        cycles: this.bus.cycles,
+        frameCycles: this.bus.frameCycles,
+        recent: this.bus.irqEvents.slice(-24),
+      };
     }
 
     _makeAudioDiagnostics(soundWrites, timerWrites, dmaWrites) {
@@ -1306,6 +1461,7 @@
         },
         timers,
         dma: dmas,
+        dmaTransfers: this.bus.dmaTransfers.slice(-16),
         activeTimers: timers.filter(t => t.enabled).map(t => t.ch),
         soundDma: dmas.filter(d => d.enabled && d.soundFifo).map(d => d.ch),
       };

@@ -5236,8 +5236,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const irq = diagnostics?.interrupts;
       const irqSummary = irq ? ` | vbl:${irq.vblankCount} irq:${irq.pendingHex} ime:${irq.ime}` : '';
       const branch = run?.lastBranch;
+      const sourceBranch = run?.faultSourceBranch;
       const branchSummary = branch ? ` via:${branch.kind}@${branch.pcHex}->${branch.targetHex || branch.pcHex}` : '';
-      const pcSummary = run ? ` | +${run.ranInstructions} pc:${run.pcHex}${run.hotPcHex ? ` hot:${run.hotPcHex}/${run.hotPcHits}` : ''}${branchSummary}` : '';
+      const sourceSummary = sourceBranch ? ` from:${sourceBranch.kind}@${sourceBranch.pcHex}->${sourceBranch.targetHex}` : '';
+      const pcSummary = run ? ` | +${run.ranInstructions} pc:${run.pcHex}${run.hotPcHex ? ` hot:${run.hotPcHex}/${run.hotPcHits}` : ''}${branchSummary}${sourceSummary}` : '';
       setStatus(cpu
         ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${pcSummary}`
         : 'GSF CPU diagnostics unavailable.');

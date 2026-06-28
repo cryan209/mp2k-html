@@ -389,8 +389,10 @@
     _canFetch(pc, bytes) {
       const r = this.bus.executableRegion(pc);
       if (r && r.off + bytes <= r.data.length) return true;
+      const source = this.branches.slice().reverse().find(branch => branch.kind !== 'fetch-fault') || null;
       this.halted = true;
-      this.reason = `pc-out-of-range fetch ${bytes * 8}-bit at ${tools.hex(pc)}`;
+      const sourceText = source ? ` from ${source.kind} ${source.pcHex}->${source.targetHex}` : '';
+      this.reason = `pc-out-of-range fetch ${bytes * 8}-bit at ${tools.hex(pc)}${sourceText}`;
       this.branches.push({
         kind: 'fetch-fault',
         pc: pc >>> 0,
@@ -398,6 +400,7 @@
         thumb: !!(this.cpsr & CPSR_T),
         lrHex: tools.hex(this.regs[14]),
         spHex: tools.hex(this.regs[13]),
+        source,
       });
       if (this.branches.length > 128) this.branches.shift();
       return false;
@@ -1300,6 +1303,9 @@
       const ranInstructions = cpu.instructions - startInstructions;
       const events = this.bus.events;
       const lastBranch = cpu.branches?.slice(-1)[0] || null;
+      const faultSourceBranch = lastBranch?.kind === 'fetch-fault'
+        ? (lastBranch.source || cpu.branches?.slice(0, -1).reverse().find(branch => branch.kind !== 'fetch-fault') || null)
+        : null;
       const soundWrites = events.filter(ev => ev.kind === 'sound');
       const timerWrites = events.filter(ev => ev.kind === 'timer');
       const dmaWrites = events.filter(ev => ev.kind === 'dma');
@@ -1322,6 +1328,7 @@
           hotPcHex: cpu.pcHotspots?.[0]?.pcHex || null,
           hotPcHits: cpu.pcHotspots?.[0]?.hits || 0,
           lastBranch,
+          faultSourceBranch,
         },
         io: {
           totalWrites: events.length,

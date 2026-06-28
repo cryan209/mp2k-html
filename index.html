@@ -81,7 +81,9 @@ button.ctrl.active { background:#6366f1; border-color:#6366f1; color:#fff; }
 .preview-status { grid-column:1 / -1; color:#64748b; font-size:9px; min-height:12px; }
 
 #info { font-size:10px; margin-top:10px; color:#374151; text-align:center; line-height:1.6; max-width:min(980px, calc(100vw - 32px)); white-space:pre-line; }
+#filePicker { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
 #dropmsg { font-size:10px; color:#4b5563; margin-top:12px; text-align:center; }
+.file-actions { display:flex; justify-content:center; margin-top:8px; }
 
 .debug-panel { display:none; width:min(980px, calc(100vw - 32px)); margin-top:14px; border:1px solid #1e2235; border-radius:6px; background:#0a0a14; overflow:hidden; }
 .debug-panel.open { display:block; }
@@ -270,7 +272,11 @@ button.ctrl.active { background:#6366f1; border-color:#6366f1; color:#fff; }
 </div>
 
 <div id="info"></div>
-<div id="dropmsg">Drop a GBA ROM, GSF dump, minigsf, gsflib, or ZIP here, or click to choose a file</div>
+<div id="dropmsg">Drop a GBA ROM, GSF dump, minigsf, gsflib, or ZIP here</div>
+<div class="file-actions">
+  <input id="filePicker" type="file" accept=".gba,.bin,.gsf,.gsflib,.minigsf,.zip">
+  <label class="ctrl" for="filePicker">Choose File</label>
+</div>
 
 <script src="gsf.js"></script>
 <script src="mp2k.js"></script>

@@ -6121,18 +6121,20 @@ document.body.addEventListener('drop', e => {
 });
 
 // File picker fallback
-document.getElementById('dropmsg').addEventListener('click', () => {
-  const inp = document.createElement('input');
-  inp.type = 'file';
-  inp.accept = '.gba,.bin,.gsf,.gsflib,.minigsf,.zip';
-  inp.onchange = e => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => initWithBuffer(ev.target.result, { name: file.name });
-    reader.readAsArrayBuffer(file);
+const filePicker = document.getElementById('filePicker');
+filePicker.addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    initWithBuffer(ev.target.result, { name: file.name });
+    filePicker.value = '';
   };
-  inp.click();
+  reader.readAsArrayBuffer(file);
+});
+
+document.getElementById('dropmsg').addEventListener('click', () => {
+  filePicker.click();
 });
 
 // Keyboard shortcuts

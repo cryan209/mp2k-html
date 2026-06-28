@@ -54,6 +54,8 @@
   const IO_TIMER_END = 0x04000110;
   const IO_DMA_START = 0x040000b0;
   const IO_DMA_END = 0x040000e0;
+  const GBA_CPU_HZ = 16777216;
+  const TIMER_PRESCALERS = [1, 64, 256, 1024];
 
   function signExtend24(v) {
     return (v & 0x00800000) ? (v | 0xff000000) : v;
@@ -79,6 +81,40 @@
 
   function subOverflow(a, b, r) {
     return ((a ^ b) & (a ^ r) & 0x80000000) !== 0;
+  }
+
+  function ioName(addr) {
+    const names = {
+      0x04000060: 'SOUND1CNT_L',
+      0x04000062: 'SOUND1CNT_H',
+      0x04000064: 'SOUND1CNT_X',
+      0x04000068: 'SOUND2CNT_L',
+      0x0400006c: 'SOUND2CNT_H',
+      0x04000070: 'SOUND3CNT_L',
+      0x04000072: 'SOUND3CNT_H',
+      0x04000074: 'SOUND3CNT_X',
+      0x04000078: 'SOUND4CNT_L',
+      0x0400007c: 'SOUND4CNT_H',
+      0x04000080: 'SOUNDCNT_L',
+      0x04000082: 'SOUNDCNT_H',
+      0x04000084: 'SOUNDCNT_X',
+      0x04000088: 'SOUNDBIAS',
+      0x040000a0: 'FIFO_A',
+      0x040000a4: 'FIFO_B',
+    };
+    if (addr >= IO_TIMER_START && addr < IO_TIMER_END) {
+      const ch = (addr - IO_TIMER_START) >>> 2;
+      return ((addr - IO_TIMER_START) & 2) ? `TM${ch}CNT_H` : `TM${ch}CNT_L`;
+    }
+    if (addr >= IO_DMA_START && addr < IO_DMA_END) {
+      const ch = Math.floor((addr - IO_DMA_START) / 12);
+      const off = (addr - IO_DMA_START) % 12;
+      if (off < 4) return `DMA${ch}SAD`;
+      if (off < 8) return `DMA${ch}DAD`;
+      if (off < 10) return `DMA${ch}CNT_L`;
+      return `DMA${ch}CNT_H`;
+    }
+    return null;
   }
 
   class GbaMemoryBus {
@@ -1063,11 +1099,13 @@
           recent: events.slice(-64).map(ev => ({
             ...ev,
             addrHex: tools.hex(ev.addr),
+            name: ioName(ev.addr),
             valueHex: tools.hex(ev.value, ev.bytes * 2),
           })),
           unmappedReads: this.bus.unmappedReads,
           unmappedWrites: this.bus.unmappedWrites,
         },
+        audio: this._makeAudioDiagnostics(soundWrites, timerWrites, dmaWrites),
         bios: {
           swiCalls: swiCalls.length,
           recent: swiCalls.slice(-32).map(call => ({
@@ -1085,6 +1123,98 @@
         ],
       };
       return this.diagnostics;
+    }
+
+    _makeAudioDiagnostics(soundWrites, timerWrites, dmaWrites) {
+      const reg16 = addr => this.bus.read16(addr) & 0xffff;
+      const reg32 = addr => this.bus.read32(addr) >>> 0;
+      const soundCntL = reg16(0x04000080);
+      const soundCntH = reg16(0x04000082);
+      const soundCntX = reg16(0x04000084);
+      const soundBias = reg16(0x04000088);
+      const fifoA = soundWrites.filter(ev => ev.addr >= 0x040000a0 && ev.addr < 0x040000a4).length;
+      const fifoB = soundWrites.filter(ev => ev.addr >= 0x040000a4 && ev.addr < 0x040000a8).length;
+      const timers = [];
+      for (let ch = 0; ch < 4; ch++) {
+        const base = 0x04000100 + ch * 4;
+        const reload = reg16(base);
+        const control = reg16(base + 2);
+        const prescaler = TIMER_PRESCALERS[control & 3];
+        const period = 0x10000 - reload;
+        const enabled = !!(control & 0x80);
+        const cascade = !!(control & 0x04);
+        timers.push({
+          ch,
+          reload,
+          reloadHex: tools.hex(reload, 4),
+          controlHex: tools.hex(control, 4),
+          enabled,
+          cascade,
+          irq: !!(control & 0x40),
+          prescaler,
+          rateHz: enabled && !cascade && period > 0 ? GBA_CPU_HZ / (prescaler * period) : 0,
+          writes: timerWrites.filter(ev => ev.addr >= base && ev.addr < base + 4).length,
+        });
+      }
+      const dmas = [];
+      for (let ch = 0; ch < 4; ch++) {
+        const base = 0x040000b0 + ch * 12;
+        const src = reg32(base);
+        const dst = reg32(base + 4);
+        const count = reg16(base + 8);
+        const control = reg16(base + 10);
+        const timing = (control >>> 12) & 3;
+        dmas.push({
+          ch,
+          srcHex: tools.hex(src),
+          dstHex: tools.hex(dst),
+          count,
+          controlHex: tools.hex(control, 4),
+          enabled: !!(control & 0x8000),
+          irq: !!(control & 0x4000),
+          timing: ['immediate', 'vblank', 'hblank', 'special'][timing],
+          repeat: !!(control & 0x0200),
+          width: (control & 0x0400) ? 32 : 16,
+          soundFifo: dst >= 0x040000a0 && dst < 0x040000a8,
+          writes: dmaWrites.filter(ev => ev.addr >= base && ev.addr < base + 12).length,
+        });
+      }
+      return {
+        sound: {
+          enabled: !!(soundCntX & 0x0080),
+          soundCntLHex: tools.hex(soundCntL, 4),
+          soundCntHHex: tools.hex(soundCntH, 4),
+          soundCntXHex: tools.hex(soundCntX, 4),
+          soundBiasHex: tools.hex(soundBias, 4),
+          masterVolume: (soundCntH >>> 8) & 3,
+          directSoundA: {
+            volume100: !!(soundCntH & 0x0004),
+            right: !!(soundCntH & 0x0100),
+            left: !!(soundCntH & 0x0200),
+            timer: (soundCntH & 0x0400) ? 1 : 0,
+            reset: !!(soundCntH & 0x0800),
+            fifoWrites: fifoA,
+          },
+          directSoundB: {
+            volume100: !!(soundCntH & 0x0008),
+            right: !!(soundCntH & 0x1000),
+            left: !!(soundCntH & 0x2000),
+            timer: (soundCntH & 0x4000) ? 1 : 0,
+            reset: !!(soundCntH & 0x8000),
+            fifoWrites: fifoB,
+          },
+          recent: soundWrites.slice(-24).map(ev => ({
+            ...ev,
+            addrHex: tools.hex(ev.addr),
+            name: ioName(ev.addr),
+            valueHex: tools.hex(ev.value, ev.bytes * 2),
+          })),
+        },
+        timers,
+        dma: dmas,
+        activeTimers: timers.filter(t => t.enabled).map(t => t.ch),
+        soundDma: dmas.filter(d => d.enabled && d.soundFifo).map(d => d.ch),
+      };
     }
 
     _makeDecodeReport() {

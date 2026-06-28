@@ -982,12 +982,25 @@
       if (pop) {
         for (let r = 0; r < 8; r++) {
           if (!(list & (1 << r))) continue;
-          this._writeReg(r, this.bus.read32(this.regs[13] & ~3), 'thumb-pop', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(this.regs[13] & ~3) });
+          const addr = this.regs[13] & ~3;
+          const value = this.bus.read32(addr);
+          this._writeReg(r, value, 'thumb-pop', (this.regs[15] - 2) >>> 0, {
+            addrHex: tools.hex(addr),
+            readValueHex: tools.hex(value),
+            spBeforeHex: tools.hex(this.regs[13]),
+            spWrite: this.regWrites[13] ? { ...this.regWrites[13] } : null,
+          });
           this._writeReg(13, (this.regs[13] + 4) >>> 0, 'thumb-pop-sp', (this.regs[15] - 2) >>> 0);
         }
         if (extra) {
-          const target = this.bus.read32(this.regs[13] & ~3);
-          this._recordBranch('thumb-pop-pc', (this.regs[15] - 2) >>> 0, target);
+          const addr = this.regs[13] & ~3;
+          const target = this.bus.read32(addr);
+          this._recordBranch('thumb-pop-pc', (this.regs[15] - 2) >>> 0, target, {
+            addrHex: tools.hex(addr),
+            readValueHex: tools.hex(target),
+            spBeforeHex: tools.hex(this.regs[13]),
+            spWrite: this.regWrites[13] ? { ...this.regWrites[13] } : null,
+          });
           this._setRegThumb(15, target);
           this._writeReg(13, (this.regs[13] + 4) >>> 0, 'thumb-pop-sp', (this.regs[15] - 2) >>> 0);
         }

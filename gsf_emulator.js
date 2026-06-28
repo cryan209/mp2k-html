@@ -368,7 +368,7 @@
 
     _singleDataTransfer(instr) {
       const immediateOffset = !(instr & 0x02000000);
-      if (!immediateOffset) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
+      if (!immediateOffset && (instr & 0x00000010)) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
       const pre = !!(instr & 0x01000000);
       const up = !!(instr & 0x00800000);
       const byte = !!(instr & 0x00400000);
@@ -376,7 +376,7 @@
       const load = !!(instr & 0x00100000);
       const rn = (instr >>> 16) & 0xf;
       const rd = (instr >>> 12) & 0xf;
-      const off = instr & 0xfff;
+      const off = immediateOffset ? (instr & 0xfff) : this._shiftedRegisterOffset(instr);
       const base = this._reg(rn);
       const offsetAddr = up ? (base + off) >>> 0 : (base - off) >>> 0;
       const addr = pre ? offsetAddr : base;
@@ -389,6 +389,18 @@
         else this.bus.write32(addr & ~3, value);
       }
       if (writeBack || !pre) this._setReg(rn, finalBase);
+    }
+
+    _shiftedRegisterOffset(instr) {
+      const rm = instr & 0xf;
+      const shiftType = (instr >>> 5) & 3;
+      const amount = (instr >>> 7) & 0x1f;
+      const value = this._reg(rm);
+      if (shiftType === 0) return amount ? (value << amount) >>> 0 : value;
+      if (shiftType === 1) return amount ? value >>> amount : 0;
+      if (shiftType === 2) return amount ? (value >> amount) >>> 0 : (value & 0x80000000 ? 0xffffffff : 0);
+      if (!amount) return ((this.cpsr & CPSR_C ? 0x80000000 : 0) | (value >>> 1)) >>> 0;
+      return ror32(value, amount);
     }
 
     _halfwordDataTransfer(instr) {

@@ -5410,6 +5410,8 @@ document.getElementById('songSelect').addEventListener('change', (e) => {
 
 window.gs1Debug = {
   state: () => player.debugSnapshot(),
+  gsf: () => standardGsfEngine,
+  gsfReport: () => standardGsfEngine?.decodeReport || null,
   profiles: () => Object.fromEntries(Object.entries(ENGINE_PROFILES).map(([id, profile]) => [id, profile.label])),
   profile: (id = null) => {
     if (id == null) return player.profile || DEFAULT_ENGINE_PROFILE;

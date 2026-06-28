@@ -9,6 +9,38 @@
   const GSF_MAGIC = [0x50, 0x53, 0x46, 0x22]; // "PSF", version 0x22
   const GBA_ROM_BASE = 0x08000000;
   const GBA_ROM_LIMIT = 32 * 1024 * 1024;
+  const GBA_REGIONS = [
+    { id: 'ewram', label: 'EWRAM', start: 0x02000000, size: 256 * 1024 },
+    { id: 'iwram', label: 'IWRAM', start: 0x03000000, size: 32 * 1024 },
+    { id: 'io', label: 'I/O', start: 0x04000000, size: 1024 },
+    { id: 'palette', label: 'Palette RAM', start: 0x05000000, size: 1024 },
+    { id: 'vram', label: 'VRAM', start: 0x06000000, size: 96 * 1024 },
+    { id: 'oam', label: 'OAM', start: 0x07000000, size: 1024 },
+    { id: 'rom', label: 'Game Pak ROM', start: GBA_ROM_BASE, size: GBA_ROM_LIMIT },
+    { id: 'sram', label: 'SRAM', start: 0x0e000000, size: 64 * 1024 },
+  ];
+
+  function hex(v, width = 8) {
+    return `0x${(v >>> 0).toString(16).padStart(width, '0')}`;
+  }
+
+  function gbaRegionFor(addr, size = 1) {
+    const start = addr >>> 0;
+    const end = (start + Math.max(0, size) - 1) >>> 0;
+    return GBA_REGIONS.find(region => start >= region.start && end < region.start + region.size) || null;
+  }
+
+  function parseContainerHeader(buf) {
+    if (!isValid(buf)) return null;
+    const view = new DataView(buf);
+    return {
+      magic: 'PSF\\x22',
+      version: 0x22,
+      reservedSize: view.getUint32(4, true),
+      compressedSize: view.getUint32(8, true),
+      crc32: view.getUint32(12, true),
+    };
+  }
 
   function isValid(buf) {
     if (!buf || buf.byteLength < 16) return false;
@@ -83,40 +115,121 @@
     return inflate(compressed, 'deflate');
   }
 
+  function decodeProgramBytes(executable, source = {}) {
+    const u8 = executable instanceof Uint8Array ? executable : new Uint8Array(executable);
+    const warnings = [];
+    if (u8.byteLength < 12) throw new Error('GSF executable payload is shorter than 12 bytes');
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const entryAddr = dv.getUint32(0, true);
+    const loadAddr = dv.getUint32(4, true);
+    const dataSize = dv.getUint32(8, true);
+    if (dataSize > u8.byteLength - 12) {
+      warnings.push(`declared ${dataSize} bytes but only ${u8.byteLength - 12} payload bytes are present`);
+    }
+    const clippedSize = Math.min(dataSize, Math.max(0, u8.byteLength - 12));
+    const region = gbaRegionFor(loadAddr, clippedSize);
+    if (!region) warnings.push(`load address ${hex(loadAddr)} +${clippedSize} is outside a single known GBA memory region`);
+    return {
+      kind: source.kind || 'gsf-program',
+      name: source.name || '',
+      entryAddr,
+      loadAddr,
+      dataSize,
+      clippedSize,
+      endAddr: (loadAddr + clippedSize) >>> 0,
+      region,
+      data: u8.slice(12, 12 + clippedSize),
+      executableSize: u8.byteLength,
+      warnings,
+    };
+  }
+
+  async function decodeProgram(buf, source = {}) {
+    if (!isValid(buf)) return null;
+    const container = parseContainerHeader(buf);
+    const executable = await decompress(buf);
+    const program = decodeProgramBytes(executable, source);
+    return {
+      container,
+      executable,
+      program,
+      tags: tags(buf),
+    };
+  }
+
+  function createMemoryImage(size = GBA_ROM_LIMIT) {
+    return {
+      rom: new Uint8Array(size),
+      segments: [],
+      warnings: [],
+    };
+  }
+
+  function applyDecodedProgram(memory, decoded, label = decoded?.program?.name || 'program') {
+    const program = decoded?.program || decoded;
+    if (!program?.data) return false;
+    const region = program.region || gbaRegionFor(program.loadAddr, program.clippedSize);
+    const segment = {
+      label,
+      region: region?.id || 'unknown',
+      loadAddr: program.loadAddr,
+      dataSize: program.clippedSize,
+      endAddr: program.endAddr,
+    };
+    memory.segments.push(segment);
+    if (region?.id !== 'rom') {
+      memory.warnings.push(`${label} loads into ${region?.label || 'unknown memory'}, not ROM; stored as segment only`);
+      return false;
+    }
+    const romOffset = program.loadAddr - GBA_ROM_BASE;
+    if (romOffset < 0 || romOffset + program.clippedSize > memory.rom.length) {
+      memory.warnings.push(`${label} ROM write ${hex(program.loadAddr)} +${program.clippedSize} is out of range`);
+      return false;
+    }
+    memory.rom.set(program.data, romOffset);
+    return true;
+  }
+
   async function programInfo(buf) {
     if (!isValid(buf)) return null;
-    const dec = await decompress(buf);
-    const dv = new DataView(dec.buffer, dec.byteOffset, dec.byteLength);
+    const decoded = await decodeProgram(buf);
+    const program = decoded.program;
     return {
-      loadAddr: dv.getUint32(4, true),
-      dataSize: dv.getUint32(8, true),
-      reservedSize: new DataView(buf).getUint32(4, true),
-      compressedSize: new DataView(buf).getUint32(8, true),
+      entryAddr: program.entryAddr,
+      loadAddr: program.loadAddr,
+      dataSize: program.dataSize,
+      decodedSize: program.clippedSize,
+      region: program.region?.id || 'unknown',
+      reservedSize: decoded.container.reservedSize,
+      compressedSize: decoded.container.compressedSize,
     };
   }
 
   async function romImage(buf) {
     if (!isValid(buf)) return null;
-    const dec = await decompress(buf);
-    const dv = new DataView(dec.buffer, dec.byteOffset, dec.byteLength);
-    const loadAddr = dv.getUint32(4, true);
-    const dataSize = dv.getUint32(8, true);
+    const decoded = await decodeProgram(buf);
+    const { loadAddr, clippedSize, region, data } = decoded.program;
     const romOffset = loadAddr - GBA_ROM_BASE;
-    if (romOffset < 0 || romOffset > GBA_ROM_LIMIT) {
+    if (region?.id !== 'rom' || romOffset < 0 || romOffset > GBA_ROM_LIMIT) {
       throw new Error(`GSF load address out of range: 0x${loadAddr.toString(16)}`);
     }
-    const rom = new ArrayBuffer(romOffset + dataSize);
-    new Uint8Array(rom).set(dec.subarray(12, 12 + dataSize), romOffset);
+    const rom = new ArrayBuffer(romOffset + clippedSize);
+    new Uint8Array(rom).set(data, romOffset);
     return rom;
   }
 
   async function miniPatch(buf) {
     if (!isValid(buf)) return null;
-    const dec = await decompress(buf);
-    const dv = new DataView(dec.buffer, dec.byteOffset, dec.byteLength);
-    const loadAddr = dv.getUint32(4, true);
-    const size = dv.getUint32(8, true);
-    return { loadAddr, data: dec.slice(12, 12 + size) };
+    const decoded = await decodeProgram(buf, { kind: 'minigsf' });
+    const program = decoded.program;
+    return {
+      entryAddr: program.entryAddr,
+      loadAddr: program.loadAddr,
+      size: program.clippedSize,
+      region: program.region?.id || 'unknown',
+      data: program.data,
+      warnings: program.warnings,
+    };
   }
 
   async function zipFiles(buf) {
@@ -176,6 +289,8 @@
       this.source = null;
       this.library = null;
       this.entries = [];
+      this.memory = null;
+      this.decodeReport = null;
       this.lastError = null;
     }
 
@@ -184,6 +299,8 @@
       this.source = null;
       this.library = null;
       this.entries = [];
+      this.memory = null;
+      this.decodeReport = null;
       this.lastError = null;
     }
 
@@ -192,6 +309,10 @@
       try {
         if (isZip(buf)) return await this._loadZip(buf, source);
         if (!isValid(buf)) return null;
+        const decoded = await decodeProgram(buf, {
+          kind: /\.minigsf$/i.test(source.name || '') ? 'minigsf' : 'gsf',
+          name: source.name || 'Dropped GSF',
+        });
         const info = await programInfo(buf);
         this.source = {
           kind: /\.minigsf$/i.test(source.name || '') ? 'minigsf' : 'gsf',
@@ -199,11 +320,15 @@
           tags: tags(buf),
           ...(info || {}),
         };
+        this.memory = createMemoryImage();
+        applyDecodedProgram(this.memory, decoded, this.source.name);
         this.entries = [{
           name: this.source.tags.title || this.source.name,
           tags: this.source.tags,
+          decoded,
           patch: await miniPatch(buf),
         }];
+        this.decodeReport = this._makeDecodeReport();
         this.state = 'loaded-no-emulator';
         return this.source;
       } catch (err) {
@@ -218,21 +343,28 @@
       if (!files) return null;
       const libKey = Object.keys(files).find(k => /\.gsflib$/i.test(k));
       if (!libKey) throw new Error('No .gsflib found in ZIP');
+      const libDecoded = await decodeProgram(files[libKey], { kind: 'gsflib', name: libKey });
       const libInfo = await programInfo(files[libKey]);
       this.library = {
         key: libKey,
         tags: tags(files[libKey]),
+        decoded: libDecoded,
         ...(libInfo || {}),
       };
+      this.memory = createMemoryImage();
+      applyDecodedProgram(this.memory, libDecoded, libKey);
       const miniKeys = Object.keys(files).filter(k => /\.minigsf$/i.test(k)).sort();
       this.entries = [];
       for (const key of miniKeys) {
         const patch = await miniPatch(files[key]);
+        const decoded = await decodeProgram(files[key], { kind: 'minigsf', name: key });
+        applyDecodedProgram(this.memory, decoded, key);
         const entryTags = tags(files[key]);
         this.entries.push({
           key,
           name: entryTags.title || key.replace(/\.minigsf$/i, ''),
           tags: entryTags,
+          decoded,
           patch,
         });
       }
@@ -244,6 +376,7 @@
         minigsfCount: miniKeys.length,
         ...(libInfo || {}),
       };
+      this.decodeReport = this._makeDecodeReport();
       this.state = 'loaded-no-emulator';
       return this.source;
     }
@@ -258,16 +391,61 @@
 
     stop() {}
 
+    _makeDecodeReport() {
+      const segments = this.memory?.segments || [];
+      const warnings = [
+        ...(this.memory?.warnings || []),
+        ...(this.library?.decoded?.program?.warnings || []),
+        ...this.entries.flatMap(entry => entry.decoded?.program?.warnings || []),
+      ];
+      return {
+        source: this.source,
+        library: this.library ? {
+          key: this.library.key,
+          loadAddr: this.library.loadAddr,
+          dataSize: this.library.dataSize,
+          region: this.library.region,
+        } : null,
+        entries: this.entries.map(entry => ({
+          key: entry.key,
+          name: entry.name,
+          loadAddr: entry.patch?.loadAddr,
+          dataSize: entry.patch?.size,
+          region: entry.patch?.region,
+          tags: entry.tags,
+        })),
+        segments,
+        romBytesTouched: segments
+          .filter(segment => segment.region === 'rom')
+          .reduce((sum, segment) => sum + segment.dataSize, 0),
+        warnings,
+      };
+    }
+
+    reportText() {
+      const report = this.decodeReport;
+      if (!report) return this.summary();
+      const parts = [];
+      if (report.source?.kind) parts.push(`decoded ${report.source.kind}`);
+      if (report.library?.key) parts.push(`library ${report.library.key}`);
+      if (report.entries.length) parts.push(`${report.entries.length} entries`);
+      parts.push(`${report.segments.length} load segment${report.segments.length === 1 ? '' : 's'}`);
+      if (report.romBytesTouched) parts.push(`${report.romBytesTouched} ROM bytes`);
+      if (report.warnings.length) parts.push(`${report.warnings.length} warning${report.warnings.length === 1 ? '' : 's'}`);
+      return parts.join(' | ');
+    }
+
     summary() {
       if (this.state === 'empty') return 'GSF LLE: no GSF loaded';
       if (this.state === 'error') return `GSF LLE: error ${this.lastError?.message || 'unknown'}`;
-      const parts = [`GSF LLE: ${this.label} payload loaded`];
+      const parts = [`GSF LLE: ${this.label} payload decoded`];
       if (this.source?.name) parts.push(this.source.name);
       if (this.library?.key) parts.push(`library ${this.library.key}`);
       if (this.entries.length) parts.push(`${this.entries.length} minigsf entries`);
       if (this.source?.loadAddr != null && this.source?.dataSize != null) {
         parts.push(`load 0x${this.source.loadAddr.toString(16).padStart(8, '0')} +${this.source.dataSize}`);
       }
+      if (this.decodeReport) parts.push(this.reportText());
       const summaryText = tagSummary(this.source?.tags);
       if (summaryText) parts.push(summaryText);
       parts.push('playback: not emulated yet');
@@ -282,6 +460,10 @@
     tags,
     tagSummary,
     decompress,
+    decodeProgram,
+    decodeProgramBytes,
+    createMemoryImage,
+    applyDecodedProgram,
     programInfo,
     romImage,
     miniPatch,

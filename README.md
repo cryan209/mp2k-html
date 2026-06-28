@@ -13,16 +13,26 @@ npm start
 Then open:
 
 ```text
-http://localhost:8000/music-player/
+http://localhost:8000/
 ```
 
-The dev server is rooted at the parent repository so `index.html` can auto-load `../baserom.gba` for the local Golden Sun workspace. You can also drag and drop a `.gba`, `.bin`, `.gsf`, `.gsflib`, `.minigsf`, or `.zip` file onto the page.
+You can drag and drop a `.gba`, `.bin`, `.gsf`, `.gsflib`, `.minigsf`, or `.zip` file onto the page.
 
 No install step is required; the npm script only wraps Python's built-in static file server.
+
+## GSF Decoder
+
+`gsf.js` includes a minimum viable GSF decoder. It parses the PSF/GSF container header, decompresses the executable payload, decodes the GBA entry/load/data header, maps loads to GBA memory regions, materializes ROM-backed payloads, and applies minigsf patches from ZIP/gsflib sets into a decode report.
+
+Playback through the standard GSF LLE path is not emulated yet. The decoder state is exposed for inspection with:
+
+```js
+window.gs1Debug.gsfReport()
+```
 
 ## Files
 
 - `index.html` - the player UI.
 - `mp2k.js` - the MP2K HLE player and Web Audio/software mixer paths.
-- `gsf.js` - the standard GSF container/LLE engine boundary for payload comparison.
+- `gsf.js` - the standard GSF decoder and LLE engine boundary for payload comparison.
 - `package.json` - convenience scripts for serving the project locally.

@@ -5240,6 +5240,9 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const fifoA = diagnostics?.fifo?.renderSamplesA ?? diagnostics?.fifo?.samplesA ?? 0;
       const fifoB = diagnostics?.fifo?.renderSamplesB ?? diagnostics?.fifo?.samplesB ?? 0;
       const fifoFill = diagnostics?.fifo ? ` fill:${diagnostics.fifo.fillBytesA || 0}/${diagnostics.fifo.fillBytesB || 0} q:${diagnostics.fifo.queueA || 0}/${diagnostics.fifo.queueB || 0}` : '';
+      const fifoDma = diagnostics?.fifo?.dmaLog?.length
+        ? ` dmaSrc:[${diagnostics.fifo.dmaLog.slice(0, 4).map(d => `d${d.ch}@${d.srcHex}->${d.dstHex}:${d.words.join('/')}`).join(' ')}]`
+        : '';
       const dsTimerA = audio?.timers?.[audio?.sound?.directSoundA?.timer || 0];
       const dsTimerB = audio?.timers?.[audio?.sound?.directSoundB?.timer || 0];
       const timerDetail = dsTimerA ? ` tmA:${dsTimerA.ch}/${dsTimerA.reloadHex}/${dsTimerA.counterHex}/${dsTimerA.controlHex}/${dsTimerA.rateHz}Hz` : '';
@@ -5247,7 +5250,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const reloadLog = audio?.timerReloadLog?.length ? ` reloadLog:[${audio.timerReloadLog.map(e => `${e.addr}=${e.value}@${e.cycles}(pc=${e.pc}/${e.thumb?'T':'A'}:${e.instrHex})`).join(' ')}]` : '';
       const soundDetail = audio ? ` snd:${audio.sound.soundCntHHex}/${audio.sound.soundBiasHex}` : '';
       const audioSummary = audio
-        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}`
+        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}${fifoDma}`
         : '';
       const irq = diagnostics?.interrupts;
       const irqSummary = irq ? ` | vbl:${irq.vblankCount} irq:${irq.pendingHex} ime:${irq.ime}` : '';
@@ -5272,7 +5275,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const render = diagnostics?.render;
       const statA = render?.sampleStatsA;
       const statB = render?.sampleStatsB;
-      const sampleStats = statA ? ` pcmA:${statA.min}..${statA.max}/r${statA.rms}/[${statA.head.slice(0, 6).join(',')}]${statB ? ` pcmB:${statB.min}..${statB.max}/r${statB.rms}/[${statB.head.slice(0, 6).join(',')}]` : ''}` : '';
+      const sampleStats = statA ? ` pcmA:${statA.min}..${statA.max}/r${statA.rms}/nz${statA.nonZero}/clip${statA.clipped}/[${statA.head.slice(0, 6).join(',')}]/first[${statA.firstNonZero.slice(0, 6).join(',')}]${statB ? ` pcmB:${statB.min}..${statB.max}/r${statB.rms}/nz${statB.nonZero}/clip${statB.clipped}/[${statB.head.slice(0, 6).join(',')}]/first[${statB.firstNonZero.slice(0, 6).join(',')}]` : ''}` : '';
       const renderSummary = render ? ` | render:${(render.renderedMs / 1000).toFixed(1)}s/${render.stopReason} fifo:${render.fifoFillRate || render.sourceRate || 0}Hz play:${render.outputRate || render.sampleRate}Hz bias:${render.biasOutputRate || '?'}Hz dac:${render.dacBits || '?'}b${render.timerSourceRate ? ` timer:${render.timerSourceRate}` : ''} inst:${render.instructions}${sampleStats}` : '';
       const codeDump = audio?.timerCodeDump;
       const codeDumpSummary = codeDump

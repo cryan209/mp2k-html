@@ -175,6 +175,7 @@
       this.fifoLastB = 0;
       this.fifoFillBytesA = 0;
       this.fifoFillBytesB = 0;
+      this.fifoDmaLog = [];
       this.timerReloadLog = []; // log writes to TM0CNT_L for debugging
       this.timerRegSnaps = []; // register snapshots at key PCs
       this.debugPc = 0; // set by CPU before each step for write logging
@@ -445,10 +446,21 @@
       const base = IO_DMA_START + ch * 12;
       const src = this.read32(base);
       const dst = this.read32(base + 4); // should be FIFO address (0x040000a0 or 0x040000a4)
+      const words = [];
       // Sound FIFO: always transfer 4 words (16 bytes), dst fixed, src advances
       for (let i = 0; i < 4; i++) {
         const word = this.read32((src + i * 4) >>> 0);
+        words.push(word >>> 0);
         this._writeSoundFifo(dst, word);
+      }
+      if (this.fifoDmaLog.length < 32) {
+        this.fifoDmaLog.push({
+          ch,
+          src,
+          srcHex: tools.hex(src),
+          dstHex: tools.hex(dst),
+          words: words.map(word => tools.hex(word)),
+        });
       }
       // Advance src by 16 bytes (write back to DMA SAD register)
       const newSrc = (src + 16) >>> 0;
@@ -1891,9 +1903,17 @@
       let max = -128;
       let sum = 0;
       let sumSq = 0;
+      let nonZero = 0;
+      let clipped = 0;
+      const firstNonZero = [];
       for (const sample of samples) {
         if (sample < min) min = sample;
         if (sample > max) max = sample;
+        if (sample !== 0) {
+          nonZero++;
+          if (firstNonZero.length < 8) firstNonZero.push(sample);
+        }
+        if (sample <= -128 || sample >= 127) clipped++;
         sum += sample;
         sumSq += sample * sample;
       }
@@ -1903,6 +1923,9 @@
         max,
         mean: Math.round(sum / samples.length),
         rms: Math.round(Math.sqrt(sumSq / samples.length)),
+        nonZero,
+        clipped,
+        firstNonZero,
         head: samples.slice(0, 16),
       };
     }
@@ -1928,6 +1951,7 @@
       this.bus.fifoLastB = 0;
       this.bus.fifoFillBytesA = 0;
       this.bus.fifoFillBytesB = 0;
+      this.bus.fifoDmaLog = [];
 
       // Run in chunks until we have enough FIFO samples (avoids blocking the event loop)
       // Safety cap: bail after 500M instructions if no samples arrive (e.g. timer never enabled)
@@ -1962,6 +1986,7 @@
       const renderFillBytesB = this.bus.fifoFillBytesB;
       const renderQueueA = this.bus.fifoQueueA.length;
       const renderQueueB = this.bus.fifoQueueB.length;
+      const renderDmaLog = this.bus.fifoDmaLog.slice();
       const sourceRate = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE);
       const biasOutput = this._soundBiasOutput();
       const renderedCycles = cyclesAtRenderEnd - cyclesAtStart;
@@ -2005,6 +2030,7 @@
       this.diagnostics.fifo.fillBytesB = renderFillBytesB;
       this.diagnostics.fifo.queueA = renderQueueA;
       this.diagnostics.fifo.queueB = renderQueueB;
+      this.diagnostics.fifo.dmaLog = renderDmaLog;
       if (sourceSamples > 0) {
         try {
           const audioCtx = new AudioContext({ sampleRate: playbackRate });

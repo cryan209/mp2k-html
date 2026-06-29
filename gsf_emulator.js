@@ -1741,6 +1741,26 @@
       return fallback;
     }
 
+    _soundBiasOutput() {
+      const bias = this.bus ? this.bus.read16(0x04000088) : 0;
+      const resolution = (bias >>> 14) & 3;
+      return {
+        bias,
+        biasHex: tools.hex(bias, 4),
+        dacBits: 9 - resolution,
+        outputRate: 32768 << resolution,
+      };
+    }
+
+    _sampleAt(samples, pos) {
+      if (!samples.length) return 0;
+      if (pos <= 0) return samples[0] || 0;
+      const i = Math.floor(pos);
+      if (i >= samples.length - 1) return samples[samples.length - 1] || 0;
+      const frac = pos - i;
+      return (samples[i] || 0) * (1 - frac) + (samples[i + 1] || 0) * frac;
+    }
+
     async play(renderSeconds = 10) {
       if (!this.cpu) this._initCpu();
 
@@ -1784,31 +1804,40 @@
       this.runDiagnostics(5000);
 
       // Build AudioBuffer from collected FIFO samples
-      const sampleRate = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE);
-      targetSamples = sampleRate * renderSeconds;
-      const nSamples = Math.min(Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length), targetSamples);
+      const sourceRate = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE);
+      const biasOutput = this._soundBiasOutput();
+      targetSamples = sourceRate * renderSeconds;
+      const sourceSamples = Math.min(Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length), targetSamples);
+      const outputSamples = Math.max(1, Math.round((sourceSamples / sourceRate) * biasOutput.outputRate));
       this.diagnostics.render = {
         requestedSeconds: renderSeconds,
-        sampleRate,
+        sampleRate: biasOutput.outputRate,
+        sourceRate,
+        outputRate: biasOutput.outputRate,
+        dacBits: biasOutput.dacBits,
+        soundBiasHex: biasOutput.biasHex,
         targetSamples,
-        renderedSamples: nSamples,
-        renderedMs: Math.round((nSamples / sampleRate) * 1000),
+        renderedSamples: outputSamples,
+        sourceSamples,
+        renderedMs: Math.round((sourceSamples / sourceRate) * 1000),
         instructions: this.cpu.instructions - instructionsAtStart,
         stopReason: renderStopReason,
       };
-      if (nSamples > 0) {
+      if (sourceSamples > 0) {
         try {
-          const audioCtx = new AudioContext({ sampleRate });
+          const audioCtx = new AudioContext({ sampleRate: biasOutput.outputRate });
           await audioCtx.resume();
-          const buffer = audioCtx.createBuffer(2, nSamples, sampleRate);
+          const buffer = audioCtx.createBuffer(2, outputSamples, biasOutput.outputRate);
           // SOUNDCNT_H 0xa90e: Sound A → right, Sound B → left
           const left  = buffer.getChannelData(0);
           const right = buffer.getChannelData(1);
           const sampA = this.bus.fifoSamplesA;
           const sampB = this.bus.fifoSamplesB;
-          for (let i = 0; i < nSamples; i++) {
-            right[i] = (sampA[i] || 0) / 128;
-            left[i]  = (sampB[i] || 0) / 128;
+          const step = sourceRate / biasOutput.outputRate;
+          for (let i = 0; i < outputSamples; i++) {
+            const sourcePos = i * step;
+            right[i] = this._sampleAt(sampA, sourcePos) / 128;
+            left[i]  = this._sampleAt(sampB, sourcePos) / 128;
           }
           if (this._audioSrc) { try { this._audioSrc.stop(); } catch (_) {} }
           if (this._audioCtx) { this._audioCtx.close(); }

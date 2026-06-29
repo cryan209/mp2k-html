@@ -5231,7 +5231,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const audio = diagnostics?.audio;
       const run = diagnostics?.run;
       const audioSummary = audio
-        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites} fifoB:${audio.sound.directSoundB.fifoWrites}`
+        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${diagnostics?.fifo?.samplesA || 0} fifoB:${audio.sound.directSoundB.fifoWrites}/${diagnostics?.fifo?.samplesB || 0}`
         : '';
       const irq = diagnostics?.interrupts;
       const irqSummary = irq ? ` | vbl:${irq.vblankCount} irq:${irq.pendingHex} ime:${irq.ime}` : '';

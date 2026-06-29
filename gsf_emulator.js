@@ -1734,7 +1734,8 @@
         const tick = () => {
           this.cpu.run(CHUNK);
           const ranTotal = this.cpu.instructions - instructionsAtStart;
-          if (this.bus.fifoSamplesA.length >= TARGET_SAMPLES || this.cpu.halted || ranTotal >= MAX_INSTRUCTIONS) {
+          const capturedSamples = Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length);
+          if (capturedSamples >= TARGET_SAMPLES || this.cpu.halted || ranTotal >= MAX_INSTRUCTIONS) {
             resolve();
           } else {
             setTimeout(tick, 0);
@@ -1752,7 +1753,7 @@
       this.runDiagnostics(5000);
 
       // Build AudioBuffer from collected FIFO samples
-      const nSamples = Math.min(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length, TARGET_SAMPLES);
+      const nSamples = Math.min(Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length), TARGET_SAMPLES);
       if (nSamples > 0) {
         try {
           const audioCtx = new AudioContext({ sampleRate: GBA_SAMPLE_RATE });
@@ -1764,8 +1765,8 @@
           const sampA = this.bus.fifoSamplesA;
           const sampB = this.bus.fifoSamplesB;
           for (let i = 0; i < nSamples; i++) {
-            right[i] = sampA[i] / 128;
-            left[i]  = sampB[i] / 128;
+            right[i] = (sampA[i] || 0) / 128;
+            left[i]  = (sampB[i] || 0) / 128;
           }
           if (this._audioSrc) { try { this._audioSrc.stop(); } catch (_) {} }
           if (this._audioCtx) { this._audioCtx.close(); }

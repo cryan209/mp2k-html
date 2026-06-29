@@ -1766,7 +1766,7 @@
 
       const FALLBACK_SAMPLE_RATE = 13379;
       const targetCycles = Math.max(1, Math.round(GBA_CPU_HZ * renderSeconds));
-      const CHUNK = 5000; // instructions per setTimeout slice
+      const CHUNK = 64; // instructions per setTimeout slice; Halt can advance a whole frame
 
       // Enable fast mode — skip all diagnostic tracking
       this.bus.fastMode = true;
@@ -1799,6 +1799,16 @@
         setTimeout(tick, 0);
       });
 
+      const renderSamplesA = this.bus.fifoSamplesA.slice();
+      const renderSamplesB = this.bus.fifoSamplesB.slice();
+      const sourceRate = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE);
+      const biasOutput = this._soundBiasOutput();
+      const renderedCycles = cyclesAtRenderEnd - cyclesAtStart;
+      const renderedSeconds = renderedCycles / GBA_CPU_HZ;
+      const sourceSamples = Math.max(renderSamplesA.length, renderSamplesB.length);
+      const observedSourceRate = renderedSeconds > 0 ? Math.round(sourceSamples / renderedSeconds) : sourceRate;
+      const outputSamples = Math.max(1, Math.round(renderedSeconds * biasOutput.outputRate));
+
       // Restore diagnostic mode and capture a small snapshot of current state
       this.bus.fastMode = false;
       this.cpu.fastMode = false;
@@ -1807,14 +1817,6 @@
       this.cpu.branches = [];
       this.runDiagnostics(5000);
 
-      // Build AudioBuffer from collected FIFO samples
-      const sourceRate = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE);
-      const biasOutput = this._soundBiasOutput();
-      const renderedCycles = cyclesAtRenderEnd - cyclesAtStart;
-      const renderedSeconds = renderedCycles / GBA_CPU_HZ;
-      const sourceSamples = Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length);
-      const observedSourceRate = renderedSeconds > 0 ? Math.round(sourceSamples / renderedSeconds) : sourceRate;
-      const outputSamples = Math.max(1, Math.round(renderedSeconds * biasOutput.outputRate));
       this.diagnostics.render = {
         requestedSeconds: renderSeconds,
         sampleRate: biasOutput.outputRate,
@@ -1832,6 +1834,8 @@
         instructions: instructionsAtRenderEnd - instructionsAtStart,
         stopReason: renderStopReason,
       };
+      this.diagnostics.fifo.renderSamplesA = renderSamplesA.length;
+      this.diagnostics.fifo.renderSamplesB = renderSamplesB.length;
       if (sourceSamples > 0) {
         try {
           const audioCtx = new AudioContext({ sampleRate: biasOutput.outputRate });
@@ -1840,8 +1844,8 @@
           // SOUNDCNT_H 0xa90e: Sound A → right, Sound B → left
           const left  = buffer.getChannelData(0);
           const right = buffer.getChannelData(1);
-          const sampA = this.bus.fifoSamplesA;
-          const sampB = this.bus.fifoSamplesB;
+          const sampA = renderSamplesA;
+          const sampB = renderSamplesB;
           const step = sourceSamples / outputSamples;
           for (let i = 0; i < outputSamples; i++) {
             const sourcePos = i * step;

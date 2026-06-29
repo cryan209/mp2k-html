@@ -5230,8 +5230,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const cpu = diagnostics?.cpu;
       const audio = diagnostics?.audio;
       const run = diagnostics?.run;
+      const fifoA = diagnostics?.fifo?.renderSamplesA ?? diagnostics?.fifo?.samplesA ?? 0;
+      const fifoB = diagnostics?.fifo?.renderSamplesB ?? diagnostics?.fifo?.samplesB ?? 0;
       const audioSummary = audio
-        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${diagnostics?.fifo?.samplesA || 0} fifoB:${audio.sound.directSoundB.fifoWrites}/${diagnostics?.fifo?.samplesB || 0}`
+        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}`
         : '';
       const irq = diagnostics?.interrupts;
       const irqSummary = irq ? ` | vbl:${irq.vblankCount} irq:${irq.pendingHex} ime:${irq.ime}` : '';

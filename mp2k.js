@@ -5241,7 +5241,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const fifoB = diagnostics?.fifo?.renderSamplesB ?? diagnostics?.fifo?.samplesB ?? 0;
       const fifoFill = diagnostics?.fifo ? ` fill:${diagnostics.fifo.fillBytesA || 0}/${diagnostics.fifo.fillBytesB || 0} q:${diagnostics.fifo.queueA || 0}/${diagnostics.fifo.queueB || 0}` : '';
       const fifoDma = diagnostics?.fifo?.dmaLog?.length
-        ? ` dmaSrc:[${diagnostics.fifo.dmaLog.slice(0, 4).map(d => `d${d.ch}@${d.srcHex}->${d.dstHex}:${d.words.join('/')}`).join(' ')}]`
+        ? ` dmaSrc:[${diagnostics.fifo.dmaLog.slice(0, 4).map(d => `d${d.ch}@${d.srcHex}->${d.dstHex}:${d.words.join('/')}${d.writers?.length ? `<${d.writers.join('/')}>` : ''}`).join(' ')}]`
+        : '';
+      const bufferWrites = diagnostics?.fifo?.bufferWrites?.length
+        ? ` bufWr:[${diagnostics.fifo.bufferWrites.slice(-6).map(w => `${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`
         : '';
       const dsTimerA = audio?.timers?.[audio?.sound?.directSoundA?.timer || 0];
       const dsTimerB = audio?.timers?.[audio?.sound?.directSoundB?.timer || 0];
@@ -5250,7 +5253,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const reloadLog = audio?.timerReloadLog?.length ? ` reloadLog:[${audio.timerReloadLog.map(e => `${e.addr}=${e.value}@${e.cycles}(pc=${e.pc}/${e.thumb?'T':'A'}:${e.instrHex})`).join(' ')}]` : '';
       const soundDetail = audio ? ` snd:${audio.sound.soundCntHHex}/${audio.sound.soundBiasHex}` : '';
       const audioSummary = audio
-        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}${fifoDma}`
+        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}${fifoDma}${bufferWrites}`
         : '';
       const irq = diagnostics?.interrupts;
       const irqTrace = irq?.dispatches?.length

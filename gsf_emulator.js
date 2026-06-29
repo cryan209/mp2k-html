@@ -161,6 +161,8 @@
       this.vblankCount = 0;
       this.irqEvents = [];
       this.irqVectorWrites = [];
+      this.soundBufferWrites = [];
+      this.soundBufferWriteMap = new Map();
       this.dmaTransfers = [];
       this.memoryWrites = [];
       this.timerCounters = [0, 0, 0, 0];
@@ -327,6 +329,13 @@
         this.irqVectorWrites.push(entry);
         if (this.irqVectorWrites.length > 32) this.irqVectorWrites.shift();
       }
+      if (addr >= 0x03006000 && addr < 0x03007000) {
+        this.soundBufferWriteMap.set(addr & ~3, entry);
+        if (entry.value !== 0 || this.soundBufferWrites.length < 8) {
+          this.soundBufferWrites.push(entry);
+          if (this.soundBufferWrites.length > 64) this.soundBufferWrites.shift();
+        }
+      }
       if (this.fastMode) return;
       this.memoryWrites.push(entry);
       if (this.memoryWrites.length > 256) this.memoryWrites.shift();
@@ -454,7 +463,8 @@
       const words = [];
       // Sound FIFO: always transfer 4 words (16 bytes), dst fixed, src advances
       for (let i = 0; i < 4; i++) {
-        const word = this.read32((src + i * 4) >>> 0);
+        const wordAddr = (src + i * 4) >>> 0;
+        const word = this.read32(wordAddr);
         words.push(word >>> 0);
         this._writeSoundFifo(dst, word);
       }
@@ -465,6 +475,10 @@
           srcHex: tools.hex(src),
           dstHex: tools.hex(dst),
           words: words.map(word => tools.hex(word)),
+          writers: words.map((_, i) => {
+            const write = this.soundBufferWriteMap.get((src + i * 4) & ~3);
+            return write ? `${write.valueHex}@${write.pcHex}/${write.kind}` : '-';
+          }),
         });
       }
       // Advance src by 16 bytes (write back to DMA SAD register)
@@ -2178,6 +2192,13 @@
           samplesA: this.bus.fifoSamplesA.length,
           samplesB: this.bus.fifoSamplesB.length,
           durationMs: Math.round(this.bus.fifoSamplesA.length / 13.379),
+          bufferWrites: this.bus.soundBufferWrites.slice(-12).map(w => ({
+            addrHex: w.addrHex,
+            valueHex: w.valueHex,
+            bytes: w.bytes,
+            kind: w.kind,
+            pcHex: w.pcHex,
+          })),
         },
         interrupts: this._makeInterruptDiagnostics(),
         bios: {

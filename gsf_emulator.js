@@ -267,6 +267,13 @@
         this.unmappedWrites++;
         return;
       }
+      // IF is write-one-to-clear. Hardware IRQ sources set these bits internally;
+      // CPU-visible writes acknowledge requests instead of storing the written value.
+      if (addr === 0x04000202 || addr === 0x04000203) {
+        r.data[r.off] &= (~value) & 0xff;
+        this._logIoWrite(addr, value, 1);
+        return;
+      }
       // Timer enable: detect 0→1 transition on TM0-3 CNT (low byte of 16-bit control register).
       // The enable bit is bit 7 of the LOW byte: 0x04000102, 0x04000106, 0x0400010a, 0x0400010e.
       // Check BEFORE the write so we have the old value.
@@ -317,10 +324,8 @@
       addr >>>= 0;
       value &= 0xffff;
       if (addr === 0x04000202) {
-        const current = this.read16(addr);
-        const next = current & ~value;
-        this.write8(addr, next);
-        this.write8((addr + 1) >>> 0, next >>> 8);
+        this.write8(addr, value);
+        this.write8((addr + 1) >>> 0, value >>> 8);
         return;
       }
       this.write8(addr, value);
@@ -560,9 +565,7 @@
     }
 
     requestIrq(mask, reason = 'irq') {
-      const next = this.read16(0x04000202) | (mask & 0xffff);
-      this.write8(0x04000202, next);
-      this.write8(0x04000203, next >>> 8);
+      this._setIrqFlags(mask);
       this.irqEvents.push({
         mask: mask & 0xffff,
         maskHex: tools.hex(mask & 0xffff, 4),
@@ -573,6 +576,12 @@
         ifHex: tools.hex(this.read16(0x04000202), 4),
       });
       if (this.irqEvents.length > 128) this.irqEvents.shift();
+    }
+
+    _setIrqFlags(mask) {
+      const next = this.read16(0x04000202) | (mask & 0xffff);
+      this.io[0x202] = next & 0xff;
+      this.io[0x203] = (next >>> 8) & 0xff;
     }
 
     pendingIrq(mask = 0xffff) {
@@ -1694,9 +1703,6 @@
     _runIrqHandler(handlerAddr, pending) {
       this._inIrqDispatch = true;
 
-      // Clear IF bits that we're about to handle (BIOS does this)
-      this._clearPendingIrq(pending);
-
       // Save full CPU state
       const savedRegs = Array.from(this.regs);
       const savedCpsr = this.cpsr;
@@ -2356,7 +2362,7 @@
         notes: [
           'ARM+Thumb CPU is active with data processing, branches, load/store, block transfer, multiply (including long MULL/MLAL), and BIOS SWI stubs.',
           'VCOUNT (0x04000006) computed dynamically from frameCycles; timers tick and overflow with cascade/IRQ/sound-FIFO-DMA support.',
-          'IRQ dispatch: Halt/VBlankIntrWait SWIs run the handler at [0x03007FFC] as a nested CPU loop; S-flag exception return (SUBS PC,LR,#4 and LDM^) implemented.',
+          'IRQ dispatch: Halt/VBlankIntrWait SWIs run the handler at [0x03007FFC] as a nested CPU loop; IF is write-one-to-clear and real handlers acknowledge it manually.',
           'Not implemented: SWP, coprocessor, full IRQ mode register banking for all ARM modes.',
         ],
       };

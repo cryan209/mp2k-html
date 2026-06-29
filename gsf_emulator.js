@@ -495,18 +495,22 @@
         words.push(word >>> 0);
         this._writeSoundFifo(dst, word);
       }
-      if (this.fifoDmaLog.length < 32) {
-        this.fifoDmaLog.push({
-          ch,
-          src,
-          srcHex: tools.hex(src),
-          dstHex: tools.hex(dst),
-          words: words.map(word => tools.hex(word)),
-          writers: words.map((_, i) => {
-            const write = this.soundBufferWriteMap.get(this.canonicalAddr(src + i * 4) & ~3);
-            return write ? `${write.valueHex}@${write.pcHex}/${write.kind}` : '-';
-          }),
-        });
+      const entry = {
+        ch,
+        src,
+        srcHex: tools.hex(src),
+        canonicalSrcHex: tools.hex(this.canonicalAddr(src)),
+        dstHex: tools.hex(dst),
+        words: words.map(word => tools.hex(word)),
+        nonZeroWords: words.filter(word => word !== 0).length,
+        writers: words.map((_, i) => {
+          const write = this.soundBufferWriteMap.get(this.canonicalAddr(src + i * 4) & ~3);
+          return write ? `${write.valueHex}@${write.pcHex}/${write.kind}` : '-';
+        }),
+      };
+      if (this.fifoDmaLog.length < 8 || entry.nonZeroWords) {
+        this.fifoDmaLog.push(entry);
+        if (this.fifoDmaLog.length > 48) this.fifoDmaLog.shift();
       }
       // Advance the internal DMA source latch. The visible DMAxSAD register is an initial value register.
       this.dmaSourceLatch[ch] = (src + 16) >>> 0;

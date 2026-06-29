@@ -1536,8 +1536,24 @@
         this._recordIrqDispatch({ result: 'no-handler', ie, ifl, pending, handlerAddr });
         return;
       }
+      if (this._isGsfIdleIrqHandler(handlerAddr)) {
+        this._clearPendingIrq(pending);
+        this._recordIrqDispatch({ result: 'idle-loop', ie, ifl, pending, handlerAddr });
+        return;
+      }
       this._recordIrqDispatch({ result: 'dispatch', ie, ifl, pending, handlerAddr });
       this._runIrqHandler(handlerAddr, pending);
+    }
+
+    _isGsfIdleIrqHandler(handlerAddr) {
+      const addr = handlerAddr & ~1;
+      return this.bus.read32((addr - 4) >>> 0) === 0xef020000 && this.bus.read32(addr) === 0xeafffffd;
+    }
+
+    _clearPendingIrq(pending) {
+      const ifl = this.bus.io[0x202] | (this.bus.io[0x203] << 8);
+      this.bus.io[0x202] = (ifl & ~pending) & 0xff;
+      this.bus.io[0x203] = ((ifl & ~pending) >> 8) & 0xff;
     }
 
     _recordIrqDispatch(entry) {
@@ -1557,9 +1573,7 @@
       this._inIrqDispatch = true;
 
       // Clear IF bits that we're about to handle (BIOS does this)
-      const ifl = this.bus.io[0x202] | (this.bus.io[0x203] << 8);
-      this.bus.io[0x202] = (ifl & ~pending) & 0xff;
-      this.bus.io[0x203] = ((ifl & ~pending) >> 8) & 0xff;
+      this._clearPendingIrq(pending);
 
       // Save full CPU state
       const savedRegs = Array.from(this.regs);

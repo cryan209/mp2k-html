@@ -331,6 +331,11 @@
       return this.wordWrites.get((addr >>> 0) & ~3) || null;
     }
 
+    timerReload(ch) {
+      const base = ch * 4;
+      return (this.io[base + 0x100] | (this.io[base + 0x101] << 8)) & 0xffff;
+    }
+
     stepCycles(cycles) {
       cycles = Math.max(1, cycles | 0);
       this.cycles += cycles;
@@ -1836,7 +1841,7 @@
       ].filter(ch => ch != null);
       for (const ch of timerChoices.length ? timerChoices : [0, 1]) {
         const base = 0x04000100 + ch * 4;
-        const reload = this.bus.read16(base);
+        const reload = this.bus.timerReload(ch);
         const control = this.bus.read16(base + 2);
         const period = 0x10000 - reload;
         if ((control & 0x80) && !(control & 0x04) && period > 0) {
@@ -2136,7 +2141,8 @@
       const timers = [];
       for (let ch = 0; ch < 4; ch++) {
         const base = 0x04000100 + ch * 4;
-        const reload = reg16(base);
+        const reload = this.bus.timerReload(ch);
+        const counter = this.bus.timerCounters[ch] & 0xffff;
         const control = reg16(base + 2);
         const prescaler = TIMER_PRESCALERS[control & 3];
         const period = 0x10000 - reload;
@@ -2146,7 +2152,8 @@
           ch,
           reload,
           reloadHex: tools.hex(reload, 4),
-          counter: this.bus.timerCounters[ch],
+          counter,
+          counterHex: tools.hex(counter, 4),
           controlHex: tools.hex(control, 4),
           enabled,
           cascade,

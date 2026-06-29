@@ -5235,8 +5235,8 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const fifoFill = diagnostics?.fifo ? ` fill:${diagnostics.fifo.fillBytesA || 0}/${diagnostics.fifo.fillBytesB || 0} q:${diagnostics.fifo.queueA || 0}/${diagnostics.fifo.queueB || 0}` : '';
       const dsTimerA = audio?.timers?.[audio?.sound?.directSoundA?.timer || 0];
       const dsTimerB = audio?.timers?.[audio?.sound?.directSoundB?.timer || 0];
-      const timerDetail = dsTimerA ? ` tmA:${dsTimerA.ch}/${dsTimerA.reloadHex}/${dsTimerA.controlHex}/${dsTimerA.rateHz}Hz` : '';
-      const timerDetailB = dsTimerB && dsTimerB !== dsTimerA ? ` tmB:${dsTimerB.ch}/${dsTimerB.reloadHex}/${dsTimerB.controlHex}/${dsTimerB.rateHz}Hz` : '';
+      const timerDetail = dsTimerA ? ` tmA:${dsTimerA.ch}/${dsTimerA.reloadHex}/${dsTimerA.counterHex}/${dsTimerA.controlHex}/${dsTimerA.rateHz}Hz` : '';
+      const timerDetailB = dsTimerB && dsTimerB !== dsTimerA ? ` tmB:${dsTimerB.ch}/${dsTimerB.reloadHex}/${dsTimerB.counterHex}/${dsTimerB.controlHex}/${dsTimerB.rateHz}Hz` : '';
       const reloadLog = audio?.timerReloadLog?.length ? ` reloadLog:[${audio.timerReloadLog.map(e => `${e.addr}=${e.value}@${e.cycles}(pc=${e.pc}/${e.thumb?'T':'A'}:${e.instrHex})`).join(' ')}]` : '';
       const soundDetail = audio ? ` snd:${audio.sound.soundCntHHex}/${audio.sound.soundBiasHex}` : '';
       const audioSummary = audio

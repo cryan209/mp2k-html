@@ -1729,6 +1729,7 @@
       this.source = null;
       this.library = null;
       this.entries = [];
+      this.activeEntryIndex = 0;
       this.memory = null;
       this.bus = null;
       this.cpu = null;
@@ -1742,6 +1743,7 @@
       this.source = null;
       this.library = null;
       this.entries = [];
+      this.activeEntryIndex = 0;
       this.memory = null;
       this.bus = null;
       this.cpu = null;
@@ -1766,14 +1768,13 @@
           tags: tools.tags(buf),
           ...(info || {}),
         };
-        this.memory = createMemoryImage();
-        applyDecodedProgram(this.memory, decoded, this.source.name);
         this.entries = [{
           name: this.source.tags.title || this.source.name,
           tags: this.source.tags,
           decoded,
           patch: await tools.miniPatch(buf),
         }];
+        this._rebuildMemoryForEntry(0);
         this.decodeReport = this._makeDecodeReport();
         this._initCpu();
         this.state = 'loaded-no-emulator';
@@ -1798,14 +1799,11 @@
         decoded: libDecoded,
         ...(libInfo || {}),
       };
-      this.memory = createMemoryImage();
-      applyDecodedProgram(this.memory, libDecoded, libKey);
       const miniKeys = Object.keys(files).filter(k => /\.minigsf$/i.test(k)).sort();
       this.entries = [];
       for (const key of miniKeys) {
         const patch = await tools.miniPatch(files[key]);
         const decoded = await tools.decodeProgram(files[key], { kind: 'minigsf', name: key });
-        applyDecodedProgram(this.memory, decoded, key);
         const entryTags = tools.tags(files[key]);
         this.entries.push({
           key,
@@ -1823,10 +1821,27 @@
         minigsfCount: miniKeys.length,
         ...(libInfo || {}),
       };
+      this._rebuildMemoryForEntry(0);
       this.decodeReport = this._makeDecodeReport();
       this._initCpu();
       this.state = 'loaded-no-emulator';
       return this.source;
+    }
+
+    _rebuildMemoryForEntry(index = this.activeEntryIndex || 0) {
+      this.activeEntryIndex = Math.max(0, Math.min(index | 0, Math.max(0, this.entries.length - 1)));
+      this.memory = createMemoryImage();
+      if (this.library?.decoded) applyDecodedProgram(this.memory, this.library.decoded, this.library.key);
+      const entry = this.entries[this.activeEntryIndex];
+      if (entry?.decoded) applyDecodedProgram(this.memory, entry.decoded, entry.key || entry.name || 'minigsf');
+      return entry || null;
+    }
+
+    selectEntry(index = 0) {
+      const entry = this._rebuildMemoryForEntry(index);
+      this.decodeReport = this._makeDecodeReport();
+      this._initCpu();
+      return entry;
     }
 
     canPlay() {
@@ -1870,7 +1885,8 @@
       return samples[Math.min(i, samples.length - 1)] || 0;
     }
 
-    async play(renderSeconds = 10) {
+    async play(renderSeconds = 10, entryIndex = this.activeEntryIndex || 0) {
+      if (entryIndex !== this.activeEntryIndex) this.selectEntry(entryIndex);
       if (!this.cpu) this._initCpu();
 
       const FALLBACK_SAMPLE_RATE = 13379;

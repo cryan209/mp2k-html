@@ -5226,7 +5226,14 @@ function populateSongList(songs) {
 document.getElementById('btnPlay').addEventListener('click', async () => {
   if (document.getElementById('engineSelect')?.value === 'gsf-lle') {
     try {
-      const diagnostics = await standardGsfEngine?.play();
+      const sel = document.getElementById('songSelect');
+      const selectedSong = player.songs.find(s => String(s.idx) === sel?.value) || player.songs[sel?.selectedIndex || 0];
+      const mappedKey = selectedSong?.gsfPatch?.key;
+      const mappedIndex = mappedKey && standardGsfEngine?.entries
+        ? standardGsfEngine.entries.findIndex(entry => entry.key === mappedKey)
+        : -1;
+      const entryIndex = mappedIndex >= 0 ? mappedIndex : (sel?.selectedIndex >= 0 ? sel.selectedIndex : 0);
+      const diagnostics = await standardGsfEngine?.play(10, entryIndex);
       const cpu = diagnostics?.cpu;
       const audio = diagnostics?.audio;
       const run = diagnostics?.run;

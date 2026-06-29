@@ -5232,13 +5232,14 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const run = diagnostics?.run;
       const fifoA = diagnostics?.fifo?.renderSamplesA ?? diagnostics?.fifo?.samplesA ?? 0;
       const fifoB = diagnostics?.fifo?.renderSamplesB ?? diagnostics?.fifo?.samplesB ?? 0;
+      const fifoFill = diagnostics?.fifo ? ` fill:${diagnostics.fifo.fillBytesA || 0}/${diagnostics.fifo.fillBytesB || 0} q:${diagnostics.fifo.queueA || 0}/${diagnostics.fifo.queueB || 0}` : '';
       const dsTimerA = audio?.timers?.[audio?.sound?.directSoundA?.timer || 0];
       const dsTimerB = audio?.timers?.[audio?.sound?.directSoundB?.timer || 0];
       const timerDetail = dsTimerA ? ` tmA:${dsTimerA.ch}/${dsTimerA.reloadHex}/${dsTimerA.controlHex}/${dsTimerA.rateHz}Hz` : '';
       const timerDetailB = dsTimerB && dsTimerB !== dsTimerA ? ` tmB:${dsTimerB.ch}/${dsTimerB.reloadHex}/${dsTimerB.controlHex}/${dsTimerB.rateHz}Hz` : '';
       const soundDetail = audio ? ` snd:${audio.sound.soundCntHHex}/${audio.sound.soundBiasHex}` : '';
       const audioSummary = audio
-        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${timerDetail}${timerDetailB}${soundDetail}`
+        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}`
         : '';
       const irq = diagnostics?.interrupts;
       const irqSummary = irq ? ` | vbl:${irq.vblankCount} irq:${irq.pendingHex} ime:${irq.ime}` : '';

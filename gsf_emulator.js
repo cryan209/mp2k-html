@@ -167,8 +167,14 @@
       this.fifoDmaPhase = [0, 0]; // overflow counter for timer 0 and 1; DMA fires every 16
       this.wordWrites = new Map();
       this.fastMode = false;
-      this.fifoSamplesA = []; // signed 8-bit PCM captured from FIFO A (direct sound A)
-      this.fifoSamplesB = []; // signed 8-bit PCM captured from FIFO B (direct sound B)
+      this.fifoQueueA = [];
+      this.fifoQueueB = [];
+      this.fifoSamplesA = []; // signed 8-bit DAC values consumed from FIFO A
+      this.fifoSamplesB = []; // signed 8-bit DAC values consumed from FIFO B
+      this.fifoLastA = 0;
+      this.fifoLastB = 0;
+      this.fifoFillBytesA = 0;
+      this.fifoFillBytesB = 0;
     }
 
     region(addr) {
@@ -345,12 +351,42 @@
       }
       // Timer IRQ
       if (ctrl & 0x40) this.requestIrq(1 << (3 + ch), `timer${ch}-overflow`);
-      // Sound FIFO DMA: timers 0 and 1 drive DMA channels 1 and 2
-      // Fire every 16 overflows (FIFO = 32 bytes, DMA fires when half-empty after 16 consumes)
-      if (ch <= 1) {
-        this.fifoDmaPhase[ch] = (this.fifoDmaPhase[ch] + 1) & 15;
-        if (this.fifoDmaPhase[ch] === 0) this._triggerSoundFifoDma(ch);
+      // Sound FIFO DMA: timers 0 and 1 consume Direct Sound bytes and request
+      // DMA refills when the emulated FIFO drops to half-full.
+      if (ch <= 1) this._consumeSoundFifo(ch);
+    }
+
+    _consumeSoundFifo(timerCh) {
+      const soundCntH = (this.io[0x82] | (this.io[0x83] << 8));
+      const timerSelA = (soundCntH >>> 10) & 1;
+      const timerSelB = (soundCntH >>> 14) & 1;
+      if (timerSelA === timerCh) this._consumeFifoChannel('A');
+      if (timerSelB === timerCh) this._consumeFifoChannel('B');
+    }
+
+    _consumeFifoChannel(channel) {
+      const queue = channel === 'A' ? this.fifoQueueA : this.fifoQueueB;
+      if (queue.length <= 0) this._requestSoundFifoDma(channel);
+      const value = queue.length ? queue.shift() : (channel === 'A' ? this.fifoLastA : this.fifoLastB);
+      if (channel === 'A') {
+        this.fifoLastA = value;
+        this.fifoSamplesA.push(value);
+        if (this.fifoQueueA.length <= 16) this._requestSoundFifoDma('A');
+      } else {
+        this.fifoLastB = value;
+        this.fifoSamplesB.push(value);
+        if (this.fifoQueueB.length <= 16) this._requestSoundFifoDma('B');
       }
+    }
+
+    _requestSoundFifoDma(channel) {
+      const dmaCh = channel === 'A' ? 1 : 2;
+      const base = IO_DMA_START + dmaCh * 12;
+      const ctrl = (this.io[base - 0x04000000 + 10] | (this.io[base - 0x04000000 + 11] << 8));
+      if (!(ctrl & 0x8000)) return;
+      const timing = (ctrl >>> 12) & 3;
+      if (timing !== 3) return;
+      this._runSoundFifoDma(dmaCh);
     }
 
     _triggerSoundFifoDma(timerCh) {
@@ -388,13 +424,14 @@
     }
 
     _writeSoundFifo(fifoAddr, word) {
-      // Capture signed 8-bit samples for audio output
-      const buf = fifoAddr === 0x040000a0 ? this.fifoSamplesA : fifoAddr === 0x040000a4 ? this.fifoSamplesB : null;
-      if (buf !== null) {
+      const queue = fifoAddr === 0x040000a0 ? this.fifoQueueA : fifoAddr === 0x040000a4 ? this.fifoQueueB : null;
+      if (queue !== null) {
         for (let i = 0; i < 4; i++) {
           const b = (word >>> (i * 8)) & 0xff;
-          buf.push(b < 128 ? b : b - 256);
+          queue.push(b < 128 ? b : b - 256);
         }
+        if (fifoAddr === 0x040000a0) this.fifoFillBytesA += 4;
+        else this.fifoFillBytesB += 4;
       }
       if (!this.fastMode) this.write32(fifoAddr, word);
     }
@@ -1756,9 +1793,7 @@
       if (!samples.length) return 0;
       if (pos <= 0) return samples[0] || 0;
       const i = Math.floor(pos);
-      if (i >= samples.length - 1) return samples[samples.length - 1] || 0;
-      const frac = pos - i;
-      return (samples[i] || 0) * (1 - frac) + (samples[i + 1] || 0) * frac;
+      return samples[Math.min(i, samples.length - 1)] || 0;
     }
 
     async play(renderSeconds = 10) {
@@ -1771,8 +1806,14 @@
       // Enable fast mode — skip all diagnostic tracking
       this.bus.fastMode = true;
       this.cpu.fastMode = true;
+      this.bus.fifoQueueA = [];
+      this.bus.fifoQueueB = [];
       this.bus.fifoSamplesA = [];
       this.bus.fifoSamplesB = [];
+      this.bus.fifoLastA = 0;
+      this.bus.fifoLastB = 0;
+      this.bus.fifoFillBytesA = 0;
+      this.bus.fifoFillBytesB = 0;
 
       // Run in chunks until we have enough FIFO samples (avoids blocking the event loop)
       // Safety cap: bail after 500M instructions if no samples arrive (e.g. timer never enabled)
@@ -1836,6 +1877,10 @@
       };
       this.diagnostics.fifo.renderSamplesA = renderSamplesA.length;
       this.diagnostics.fifo.renderSamplesB = renderSamplesB.length;
+      this.diagnostics.fifo.fillBytesA = this.bus.fifoFillBytesA;
+      this.diagnostics.fifo.fillBytesB = this.bus.fifoFillBytesB;
+      this.diagnostics.fifo.queueA = this.bus.fifoQueueA.length;
+      this.diagnostics.fifo.queueB = this.bus.fifoQueueB.length;
       if (sourceSamples > 0) {
         try {
           const audioCtx = new AudioContext({ sampleRate: biasOutput.outputRate });

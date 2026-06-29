@@ -500,6 +500,10 @@
         src,
         srcHex: tools.hex(src),
         canonicalSrcHex: tools.hex(this.canonicalAddr(src)),
+        windowHex: (() => {
+          const win = this._soundFifoSourceWindow(ch);
+          return win ? `${tools.hex(win.start)}+${tools.hex(win.length, 4)}` : null;
+        })(),
         dstHex: tools.hex(dst),
         words: words.map(word => tools.hex(word)),
         nonZeroWords: words.filter(word => word !== 0).length,
@@ -513,8 +517,32 @@
         if (this.fifoDmaLog.length > 48) this.fifoDmaLog.shift();
       }
       // Advance the internal DMA source latch. The visible DMAxSAD register is an initial value register.
-      this.dmaSourceLatch[ch] = (src + 16) >>> 0;
+      this.dmaSourceLatch[ch] = this._advanceSoundFifoSource(ch, src, 16);
       // Don't disable — repeat bit is set, DMA stays active.
+    }
+
+    _advanceSoundFifoSource(ch, src, bytes) {
+      const win = this._soundFifoSourceWindow(ch);
+      if (!win) return (src + bytes) >>> 0;
+      const canonical = this.canonicalAddr(src);
+      const rel = (((canonical - win.start) % win.length) + win.length) % win.length;
+      return (win.start + ((rel + bytes) % win.length)) >>> 0;
+    }
+
+    _soundFifoSourceWindow(ch) {
+      if (ch !== 1 && ch !== 2) return null;
+      const thisBase = IO_DMA_START + ch * 12;
+      const otherCh = ch === 1 ? 2 : 1;
+      const otherBase = IO_DMA_START + otherCh * 12;
+      const thisStart = this.canonicalAddr(this.read32(thisBase));
+      const otherStart = this.canonicalAddr(this.read32(otherBase));
+      if (!thisStart || !otherStart) return null;
+      const thisRegion = this.region(thisStart);
+      const otherRegion = this.region(otherStart);
+      if (!thisRegion || !otherRegion || thisRegion.id !== otherRegion.id) return null;
+      const distance = Math.abs(otherStart - thisStart);
+      if (distance < 0x100 || distance > 0x4000) return null;
+      return { start: thisStart, length: distance };
     }
 
     _writeSoundFifo(fifoAddr, word) {

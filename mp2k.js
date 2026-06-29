@@ -5246,6 +5246,9 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const bufferWrites = diagnostics?.fifo?.bufferWrites?.length
         ? ` bufWr:[${diagnostics.fifo.bufferWrites.slice(-6).map(w => `${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`
         : '';
+      const frameHooks = diagnostics?.fifo?.frameHooks?.length
+        ? ` frameHook:[${diagnostics.fifo.frameHooks.slice(-4).map(h => `${h.result}@${h.hookHex}/${h.steps}`).join(' ')}]`
+        : '';
       const dsTimerA = audio?.timers?.[audio?.sound?.directSoundA?.timer || 0];
       const dsTimerB = audio?.timers?.[audio?.sound?.directSoundB?.timer || 0];
       const timerDetail = dsTimerA ? ` tmA:${dsTimerA.ch}/${dsTimerA.reloadHex}/${dsTimerA.counterHex}/${dsTimerA.controlHex}/${dsTimerA.rateHz}Hz` : '';
@@ -5253,7 +5256,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const reloadLog = audio?.timerReloadLog?.length ? ` reloadLog:[${audio.timerReloadLog.map(e => `${e.addr}=${e.value}@${e.cycles}(pc=${e.pc}/${e.thumb?'T':'A'}:${e.instrHex})`).join(' ')}]` : '';
       const soundDetail = audio ? ` snd:${audio.sound.soundCntHHex}/${audio.sound.soundBiasHex}` : '';
       const audioSummary = audio
-        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}${fifoDma}${bufferWrites}`
+        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}${fifoDma}${bufferWrites}${frameHooks}`
         : '';
       const irq = diagnostics?.interrupts;
       const irqTrace = irq?.dispatches?.length

@@ -176,7 +176,10 @@
       this.fifoFillBytesA = 0;
       this.fifoFillBytesB = 0;
       this.timerReloadLog = []; // log writes to TM0CNT_L for debugging
+      this.timerRegSnaps = []; // register snapshots at key PCs
       this.debugPc = 0; // set by CPU before each step for write logging
+      this.debugThumb = false;
+      this.debugRegs = null; // reference to CPU registers array, set by CPU init
     }
 
     region(addr) {
@@ -604,6 +607,19 @@
     step() {
       this.bus.debugPc = this.regs[15] >>> 0;
       this.bus.debugThumb = !!(this.cpsr & CPSR_T);
+      // Capture registers at key BL call sites
+      const _snapPc = this.bus.debugPc;
+      if ((_snapPc === 0x081c248a || _snapPc === 0x081c121a) && this.bus.timerRegSnaps.length < 8) {
+        const r = this.regs;
+        this.bus.timerRegSnaps.push({
+          pc: tools.hex(_snapPc),
+          cycles: this.bus.cycles,
+          r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0),
+          r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
+          r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0),
+          r6: tools.hex(r[6]>>>0), r7: tools.hex(r[7]>>>0),
+        });
+      }
       if (this.cpsr & CPSR_T) {
         const pc = this.regs[15] >>> 0;
         if (!this._canFetch(pc, 2)) return;
@@ -1834,6 +1850,7 @@
       this.bus.fastMode = true;
       this.cpu.fastMode = true;
       this.bus.timerReloadLog = [];
+      this.bus.timerRegSnaps = [];
       this.bus.fifoQueueA = [];
       this.bus.fifoQueueB = [];
       this.bus.fifoSamplesA = [];
@@ -2179,21 +2196,27 @@
             const b0=this.bus.read8(addr),b1=this.bus.read8(addr+1),b2=this.bus.read8(addr+2),b3=this.bus.read8(addr+3);
             return tools.hex(((b3<<24)|(b2<<16)|(b1<<8)|b0)>>>0);
           };
-          // Path 1: 32 instructions (0x081c2470-0x081c24af) + literal pool (0x081c24b0-0x081c24d8)
-          const win1 = [];
-          for (let i = 0; i < 64; i += 2)
-            win1.push(`${tools.hex(0x081c2470+i)}:${readThumb(0x081c2470+i)}`);
+          // Literal pool for path1 — extend by 12 bytes to capture 0x081c24d0
           const pool1 = [];
-          for (let i = 0; i < 32; i += 4)
+          for (let i = 0; i < 44; i += 4)
             pool1.push(`${tools.hex(0x081c24b0+i)}:${readWord(0x081c24b0+i)}`);
-          // Path 2: 32 instructions (0x081c1210-0x081c124f) + literal pool (0x081c1250-0x081c1278)
-          const win2 = [];
-          for (let i = 0; i < 64; i += 2)
-            win2.push(`${tools.hex(0x081c1210+i)}:${readThumb(0x081c1210+i)}`);
+          // Literal pool for path2
           const pool2 = [];
-          for (let i = 0; i < 32; i += 4)
+          for (let i = 0; i < 44; i += 4)
             pool2.push(`${tools.hex(0x081c1250+i)}:${readWord(0x081c1250+i)}`);
-          return { win1, pool1, win2, pool2 };
+          // Division function at 0x08001854 (called by path1 twice)
+          const fn1 = [];
+          for (let i = 0; i < 48; i += 2)
+            fn1.push(`${tools.hex(0x08001854+i)}:${readThumb(0x08001854+i)}`);
+          // Division function at 0x08002054 (called by path2)
+          const fn2 = [];
+          for (let i = 0; i < 48; i += 2)
+            fn2.push(`${tools.hex(0x08002054+i)}:${readThumb(0x08002054+i)}`);
+          return { pool1, pool2, fn1, fn2,
+            // Key missing literal
+            lit24d0: readWord(0x081c24d0),
+            // Captured register snapshots (set by CPU during execution)
+            regSnaps: this.bus.timerRegSnaps || [] };
         })(),
         dma: dmas,
         dmaTransfers: this.bus.dmaTransfers.slice(-16),

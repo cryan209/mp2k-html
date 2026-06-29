@@ -1885,6 +1885,28 @@
       return samples[Math.min(i, samples.length - 1)] || 0;
     }
 
+    _sampleStats(samples) {
+      if (!samples.length) return { count: 0, min: 0, max: 0, mean: 0, rms: 0, head: [] };
+      let min = 127;
+      let max = -128;
+      let sum = 0;
+      let sumSq = 0;
+      for (const sample of samples) {
+        if (sample < min) min = sample;
+        if (sample > max) max = sample;
+        sum += sample;
+        sumSq += sample * sample;
+      }
+      return {
+        count: samples.length,
+        min,
+        max,
+        mean: Math.round(sum / samples.length),
+        rms: Math.round(Math.sqrt(sumSq / samples.length)),
+        head: samples.slice(0, 16),
+      };
+    }
+
     async play(renderSeconds = 10, entryIndex = this.activeEntryIndex || 0) {
       if (entryIndex !== this.activeEntryIndex) this.selectEntry(entryIndex);
       if (!this.cpu) this._initCpu();
@@ -1946,7 +1968,8 @@
       const renderedSeconds = renderedCycles / GBA_CPU_HZ;
       const sourceSamples = Math.max(renderSamplesA.length, renderSamplesB.length);
       const observedSourceRate = renderedSeconds > 0 ? Math.round(sourceSamples / renderedSeconds) : sourceRate;
-      const outputSamples = Math.max(1, Math.round(renderedSeconds * biasOutput.outputRate));
+      const playbackRate = Math.max(3000, Math.min(96000, observedSourceRate || sourceRate || FALLBACK_SAMPLE_RATE));
+      const outputSamples = Math.max(1, Math.round(renderedSeconds * playbackRate));
 
       // Restore diagnostic mode and capture a small snapshot of current state
       this.bus.fastMode = false;
@@ -1958,17 +1981,20 @@
 
       this.diagnostics.render = {
         requestedSeconds: renderSeconds,
-        sampleRate: biasOutput.outputRate,
+        sampleRate: playbackRate,
         sourceRate: observedSourceRate,
         fifoFillRate: observedSourceRate,
         timerSourceRate: sourceRate,
-        outputRate: biasOutput.outputRate,
+        outputRate: playbackRate,
+        biasOutputRate: biasOutput.outputRate,
         dacBits: biasOutput.dacBits,
         soundBiasHex: biasOutput.biasHex,
         targetCycles,
         renderedCycles,
         renderedSamples: outputSamples,
         sourceSamples,
+        sampleStatsA: this._sampleStats(renderSamplesA),
+        sampleStatsB: this._sampleStats(renderSamplesB),
         renderedMs: Math.round(renderedSeconds * 1000),
         instructions: instructionsAtRenderEnd - instructionsAtStart,
         stopReason: renderStopReason,
@@ -1981,9 +2007,9 @@
       this.diagnostics.fifo.queueB = renderQueueB;
       if (sourceSamples > 0) {
         try {
-          const audioCtx = new AudioContext({ sampleRate: biasOutput.outputRate });
+          const audioCtx = new AudioContext({ sampleRate: playbackRate });
           await audioCtx.resume();
-          const buffer = audioCtx.createBuffer(2, outputSamples, biasOutput.outputRate);
+          const buffer = audioCtx.createBuffer(2, outputSamples, playbackRate);
           // SOUNDCNT_H 0xa90e: Sound A → right, Sound B → left
           const left  = buffer.getChannelData(0);
           const right = buffer.getChannelData(1);

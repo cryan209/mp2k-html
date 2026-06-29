@@ -5270,7 +5270,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const bios = diagnostics?.bios;
       const biosSummary = bios?.swiCalls ? ` | swi:${bios.swiSummary || bios.swiCalls}${bios.stubbed?.length ? ` stub:[${bios.stubbed.join(',')}]` : ''}` : '';
       const render = diagnostics?.render;
-      const renderSummary = render ? ` | render:${(render.renderedMs / 1000).toFixed(1)}s/${render.stopReason} fifo:${render.fifoFillRate || render.sourceRate || 0}Hz out:${render.outputRate || render.sampleRate}Hz dac:${render.dacBits || '?'}b${render.timerSourceRate ? ` timer:${render.timerSourceRate}` : ''} inst:${render.instructions}` : '';
+      const statA = render?.sampleStatsA;
+      const statB = render?.sampleStatsB;
+      const sampleStats = statA ? ` pcmA:${statA.min}..${statA.max}/r${statA.rms}/[${statA.head.slice(0, 6).join(',')}]${statB ? ` pcmB:${statB.min}..${statB.max}/r${statB.rms}/[${statB.head.slice(0, 6).join(',')}]` : ''}` : '';
+      const renderSummary = render ? ` | render:${(render.renderedMs / 1000).toFixed(1)}s/${render.stopReason} fifo:${render.fifoFillRate || render.sourceRate || 0}Hz play:${render.outputRate || render.sampleRate}Hz bias:${render.biasOutputRate || '?'}Hz dac:${render.dacBits || '?'}b${render.timerSourceRate ? ` timer:${render.timerSourceRate}` : ''} inst:${render.instructions}${sampleStats}` : '';
       const codeDump = audio?.timerCodeDump;
       const codeDumpSummary = codeDump
         ? ` | lit24d0:${codeDump.lit24d0} fn1:[${(codeDump.fn1||[]).filter(e=>!e.endsWith(':0x0000')).join(' ')}] fn2:[${codeDump.fn2.join(' ')}] iwram:[${(codeDump.iwramFn||[]).join(' ')}] iwramDiv1:[${(codeDump.iwramDiv1||[]).join(' ')}] snaps:[${(codeDump.regSnaps||[]).map(s=>`${s.label}@${s.pc}(c=${s.cycles} r0=${s.r0} r1=${s.r1} r5=${s.r5} lr=${s.lr})`).join(' ')}]`

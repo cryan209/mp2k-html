@@ -188,8 +188,8 @@
 
     region(addr) {
       addr >>>= 0;
-      if (addr >= 0x02000000 && addr < 0x02040000) return { id: 'ewram', data: this.ewram, off: addr - 0x02000000 };
-      if (addr >= 0x03000000 && addr < 0x03008000) return { id: 'iwram', data: this.iwram, off: addr - 0x03000000 };
+      if (addr >= 0x02000000 && addr < 0x03000000) return { id: 'ewram', data: this.ewram, off: (addr - 0x02000000) & 0x3ffff };
+      if (addr >= 0x03000000 && addr < 0x04000000) return { id: 'iwram', data: this.iwram, off: (addr - 0x03000000) & 0x7fff };
       if (addr >= 0x04000000 && addr < 0x04000400) return { id: 'io', data: this.io, off: addr - 0x04000000 };
       if (addr >= 0x05000000 && addr < 0x05000400) return { id: 'palette', data: this.palette, off: addr - 0x05000000 };
       if (addr >= 0x06000000 && addr < 0x06018000) return { id: 'vram', data: this.vram, off: addr - 0x06000000 };
@@ -197,6 +197,14 @@
       if (addr >= tools.GBA_ROM_BASE && addr < tools.GBA_ROM_BASE + this.memory.rom.length) return { id: 'rom', data: this.memory.rom, off: addr - tools.GBA_ROM_BASE };
       if (addr >= 0x0e000000 && addr < 0x0e010000) return { id: 'sram', data: this.sram, off: addr - 0x0e000000 };
       return null;
+    }
+
+    canonicalAddr(addr) {
+      const r = this.region(addr);
+      if (!r) return addr >>> 0;
+      if (r.id === 'ewram') return (0x02000000 + r.off) >>> 0;
+      if (r.id === 'iwram') return (0x03000000 + r.off) >>> 0;
+      return addr >>> 0;
     }
 
     executableRegion(addr) {
@@ -329,8 +337,9 @@
         this.irqVectorWrites.push(entry);
         if (this.irqVectorWrites.length > 32) this.irqVectorWrites.shift();
       }
-      if ((addr >= 0x02004000 && addr < 0x02008000) || (addr >= 0x03006000 && addr < 0x03007000)) {
-        this.soundBufferWriteMap.set(addr & ~3, entry);
+      const canonicalAddr = this.canonicalAddr(addr);
+      if ((r.id === 'ewram' && r.off >= 0x4000 && r.off < 0x8000) || (r.id === 'iwram' && r.off >= 0x6000 && r.off < 0x7000)) {
+        this.soundBufferWriteMap.set(canonicalAddr & ~3, entry);
         if (entry.value !== 0 || this.soundBufferWrites.length < 8) {
           this.soundBufferWrites.push(entry);
           if (this.soundBufferWrites.length > 64) this.soundBufferWrites.shift();
@@ -476,7 +485,7 @@
           dstHex: tools.hex(dst),
           words: words.map(word => tools.hex(word)),
           writers: words.map((_, i) => {
-            const write = this.soundBufferWriteMap.get((src + i * 4) & ~3);
+            const write = this.soundBufferWriteMap.get(this.canonicalAddr(src + i * 4) & ~3);
             return write ? `${write.valueHex}@${write.pcHex}/${write.kind}` : '-';
           }),
         });

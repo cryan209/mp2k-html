@@ -610,12 +610,11 @@
       this.fastMode = false;
       this.r13_irq = 0x03007FA0; // GBA BIOS initializes IRQ SP here
       this._inIrqDispatch = false; // re-entrancy guard
-      this._inSoundCallback = false;
       this.unsupported = new Map();
       this.psrWrites = [];
       this.swiCalls = [];
       this.irqDispatches = [];
-      this.soundCallbacks = [];
+      this.irqCallTargets = [];
       this.pcHits = new Map();
       this.recentPcs = [];
       this.branches = [];
@@ -1312,6 +1311,7 @@
       } else if (op === 2) this._setRegThumb(rd, b);
       else {
         const target = b;
+        this._recordIrqCall('thumb-bx', (this.regs[15] - 2) >>> 0, target);
         this._recordBranch('thumb-bx', (this.regs[15] - 2) >>> 0, target, {
           rs,
           rsName: `r${rs}`,
@@ -1567,7 +1567,6 @@
       }
       if (this._isGsfIdleIrqHandler(handlerAddr)) {
         this._clearPendingIrq(pending);
-        this._runGsfSoundCallback();
         this._recordIrqDispatch({ result: 'idle-loop', ie, ifl, pending, handlerAddr });
         return;
       }
@@ -1586,65 +1585,6 @@
       this.bus.io[0x203] = ((ifl & ~pending) >> 8) & 0xff;
     }
 
-    _runGsfSoundCallback() {
-      if (this._inSoundCallback) return;
-      const callbackAddr = this.bus.read32(0x03006000) >>> 0;
-      const callbackArg = this.bus.read32(0x03006004) >>> 0;
-      const target = callbackAddr & ~1;
-      if (!callbackAddr || !this.bus.executableRegion(target)) {
-        this._recordSoundCallback({ result: 'skipped', callbackAddr, callbackArg, steps: 0 });
-        return;
-      }
-
-      this._inSoundCallback = true;
-      const savedRegs = Array.from(this.regs);
-      const savedCpsr = this.cpsr;
-      const savedSpsr = this.spsr;
-      const savedHalted = this.halted;
-      const savedReason = this.reason;
-      const savedInIrq = this._inIrqDispatch;
-      const sentinel = 0x00000204;
-
-      this.regs[0] = callbackArg;
-      this.regs[14] = sentinel;
-      this.regs[15] = target >>> 0;
-      if (callbackAddr & 1) this.cpsr |= CPSR_T;
-      else this.cpsr &= ~CPSR_T;
-
-      const maxSteps = this.fastMode ? 4096 : 200000;
-      let steps = 0;
-      while (steps < maxSteps) {
-        if (this.regs[15] === sentinel || this.halted) break;
-        this.step();
-        steps++;
-      }
-      this._recordSoundCallback({
-        result: this.regs[15] === sentinel ? 'returned' : this.halted ? 'halted' : 'capped',
-        callbackAddr,
-        callbackArg,
-        steps,
-      });
-
-      for (let i = 0; i < 16; i++) this.regs[i] = savedRegs[i];
-      this.cpsr = savedCpsr;
-      this.spsr = savedSpsr;
-      this.halted = savedHalted;
-      this.reason = savedReason;
-      this._inIrqDispatch = savedInIrq;
-      this._inSoundCallback = false;
-    }
-
-    _recordSoundCallback(entry) {
-      this.soundCallbacks.push({
-        result: entry.result,
-        callbackHex: tools.hex(entry.callbackAddr || 0),
-        argHex: tools.hex(entry.callbackArg || 0),
-        steps: entry.steps || 0,
-        cycles: this.bus.cycles,
-      });
-      if (this.soundCallbacks.length > 32) this.soundCallbacks.shift();
-    }
-
     _recordIrqDispatch(entry) {
       this.irqDispatches.push({
         cycles: this.bus.cycles,
@@ -1656,6 +1596,18 @@
         result: entry.result,
       });
       if (this.irqDispatches.length > 64) this.irqDispatches.shift();
+    }
+
+    _recordIrqCall(kind, pc, target) {
+      if (!this._inIrqDispatch) return;
+      this.irqCallTargets.push({
+        kind,
+        pcHex: tools.hex(pc),
+        targetHex: tools.hex(target),
+        lrHex: tools.hex(this.regs[14]),
+        thumb: !!(this.cpsr & CPSR_T),
+      });
+      if (this.irqCallTargets.length > 64) this.irqCallTargets.shift();
     }
 
     _runIrqHandler(handlerAddr, pending) {
@@ -1813,6 +1765,7 @@
       } else {
         const target = (this.regs[14] + (off << 1)) >>> 0;
         this.regs[14] = ((pc + 2) | 1) >>> 0;
+        this._recordIrqCall('thumb-bl', pc, target);
         this._recordBranch('thumb-bl', pc, target);
         this.regs[15] = target & ~1;
       }
@@ -1840,12 +1793,14 @@
       const offset = (signExtend24(instr & 0x00ffffff) << 2) >> 0;
       if (link) this.regs[14] = (pc + 4) >>> 0;
       const target = (pc + 8 + offset) >>> 0;
+      if (link) this._recordIrqCall('arm-bl', pc, target);
       this._recordBranch(link ? 'arm-bl' : 'arm-b', pc, target);
       this.regs[15] = target;
     }
 
     _bx(instr) {
       const target = this._reg(instr & 0xf);
+      this._recordIrqCall('arm-bx', (this.regs[15] - 4) >>> 0, target);
       this._recordBranch('arm-bx', (this.regs[15] - 4) >>> 0, target, { rm: instr & 0xf });
       if (target & 1) {
         this.cpsr |= CPSR_T;
@@ -2274,7 +2229,6 @@
             kind: w.kind,
             pcHex: w.pcHex,
           })),
-          soundCallbacks: this.cpu.soundCallbacks.slice(-12),
         },
         interrupts: this._makeInterruptDiagnostics(),
         bios: {
@@ -2350,6 +2304,7 @@
         frameCycles: this.bus.frameCycles,
         recent: this.bus.irqEvents.slice(-24),
         dispatches: this.cpu?.irqDispatches?.slice(-16) || [],
+        calls: this.cpu?.irqCallTargets?.slice(-16) || [],
       };
     }
 

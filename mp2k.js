@@ -5246,9 +5246,6 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const bufferWrites = diagnostics?.fifo?.bufferWrites?.length
         ? ` bufWr:[${diagnostics.fifo.bufferWrites.slice(-6).map(w => `${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`
         : '';
-      const soundCallbacks = diagnostics?.fifo?.soundCallbacks?.length
-        ? ` soundCb:[${diagnostics.fifo.soundCallbacks.slice(-4).map(c => `${c.result}@${c.callbackHex}(${c.argHex})/${c.steps}`).join(' ')}]`
-        : '';
       const dsTimerA = audio?.timers?.[audio?.sound?.directSoundA?.timer || 0];
       const dsTimerB = audio?.timers?.[audio?.sound?.directSoundB?.timer || 0];
       const timerDetail = dsTimerA ? ` tmA:${dsTimerA.ch}/${dsTimerA.reloadHex}/${dsTimerA.counterHex}/${dsTimerA.controlHex}/${dsTimerA.rateHz}Hz` : '';
@@ -5256,7 +5253,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const reloadLog = audio?.timerReloadLog?.length ? ` reloadLog:[${audio.timerReloadLog.map(e => `${e.addr}=${e.value}@${e.cycles}(pc=${e.pc}/${e.thumb?'T':'A'}:${e.instrHex})`).join(' ')}]` : '';
       const soundDetail = audio ? ` snd:${audio.sound.soundCntHHex}/${audio.sound.soundBiasHex}` : '';
       const audioSummary = audio
-        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}${fifoDma}${bufferWrites}${soundCallbacks}`
+        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}${fifoDma}${bufferWrites}`
         : '';
       const irq = diagnostics?.interrupts;
       const irqTrace = irq?.dispatches?.length
@@ -5265,7 +5262,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const irqVector = irq?.vectorWrites?.length
         ? ` irqVec:[${irq.vectorWrites.slice(-4).map(w => `${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`
         : '';
-      const irqSummary = irq ? ` | vbl:${irq.vblankCount} irq:${irq.pendingHex} ime:${irq.ime} ih:${irq.handlerHex}${irqTrace}${irqVector}` : '';
+      const irqCalls = irq?.calls?.length
+        ? ` irqCalls:[${irq.calls.slice(-8).map(c => `${c.kind}@${c.pcHex}->${c.targetHex}`).join(' ')}]`
+        : '';
+      const irqSummary = irq ? ` | vbl:${irq.vblankCount} irq:${irq.pendingHex} ime:${irq.ime} ih:${irq.handlerHex}${irqTrace}${irqVector}${irqCalls}` : '';
       const branch = run?.lastBranch;
       const sourceBranch = run?.faultSourceBranch;
       const branchSummary = branch ? ` via:${branch.kind}@${branch.pcHex}->${branch.targetHex || branch.pcHex}` : '';

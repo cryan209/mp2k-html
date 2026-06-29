@@ -5240,8 +5240,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const fifoA = diagnostics?.fifo?.renderSamplesA ?? diagnostics?.fifo?.samplesA ?? 0;
       const fifoB = diagnostics?.fifo?.renderSamplesB ?? diagnostics?.fifo?.samplesB ?? 0;
       const fifoFill = diagnostics?.fifo ? ` fill:${diagnostics.fifo.fillBytesA || 0}/${diagnostics.fifo.fillBytesB || 0} q:${diagnostics.fifo.queueA || 0}/${diagnostics.fifo.queueB || 0}` : '';
+      const dmaEntries = diagnostics?.fifo?.dmaLog || [];
+      const dmaShown = [1, 2].flatMap(ch => dmaEntries.filter(d => d.ch === ch).slice(-2));
       const fifoDma = diagnostics?.fifo?.dmaLog?.length
-        ? ` dmaSrc:[${diagnostics.fifo.dmaLog.slice(-4).map(d => `d${d.ch}@${d.srcHex}${d.canonicalSrcHex && d.canonicalSrcHex !== d.srcHex ? `(${d.canonicalSrcHex})` : ''}->${d.dstHex}/nz${d.nonZeroWords || 0}:${d.words.join('/')}${d.writers?.length ? `<${d.writers.join('/')}>` : ''}`).join(' ')}]`
+        ? ` dmaSrc:[${dmaShown.map(d => `d${d.ch}@${d.srcHex}${d.canonicalSrcHex && d.canonicalSrcHex !== d.srcHex ? `(${d.canonicalSrcHex})` : ''}->${d.dstHex}/nz${d.nonZeroWords || 0}:${d.words.join('/')}${d.writers?.length ? `<${d.writers.join('/')}>` : ''}`).join(' ')}]`
         : '';
       const bufferWrites = diagnostics?.fifo?.bufferWrites?.length
         ? ` bufWr:[${diagnostics.fifo.bufferWrites.slice(-6).map(w => `${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`

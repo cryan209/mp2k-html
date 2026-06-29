@@ -354,7 +354,7 @@
         if (this.irqVectorWrites.length > 32) this.irqVectorWrites.shift();
       }
       const canonicalAddr = this.canonicalAddr(addr);
-      if ((r.id === 'ewram' && r.off >= 0x4000 && r.off < 0x8000) || (r.id === 'iwram' && r.off >= 0x6000 && r.off < 0x7000)) {
+      if ((r.id === 'ewram' && r.off >= 0x4000 && r.off < 0x8000) || r.id === 'iwram') {
         this.soundBufferWriteMap.set(canonicalAddr & ~3, entry);
         if (entry.value !== 0 || this.soundBufferWrites.length < 8) {
           this.soundBufferWrites.push(entry);

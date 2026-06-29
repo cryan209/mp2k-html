@@ -540,6 +540,7 @@
     }
 
     _execArm(instr, pc) {
+      if ((instr & 0x0f000000) === 0x0f000000) return this._swi((instr >>> 16) & 0xff, pc, 'arm');
       if ((instr & 0x0e000000) === 0x0a000000) return this._branch(instr, pc);
       if ((instr & 0x0ffffff0) === 0x012fff10) return this._bx(instr);
       if ((instr & 0x0fc000f0) === 0x00000090) return this._multiply(instr);
@@ -631,7 +632,11 @@
         case 0x0: result = a & op2.value; break; // AND
         case 0x1: result = a ^ op2.value; break; // EOR
         case 0x2: result = (a - op2.value) >>> 0; carry = a >= op2.value; overflow = subOverflow(a, op2.value, result); break; // SUB
+        case 0x3: result = (op2.value - a) >>> 0; carry = op2.value >= a; overflow = subOverflow(op2.value, a, result); break; // RSB
         case 0x4: result = (a + op2.value) >>> 0; carry = result < a; overflow = addOverflow(a, op2.value, result); break; // ADD
+        case 0x5: { const c5 = this.cpsr & CPSR_C ? 1 : 0; result = (a + op2.value + c5) >>> 0; carry = result < a || (c5 && result === a); overflow = addOverflow(a, op2.value, result); break; } // ADC
+        case 0x6: { const c6 = this.cpsr & CPSR_C ? 0 : 1; result = (a - op2.value - c6) >>> 0; carry = a >= op2.value + c6; overflow = subOverflow(a, op2.value, result); break; } // SBC
+        case 0x7: { const c7 = this.cpsr & CPSR_C ? 0 : 1; result = (op2.value - a - c7) >>> 0; carry = op2.value >= a + c7; overflow = subOverflow(op2.value, a, result); break; } // RSC
         case 0x8: result = a & op2.value; write = false; break; // TST
         case 0x9: result = a ^ op2.value; write = false; break; // TEQ
         case 0xa: result = (a - op2.value) >>> 0; carry = a >= op2.value; overflow = subOverflow(a, op2.value, result); write = false; break; // CMP
@@ -1075,13 +1080,14 @@
       const rb = (instr >>> 8) & 7;
       const list = instr & 0xff;
       let addr = this.regs[rb] >>> 0;
+      const rbInList = !!(list & (1 << rb));
       for (let r = 0; r < 8; r++) {
         if (!(list & (1 << r))) continue;
         if (load) this._writeReg(r, this.bus.read32(addr & ~3), 'thumb-multi-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~3), rb });
         else this._writeMem32(addr, this.regs[r], 'thumb-multi-store', { r, rb });
         addr = (addr + 4) >>> 0;
       }
-      this.regs[rb] = addr >>> 0;
+      if (!load || !rbInList) this.regs[rb] = addr >>> 0;
     }
 
     _thumbCondBranch(instr, pc) {
@@ -1460,8 +1466,8 @@
         },
         patchPoints: [],
         notes: [
-          'ARM mode CPU scaffold is active.',
-          'Thumb instructions, block transfers, multiply, swaps, coprocessor, and many edge cases are not implemented yet.',
+          'ARM+Thumb CPU is active with data processing, branches, load/store, block transfer, multiply, and BIOS SWI stubs.',
+          'Not implemented: SWP, coprocessor, ARM mode S-flag exception return (Rd=15), long multiply (MULL/MLAL).',
         ],
       };
       return this.diagnostics;

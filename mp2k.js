@@ -5237,7 +5237,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const dsTimerB = audio?.timers?.[audio?.sound?.directSoundB?.timer || 0];
       const timerDetail = dsTimerA ? ` tmA:${dsTimerA.ch}/${dsTimerA.reloadHex}/${dsTimerA.controlHex}/${dsTimerA.rateHz}Hz` : '';
       const timerDetailB = dsTimerB && dsTimerB !== dsTimerA ? ` tmB:${dsTimerB.ch}/${dsTimerB.reloadHex}/${dsTimerB.controlHex}/${dsTimerB.rateHz}Hz` : '';
-      const reloadLog = audio?.timerReloadLog?.length ? ` reloadLog:[${audio.timerReloadLog.map(e => `${e.addr}=${e.value}@${e.cycles}(pc=${e.pc ? '0x'+e.pc.toString(16) : '?'})`).join(' ')}]` : '';
+      const reloadLog = audio?.timerReloadLog?.length ? ` reloadLog:[${audio.timerReloadLog.map(e => `${e.addr}=${e.value}@${e.cycles}(pc=${e.pc}/${e.thumb?'T':'A'}:${e.instrHex})`).join(' ')}]` : '';
       const soundDetail = audio ? ` snd:${audio.sound.soundCntHHex}/${audio.sound.soundBiasHex}` : '';
       const audioSummary = audio
         ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}`

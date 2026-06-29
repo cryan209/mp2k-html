@@ -263,7 +263,11 @@
       this._logIoWrite(addr, value, 1);
       // Log writes to TM0CNT_L/H (0x04000100-0x04000103) for debugging timer misconfiguration
       if (addr >= 0x04000100 && addr <= 0x04000103 && this.timerReloadLog.length < 64) {
-        this.timerReloadLog.push({ addr: tools.hex(addr), value: tools.hex(value, 2), cycles: this.cycles, pc: this.debugPc || 0 });
+        const pc = this.debugPc || 0;
+        const thumb = !!this.debugThumb;
+        const b0 = this.read8(pc), b1 = this.read8(pc+1), b2 = this.read8(pc+2), b3 = this.read8(pc+3);
+        const instrHex = thumb ? tools.hex((b1 << 8) | b0, 4) : tools.hex((b3 << 24 | b2 << 16 | b1 << 8 | b0) >>> 0);
+        this.timerReloadLog.push({ addr: tools.hex(addr), value: tools.hex(value, 2), cycles: this.cycles, pc: tools.hex(pc), instrHex, thumb });
       }
       // Trigger DMA when high byte of CNT_H is written with enable bit (offset 11 in each 12-byte channel block)
       if (addr >= IO_DMA_START && addr < IO_DMA_END) {
@@ -599,6 +603,7 @@
 
     step() {
       this.bus.debugPc = this.regs[15] >>> 0;
+      this.bus.debugThumb = !!(this.cpsr & CPSR_T);
       if (this.cpsr & CPSR_T) {
         const pc = this.regs[15] >>> 0;
         if (!this._canFetch(pc, 2)) return;

@@ -5243,7 +5243,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const dmaEntries = diagnostics?.fifo?.dmaLog || [];
       const dmaShown = [1, 2].flatMap(ch => dmaEntries.filter(d => d.ch === ch).slice(-2));
       const fifoDma = diagnostics?.fifo?.dmaLog?.length
-        ? ` dmaSrc:[${dmaShown.map(d => `d${d.ch}@${d.srcHex}${d.canonicalSrcHex && d.canonicalSrcHex !== d.srcHex ? `(${d.canonicalSrcHex})` : ''}->${d.dstHex}${d.windowHex ? `/win=${d.windowHex}` : ''}/nz${d.nonZeroWords || 0}:${d.words.join('/')}${d.writers?.length ? `<${d.writers.join('/')}>` : ''}`).join(' ')}]`
+        ? ` dmaSrc:[${dmaShown.map(d => `d${d.ch}@${d.srcHex}${d.canonicalSrcHex && d.canonicalSrcHex !== d.srcHex ? `(${d.canonicalSrcHex})` : ''}->${d.dstHex}/nz${d.nonZeroWords || 0}:${d.words.join('/')}${d.writers?.length ? `<${d.writers.join('/')}>` : ''}`).join(' ')}]`
         : '';
       const bufferWrites = diagnostics?.fifo?.bufferWrites?.length
         ? ` bufWr:[${diagnostics.fifo.bufferWrites.slice(-6).map(w => `${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`

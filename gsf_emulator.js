@@ -76,6 +76,9 @@
   const IO_DMA_END = 0x040000e0;
   const GBA_CPU_HZ = 16777216;
   const GBA_CYCLES_PER_FRAME = 280896;
+  const GBA_CYCLES_PER_SCANLINE = 1232; // 280896 / 228 scanlines (exact)
+  const GBA_TOTAL_SCANLINES = 228;
+  const GBA_VBLANK_SCANLINE = 160;
   const GBA_SYSTEM_STACK = 0x03007f00;
   const TIMER_PRESCALERS = [1, 64, 256, 1024];
   const IRQ_VBLANK = 0x0001;
@@ -159,6 +162,9 @@
       this.irqEvents = [];
       this.dmaTransfers = [];
       this.memoryWrites = [];
+      this.timerCounters = [0, 0, 0, 0];
+      this.timerPhases = [0, 0, 0, 0];
+      this.fifoDmaPhase = [0, 0]; // overflow counter for timer 0 and 1; DMA fires every 16
       this.wordWrites = new Map();
     }
 
@@ -181,6 +187,18 @@
     }
 
     read8(addr) {
+      addr >>>= 0;
+      // VCOUNT (0x04000006): dynamically computed from frame cycle position
+      if (addr === 0x04000006) {
+        return Math.floor(this.frameCycles / GBA_CYCLES_PER_SCANLINE) % GBA_TOTAL_SCANLINES;
+      }
+      // DISPSTAT (0x04000004) bit 0: VBlank flag, set when VCOUNT >= 160
+      if (addr === 0x04000004) {
+        const r = this.region(addr);
+        const base = r ? r.data[r.off] : 0;
+        const inVBlank = Math.floor(this.frameCycles / GBA_CYCLES_PER_SCANLINE) >= GBA_VBLANK_SCANLINE ? 1 : 0;
+        return (base & ~1) | inVBlank;
+      }
       const r = this.region(addr);
       if (!r || r.off >= r.data.length) {
         this.unmappedReads++;
@@ -207,12 +225,26 @@
         this.unmappedWrites++;
         return;
       }
+      // Timer enable: detect 0→1 transition on TM0-3 CNT_H high byte
+      // Check BEFORE the write so we have the old value
+      let timerEnableInit = -1;
+      if (addr >= 0x04000103 && addr <= 0x0400010f && ((addr - 0x04000103) & 3) === 0) {
+        const ch = (addr - 0x04000103) >> 2;
+        const oldEnable = r.data[r.off] & 0x80;
+        if ((value & 0x80) && !oldEnable) timerEnableInit = ch;
+      }
       r.data[r.off] = value;
       this._logIoWrite(addr, value, 1);
       // Trigger DMA when high byte of CNT_H is written with enable bit (offset 11 in each 12-byte channel block)
       if (addr >= IO_DMA_START && addr < IO_DMA_END) {
         const dmaOff = addr - IO_DMA_START;
         if (dmaOff % 12 === 11) this._maybeRunDma(Math.floor(dmaOff / 12));
+      }
+      // Initialize timer counter from reload on enable transition
+      if (timerEnableInit >= 0) {
+        const base = 0x04000100 + timerEnableInit * 4;
+        this.timerCounters[timerEnableInit] = (this.io[base - 0x04000000] | (this.io[base - 0x04000000 + 1] << 8));
+        this.timerPhases[timerEnableInit] = 0;
       }
     }
 
@@ -265,10 +297,96 @@
       cycles = Math.max(1, cycles | 0);
       this.cycles += cycles;
       this.frameCycles += cycles;
+      this._tickTimers(cycles);
       while (this.frameCycles >= GBA_CYCLES_PER_FRAME) {
         this.frameCycles -= GBA_CYCLES_PER_FRAME;
         this._enterVBlank();
       }
+    }
+
+    _tickTimers(cycles) {
+      for (let ch = 0; ch < 4; ch++) {
+        const base = 0x04000100 + ch * 4;
+        const ctrl = (this.io[base - 0x04000000 + 2] | (this.io[base - 0x04000000 + 3] << 8));
+        if (!(ctrl & 0x80)) { this.timerPhases[ch] = 0; continue; } // disabled
+        if (ch > 0 && (ctrl & 0x04)) continue; // cascade, driven by previous timer
+        const prescaler = TIMER_PRESCALERS[ctrl & 3];
+        const reload = (this.io[base - 0x04000000] | (this.io[base - 0x04000000 + 1] << 8));
+        this.timerPhases[ch] += cycles;
+        let ticks = Math.floor(this.timerPhases[ch] / prescaler);
+        this.timerPhases[ch] -= ticks * prescaler;
+        while (ticks > 0) {
+          const space = 0x10000 - this.timerCounters[ch];
+          if (ticks < space) { this.timerCounters[ch] += ticks; break; }
+          ticks -= space;
+          this.timerCounters[ch] = reload;
+          this._timerOverflow(ch, ctrl);
+        }
+      }
+    }
+
+    _timerOverflow(ch, ctrl) {
+      // Cascade: tick next timer by 1
+      if (ch < 3) {
+        const nBase = 0x04000100 + (ch + 1) * 4;
+        const nCtrl = (this.io[nBase - 0x04000000 + 2] | (this.io[nBase - 0x04000000 + 3] << 8));
+        if ((nCtrl & 0x80) && (nCtrl & 0x04)) {
+          const nReload = (this.io[nBase - 0x04000000] | (this.io[nBase - 0x04000000 + 1] << 8));
+          this.timerCounters[ch + 1]++;
+          if (this.timerCounters[ch + 1] >= 0x10000) {
+            this.timerCounters[ch + 1] = nReload;
+            this._timerOverflow(ch + 1, nCtrl);
+          }
+        }
+      }
+      // Timer IRQ
+      if (ctrl & 0x40) this.requestIrq(1 << (3 + ch), `timer${ch}-overflow`);
+      // Sound FIFO DMA: timers 0 and 1 drive DMA channels 1 and 2
+      // Fire every 16 overflows (FIFO = 32 bytes, DMA fires when half-empty after 16 consumes)
+      if (ch <= 1) {
+        this.fifoDmaPhase[ch] = (this.fifoDmaPhase[ch] + 1) & 15;
+        if (this.fifoDmaPhase[ch] === 0) this._triggerSoundFifoDma(ch);
+      }
+    }
+
+    _triggerSoundFifoDma(timerCh) {
+      // Timer select for sound FIFO DMA is in SOUNDCNT_H (0x04000082):
+      // bit 10 = Sound A timer select, bit 14 = Sound B timer select
+      const soundCntH = (this.io[0x82] | (this.io[0x83] << 8));
+      // DMA1 → FIFO A (0x040000a0), DMA2 → FIFO B (0x040000a4)
+      const timerSelA = (soundCntH >>> 10) & 1;
+      const timerSelB = (soundCntH >>> 14) & 1;
+      const dmaTimers = [0, timerSelA, timerSelB, 0]; // ch→timer mapping (ch 1=FIFO A, ch 2=FIFO B)
+      for (let dmaCh = 1; dmaCh <= 2; dmaCh++) {
+        if (dmaTimers[dmaCh] !== timerCh) continue;
+        const base = IO_DMA_START + dmaCh * 12;
+        const ctrl = (this.io[base - 0x04000000 + 10] | (this.io[base - 0x04000000 + 11] << 8));
+        if (!(ctrl & 0x8000)) continue; // DMA not enabled
+        const timing = (ctrl >>> 12) & 3;
+        if (timing !== 3) continue; // not sound FIFO timing
+        this._runSoundFifoDma(dmaCh);
+      }
+    }
+
+    _runSoundFifoDma(ch) {
+      const base = IO_DMA_START + ch * 12;
+      const src = this.read32(base);
+      const dst = this.read32(base + 4); // should be FIFO address (0x040000a0 or 0x040000a4)
+      // Sound FIFO: always transfer 4 words (16 bytes), dst fixed, src advances
+      for (let i = 0; i < 4; i++) {
+        const word = this.read32((src + i * 4) >>> 0);
+        this._writeSoundFifo(dst, word);
+      }
+      // Advance src by 16 bytes (write back to DMA SAD register)
+      const newSrc = (src + 16) >>> 0;
+      this.write32(base, newSrc);
+      // Don't disable — repeat bit is set, DMA stays active
+    }
+
+    _writeSoundFifo(fifoAddr, word) {
+      // FIFO A = 0x040000a0, FIFO B = 0x040000a4
+      // For now just track that samples are flowing; actual audio output handled externally
+      this.write32(fifoAddr, word);
     }
 
     forceVBlank(reason = 'forced') {
@@ -277,7 +395,7 @@
 
     _enterVBlank(reason = 'frame') {
       this.vblankCount++;
-      this.write16(0x04000006, 160);
+      // VCOUNT is now computed dynamically from frameCycles; no need to write it
       this.write16(0x04000004, this.read16(0x04000004) | 0x0001);
       this.requestIrq(IRQ_VBLANK, `vblank:${reason}`);
     }
@@ -1615,7 +1733,8 @@
         })(),
         notes: [
           'ARM+Thumb CPU is active with data processing, branches, load/store, block transfer, multiply (including long MULL/MLAL), and BIOS SWI stubs.',
-          'Not implemented: SWP, coprocessor, ARM mode S-flag exception return (Rd=15).',
+          'VCOUNT (0x04000006) computed dynamically from frameCycles; timers tick and overflow with cascade/IRQ/sound-FIFO-DMA support.',
+          'Not implemented: SWP, coprocessor, ARM IRQ dispatch, ARM mode S-flag exception return (Rd=15).',
         ],
       };
       return this.diagnostics;
@@ -1659,12 +1778,13 @@
           ch,
           reload,
           reloadHex: tools.hex(reload, 4),
+          counter: this.bus.timerCounters[ch],
           controlHex: tools.hex(control, 4),
           enabled,
           cascade,
           irq: !!(control & 0x40),
           prescaler,
-          rateHz: enabled && !cascade && period > 0 ? GBA_CPU_HZ / (prescaler * period) : 0,
+          rateHz: enabled && !cascade && period > 0 ? Math.round(GBA_CPU_HZ / (prescaler * period)) : 0,
           writes: timerWrites.filter(ev => ev.addr >= base && ev.addr < base + 4).length,
         });
       }

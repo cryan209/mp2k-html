@@ -160,6 +160,7 @@
       this.frameCycles = 0;
       this.vblankCount = 0;
       this.irqEvents = [];
+      this.irqVectorWrites = [];
       this.dmaTransfers = [];
       this.memoryWrites = [];
       this.timerCounters = [0, 0, 0, 0];
@@ -309,7 +310,6 @@
     }
 
     noteMemoryWrite(addr, value, bytes, source = {}) {
-      if (this.fastMode) return;
       addr >>>= 0;
       value >>>= 0;
       const r = this.region(addr);
@@ -323,6 +323,11 @@
         region: r.id,
         ...source,
       };
+      if (addr >= 0x03007ff8 && addr <= 0x03007ffc) {
+        this.irqVectorWrites.push(entry);
+        if (this.irqVectorWrites.length > 32) this.irqVectorWrites.shift();
+      }
+      if (this.fastMode) return;
       this.memoryWrites.push(entry);
       if (this.memoryWrites.length > 256) this.memoryWrites.shift();
       if (bytes === 4) this.wordWrites.set(addr & ~3, entry);
@@ -2222,6 +2227,13 @@
         ifHex: tools.hex(flags, 4),
         pendingHex: tools.hex(ime ? (ie & flags) : 0, 4),
         handlerHex: tools.hex(handler),
+        vectorWrites: this.bus.irqVectorWrites.slice(-12).map(w => ({
+          addrHex: w.addrHex,
+          valueHex: w.valueHex,
+          bytes: w.bytes,
+          kind: w.kind,
+          pcHex: w.pcHex,
+        })),
         vblankCount: this.bus.vblankCount,
         cycles: this.bus.cycles,
         frameCycles: this.bus.frameCycles,

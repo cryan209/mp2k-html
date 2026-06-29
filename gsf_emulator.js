@@ -1550,8 +1550,9 @@
         this.cpsr &= ~CPSR_T;
       }
 
-      // Run handler until it returns to sentinel or halts
-      const MAX_HANDLER_STEPS = 500000;
+      // Run handler until it returns to sentinel or halts. In fast audio render,
+      // avoid spending hundreds of thousands of steps in bad/empty IRQ trampolines.
+      const MAX_HANDLER_STEPS = this.fastMode ? 512 : 500000;
       let count = 0;
       while (count < MAX_HANDLER_STEPS) {
         if (this.regs[15] === SENTINEL || this.halted) break;
@@ -1874,7 +1875,7 @@
 
       const FALLBACK_SAMPLE_RATE = 13379;
       const targetCycles = Math.max(1, Math.round(GBA_CPU_HZ * renderSeconds));
-      const CHUNK = 64; // instructions per setTimeout slice; Halt can advance a whole frame
+      const CHUNK = 64; // max CPU steps per setTimeout slice
 
       // Enable fast mode — skip all diagnostic tracking
       this.bus.fastMode = true;
@@ -1900,17 +1901,19 @@
       let instructionsAtRenderEnd = instructionsAtStart;
       await new Promise(resolve => {
         const tick = () => {
-          this.cpu.run(CHUNK);
-          const ranTotal = this.cpu.instructions - instructionsAtStart;
-          const renderedCycles = this.bus.cycles - cyclesAtStart;
-          if (renderedCycles >= targetCycles || this.cpu.halted || ranTotal >= MAX_INSTRUCTIONS) {
-            renderStopReason = renderedCycles >= targetCycles ? 'target' : this.cpu.halted ? 'halted' : 'cap';
-            cyclesAtRenderEnd = this.bus.cycles;
-            instructionsAtRenderEnd = this.cpu.instructions;
-            resolve();
-          } else {
-            setTimeout(tick, 0);
+          for (let i = 0; i < CHUNK; i++) {
+            this.cpu.step();
+            const ranTotal = this.cpu.instructions - instructionsAtStart;
+            const renderedCycles = this.bus.cycles - cyclesAtStart;
+            if (renderedCycles >= targetCycles || this.cpu.halted || ranTotal >= MAX_INSTRUCTIONS) {
+              renderStopReason = renderedCycles >= targetCycles ? 'target' : this.cpu.halted ? 'halted' : 'cap';
+              cyclesAtRenderEnd = this.bus.cycles;
+              instructionsAtRenderEnd = this.cpu.instructions;
+              resolve();
+              return;
+            }
           }
+          setTimeout(tick, 0);
         };
         setTimeout(tick, 0);
       });

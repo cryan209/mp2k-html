@@ -1136,7 +1136,11 @@
         if (num === 0x02) call.result = this._biosHalt();
         else if (num === 0x04) call.result = this._biosIntrWait();
         else if (num === 0x05) call.result = this._biosVBlankIntrWait();
+        else if (num === 0x06) call.result = this._biosDiv(false);
+        else if (num === 0x07) call.result = this._biosDiv(true);
+        else if (num === 0x08) call.result = this._biosSqrt();
         else if (num === 0x0b) call.result = this._biosCpuSet();
+        else if (num === 0x0c) call.result = this._biosCpuFastSet();
         else call.result = 'stubbed';
       } catch (err) {
         call.result = 'error';
@@ -1203,6 +1207,42 @@
       this.bus.write16(0x04000202, IRQ_VBLANK);
       this.bus.forceVBlank('vblankintrwait');
       return 'vblank';
+    }
+
+    _biosDiv(swapArgs = false) {
+      const num = (swapArgs ? this.regs[1] : this.regs[0]) | 0;
+      const den = (swapArgs ? this.regs[0] : this.regs[1]) | 0;
+      if (den === 0) throw new Error('Div by zero');
+      const quot = Math.trunc(num / den) | 0;
+      const rem = (num - quot * den) | 0;
+      const pc = (this.regs[15] - (this.cpsr & CPSR_T ? 2 : 4)) >>> 0;
+      this._writeReg(0, quot >>> 0, 'bios-div', pc);
+      this._writeReg(1, rem >>> 0, 'bios-div', pc);
+      this._writeReg(3, (quot < 0 ? -quot : quot) >>> 0, 'bios-div', pc);
+      return `${num}/${den}=${quot} rem ${rem}`;
+    }
+
+    _biosSqrt() {
+      const val = this.regs[0] >>> 0;
+      const result = Math.floor(Math.sqrt(val)) & 0xffff;
+      const pc = (this.regs[15] - (this.cpsr & CPSR_T ? 2 : 4)) >>> 0;
+      this._writeReg(0, result, 'bios-sqrt', pc);
+      return `sqrt(${val})=${result}`;
+    }
+
+    _biosCpuFastSet() {
+      const src = this.regs[0] >>> 0;
+      const dst = this.regs[1] >>> 0;
+      const mode = this.regs[2] >>> 0;
+      const count = mode & 0x001fffff;
+      const fill = !!(mode & 0x01000000);
+      if (count > 0x100000) throw new Error(`unreasonable CpuFastSet count ${count}`);
+      const fillValue = this.bus.read32(src & ~3);
+      for (let i = 0; i < count; i++) {
+        const value = fill ? fillValue : this.bus.read32(((src + i * 4) & ~3) >>> 0);
+        this._writeMem32(((dst + i * 4) & ~3) >>> 0, value, 'bios-cpufastset', { srcHex: tools.hex(src), dstHex: tools.hex(dst), fill });
+      }
+      return `${fill ? 'fill' : 'copy'} ${count} words from ${tools.hex(src)} to ${tools.hex(dst)}`;
     }
 
     _biosCpuSet() {
@@ -1476,6 +1516,12 @@
         interrupts: this._makeInterruptDiagnostics(),
         bios: {
           swiCalls: swiCalls.length,
+          swiSummary: (() => {
+            const counts = new Map();
+            for (const c of swiCalls) counts.set(c.name, (counts.get(c.name) || 0) + 1);
+            return [...counts.entries()].map(([name, n]) => `${name}×${n}`).join(' ');
+          })(),
+          stubbed: swiCalls.filter(c => c.result === 'stubbed').map(c => c.name).filter((v, i, a) => a.indexOf(v) === i),
           recent: swiCalls.slice(-32).map(call => ({
             ...call,
             pcHex: tools.hex(call.pc),

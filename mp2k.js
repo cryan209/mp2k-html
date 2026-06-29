@@ -5284,7 +5284,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const pcSummary = run ? ` | +${run.ranInstructions} pc:${run.pcHex}${run.hotPcHex ? ` hot:${run.hotPcHex}/${run.hotPcHits}` : ''}${branchSummary}${sourceSummary}${trailSummary}` : '';
       const bios = diagnostics?.bios;
       const haltTrace = bios?.halts?.length
-        ? ` haltTrace:[${bios.halts.slice(-4).map(h => `${h.phase}@${h.pcHex} wake=${h.wake ? 1 : 0}/${h.dispatchable ? 1 : 0} if=${h.ifHex} d1=${h.dma1?.srcHex}->${h.dma1?.dstHex}/${h.dma1?.cntHex}`).join(' ')}]`
+        ? ` haltTrace:[${bios.halts.slice(-4).map(h => `${h.phase}@${h.pcHex} wake=${h.wake ? 1 : 0}/${h.dispatchable ? 1 : 0} if=${h.ifHex} d1=${h.dma1?.srcHex}|${h.dma1?.liveSrcHex}->${h.dma1?.dstHex}/${h.dma1?.cntHex}`).join(' ')}]`
         : '';
       const biosSummary = bios?.swiCalls || haltTrace ? ` | swi:${bios?.swiSummary || bios?.swiCalls || 0}${bios?.stubbed?.length ? ` stub:[${bios.stubbed.join(',')}]` : ''}${haltTrace}` : '';
       const render = diagnostics?.render;

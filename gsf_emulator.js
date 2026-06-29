@@ -164,6 +164,8 @@
       this.soundBufferWrites = [];
       this.soundBufferWriteMap = new Map();
       this.dmaTransfers = [];
+      this.dmaSourceLatch = [0, 0, 0, 0];
+      this.dmaDestLatch = [0, 0, 0, 0];
       this.memoryWrites = [];
       this.timerCounters = [0, 0, 0, 0];
       this.timerPhases = [0, 0, 0, 0];
@@ -269,10 +271,19 @@
       // The enable bit is bit 7 of the LOW byte: 0x04000102, 0x04000106, 0x0400010a, 0x0400010e.
       // Check BEFORE the write so we have the old value.
       let timerEnableInit = -1;
+      let dmaEnableInit = -1;
       if (addr >= 0x04000102 && addr <= 0x0400010e && ((addr - 0x04000102) & 3) === 0) {
         const ch = (addr - 0x04000102) >> 2;
         const oldEnable = r.data[r.off] & 0x80;
         if ((value & 0x80) && !oldEnable) timerEnableInit = ch;
+      }
+      if (addr >= IO_DMA_START && addr < IO_DMA_END) {
+        const dmaOff = addr - IO_DMA_START;
+        if (dmaOff % 12 === 11) {
+          const ch = Math.floor(dmaOff / 12);
+          const oldEnable = r.data[r.off] & 0x80;
+          if ((value & 0x80) && !oldEnable) dmaEnableInit = ch;
+        }
       }
       r.data[r.off] = value;
       this._logIoWrite(addr, value, 1);
@@ -287,6 +298,11 @@
       // Trigger DMA when high byte of CNT_H is written with enable bit (offset 11 in each 12-byte channel block)
       if (addr >= IO_DMA_START && addr < IO_DMA_END) {
         const dmaOff = addr - IO_DMA_START;
+        if (dmaEnableInit >= 0) {
+          const base = IO_DMA_START + dmaEnableInit * 12;
+          this.dmaSourceLatch[dmaEnableInit] = this.read32(base);
+          this.dmaDestLatch[dmaEnableInit] = this.read32(base + 4);
+        }
         if (dmaOff % 12 === 11) this._maybeRunDma(Math.floor(dmaOff / 12));
       }
       // Initialize timer counter from reload on enable transition
@@ -467,8 +483,10 @@
 
     _runSoundFifoDma(ch) {
       const base = IO_DMA_START + ch * 12;
-      const src = this.read32(base);
-      const dst = this.read32(base + 4); // should be FIFO address (0x040000a0 or 0x040000a4)
+      if (!this.dmaSourceLatch[ch]) this.dmaSourceLatch[ch] = this.read32(base);
+      if (!this.dmaDestLatch[ch]) this.dmaDestLatch[ch] = this.read32(base + 4);
+      const src = this.dmaSourceLatch[ch] >>> 0;
+      const dst = this.dmaDestLatch[ch] >>> 0; // should be FIFO address (0x040000a0 or 0x040000a4)
       const words = [];
       // Sound FIFO: always transfer 4 words (16 bytes), dst fixed, src advances
       for (let i = 0; i < 4; i++) {
@@ -490,10 +508,9 @@
           }),
         });
       }
-      // Advance src by 16 bytes (write back to DMA SAD register)
-      const newSrc = (src + 16) >>> 0;
-      this.write32(base, newSrc);
-      // Don't disable — repeat bit is set, DMA stays active
+      // Advance the internal DMA source latch. The visible DMAxSAD register is an initial value register.
+      this.dmaSourceLatch[ch] = (src + 16) >>> 0;
+      // Don't disable — repeat bit is set, DMA stays active.
     }
 
     _writeSoundFifo(fifoAddr, word) {
@@ -1638,7 +1655,9 @@
         return {
           ch,
           srcHex: tools.hex(this.bus.read32(base)),
+          liveSrcHex: tools.hex(this.bus.dmaSourceLatch[ch] || this.bus.read32(base)),
           dstHex: tools.hex(this.bus.read32(base + 4)),
+          liveDstHex: tools.hex(this.bus.dmaDestLatch[ch] || this.bus.read32(base + 4)),
           cntHex: tools.hex(this.bus.read16(base + 10), 4),
         };
       };

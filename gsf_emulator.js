@@ -615,7 +615,7 @@
       this.swiCalls = [];
       this.irqDispatches = [];
       this.irqCallTargets = [];
-      this.frameHooks = [];
+      this.haltEvents = [];
       this.pcHits = new Map();
       this.recentPcs = [];
       this.branches = [];
@@ -1473,7 +1473,7 @@
         r2: this.regs[2] >>> 0,
       };
       try {
-        if (num === 0x02) call.result = this._biosHalt();
+        if (num === 0x02) call.result = this._biosHalt(pc);
         else if (num === 0x04) call.result = this._biosIntrWait();
         else if (num === 0x05) call.result = this._biosVBlankIntrWait();
         else if (num === 0x06) call.result = this._biosDiv(false);
@@ -1526,9 +1526,11 @@
       return names[num] || `SWI_${tools.hex(num, 2)}`;
     }
 
-    _biosHalt() {
+    _biosHalt(pc = this.regs[15] >>> 0) {
+      this._recordHaltEvent('before', pc);
       this.bus.advanceFrame('halt');
       if (!this._inIrqDispatch) this._checkAndDispatchIrq();
+      this._recordHaltEvent('after', pc);
       return 'advanced to vblank';
     }
 
@@ -1568,7 +1570,6 @@
       }
       if (this._isGsfIdleIrqHandler(handlerAddr)) {
         this._clearPendingIrq(pending);
-        this._runGsfIdleFrameHook();
         this._recordIrqDispatch({ result: 'idle-loop', ie, ifl, pending, handlerAddr });
         return;
       }
@@ -1612,60 +1613,29 @@
       if (this.irqCallTargets.length > 64) this.irqCallTargets.shift();
     }
 
-    _runGsfIdleFrameHook() {
-      if (this._inFrameHook) return;
-      const hookAddr = this.bus.read32(0x08ffffec) >>> 0;
-      const target = hookAddr & ~1;
-      if (!hookAddr || !this.bus.executableRegion(target)) {
-        this._recordFrameHook({ result: 'skipped', hookAddr, steps: 0 });
-        return;
-      }
-
-      this._inFrameHook = true;
-      const savedRegs = Array.from(this.regs);
-      const savedCpsr = this.cpsr;
-      const savedSpsr = this.spsr;
-      const savedHalted = this.halted;
-      const savedReason = this.reason;
-      const savedInIrq = this._inIrqDispatch;
-      const sentinel = 0x00000204;
-
-      this.regs[14] = sentinel;
-      this.regs[15] = target >>> 0;
-      if (hookAddr & 1) this.cpsr |= CPSR_T;
-      else this.cpsr &= ~CPSR_T;
-
-      const maxSteps = this.fastMode ? 8192 : 200000;
-      let steps = 0;
-      while (steps < maxSteps) {
-        if (this.regs[15] === sentinel || this.halted) break;
-        this.step();
-        steps++;
-      }
-
-      this._recordFrameHook({
-        result: this.regs[15] === sentinel ? 'returned' : this.halted ? 'halted' : 'capped',
-        hookAddr,
-        steps,
-      });
-
-      for (let i = 0; i < 16; i++) this.regs[i] = savedRegs[i];
-      this.cpsr = savedCpsr;
-      this.spsr = savedSpsr;
-      this.halted = savedHalted;
-      this.reason = savedReason;
-      this._inIrqDispatch = savedInIrq;
-      this._inFrameHook = false;
-    }
-
-    _recordFrameHook(entry) {
-      this.frameHooks.push({
-        result: entry.result,
-        hookHex: tools.hex(entry.hookAddr || 0),
-        steps: entry.steps || 0,
+    _recordHaltEvent(phase, pc) {
+      const dma = ch => {
+        const base = 0x040000b0 + ch * 12;
+        return {
+          ch,
+          srcHex: tools.hex(this.bus.read32(base)),
+          dstHex: tools.hex(this.bus.read32(base + 4)),
+          cntHex: tools.hex(this.bus.read16(base + 10), 4),
+        };
+      };
+      this.haltEvents.push({
+        phase,
+        pcHex: tools.hex(pc),
         cycles: this.bus.cycles,
+        frameCycles: this.bus.frameCycles,
+        ime: this.bus.read16(0x04000208) & 1,
+        ieHex: tools.hex(this.bus.read16(0x04000200), 4),
+        ifHex: tools.hex(this.bus.read16(0x04000202), 4),
+        handlerHex: tools.hex(this.bus.read32(0x03007ffc)),
+        dma1: dma(1),
+        dma2: dma(2),
       });
-      if (this.frameHooks.length > 32) this.frameHooks.shift();
+      if (this.haltEvents.length > 32) this.haltEvents.shift();
     }
 
     _runIrqHandler(handlerAddr, pending) {
@@ -2287,7 +2257,6 @@
             kind: w.kind,
             pcHex: w.pcHex,
           })),
-          frameHooks: this.cpu.frameHooks.slice(-12),
         },
         interrupts: this._makeInterruptDiagnostics(),
         bios: {
@@ -2305,6 +2274,7 @@
             r1Hex: tools.hex(call.r1),
             r2Hex: tools.hex(call.r2),
           })),
+          halts: this.cpu.haltEvents.slice(-12),
         },
         patchPoints: [],
         memPeek: (() => {

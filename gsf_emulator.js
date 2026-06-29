@@ -1766,7 +1766,7 @@
 
       const FALLBACK_SAMPLE_RATE = 13379;
       const targetCycles = Math.max(1, Math.round(GBA_CPU_HZ * renderSeconds));
-      const CHUNK = 500000; // instructions per setTimeout slice
+      const CHUNK = 5000; // instructions per setTimeout slice
 
       // Enable fast mode — skip all diagnostic tracking
       this.bus.fastMode = true;
@@ -1780,6 +1780,8 @@
       const instructionsAtStart = this.cpu.instructions;
       const cyclesAtStart = this.bus.cycles;
       let renderStopReason = 'unknown';
+      let cyclesAtRenderEnd = cyclesAtStart;
+      let instructionsAtRenderEnd = instructionsAtStart;
       await new Promise(resolve => {
         const tick = () => {
           this.cpu.run(CHUNK);
@@ -1787,6 +1789,8 @@
           const renderedCycles = this.bus.cycles - cyclesAtStart;
           if (renderedCycles >= targetCycles || this.cpu.halted || ranTotal >= MAX_INSTRUCTIONS) {
             renderStopReason = renderedCycles >= targetCycles ? 'target' : this.cpu.halted ? 'halted' : 'cap';
+            cyclesAtRenderEnd = this.bus.cycles;
+            instructionsAtRenderEnd = this.cpu.instructions;
             resolve();
           } else {
             setTimeout(tick, 0);
@@ -1806,7 +1810,7 @@
       // Build AudioBuffer from collected FIFO samples
       const sourceRate = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE);
       const biasOutput = this._soundBiasOutput();
-      const renderedCycles = this.bus.cycles - cyclesAtStart;
+      const renderedCycles = cyclesAtRenderEnd - cyclesAtStart;
       const renderedSeconds = renderedCycles / GBA_CPU_HZ;
       const sourceSamples = Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length);
       const observedSourceRate = renderedSeconds > 0 ? Math.round(sourceSamples / renderedSeconds) : sourceRate;
@@ -1815,6 +1819,7 @@
         requestedSeconds: renderSeconds,
         sampleRate: biasOutput.outputRate,
         sourceRate: observedSourceRate,
+        fifoFillRate: observedSourceRate,
         timerSourceRate: sourceRate,
         outputRate: biasOutput.outputRate,
         dacBits: biasOutput.dacBits,
@@ -1824,7 +1829,7 @@
         renderedSamples: outputSamples,
         sourceSamples,
         renderedMs: Math.round(renderedSeconds * 1000),
-        instructions: this.cpu.instructions - instructionsAtStart,
+        instructions: instructionsAtRenderEnd - instructionsAtStart,
         stopReason: renderStopReason,
       };
       if (sourceSamples > 0) {

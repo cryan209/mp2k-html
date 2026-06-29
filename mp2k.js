@@ -5254,7 +5254,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const bios = diagnostics?.bios;
       const biosSummary = bios?.swiCalls ? ` | swi:${bios.swiSummary || bios.swiCalls}${bios.stubbed?.length ? ` stub:[${bios.stubbed.join(',')}]` : ''}` : '';
       const render = diagnostics?.render;
-      const renderSummary = render ? ` | render:${(render.renderedMs / 1000).toFixed(1)}s/${render.stopReason}@${render.sourceRate || render.sampleRate}->${render.outputRate || render.sampleRate}Hz dac:${render.dacBits || '?'}b${render.timerSourceRate ? ` timer:${render.timerSourceRate}` : ''} inst:${render.instructions}` : '';
+      const renderSummary = render ? ` | render:${(render.renderedMs / 1000).toFixed(1)}s/${render.stopReason} fifo:${render.fifoFillRate || render.sourceRate || 0}Hz out:${render.outputRate || render.sampleRate}Hz dac:${render.dacBits || '?'}b${render.timerSourceRate ? ` timer:${render.timerSourceRate}` : ''} inst:${render.instructions}` : '';
       setStatus(cpu
         ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}`
         : 'GSF CPU diagnostics unavailable.');

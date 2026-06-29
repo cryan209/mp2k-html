@@ -176,6 +176,7 @@
       this.fifoFillBytesA = 0;
       this.fifoFillBytesB = 0;
       this.timerReloadLog = []; // log writes to TM0CNT_L for debugging
+      this.debugPc = 0; // set by CPU before each step for write logging
     }
 
     region(addr) {
@@ -248,7 +249,7 @@
       this._logIoWrite(addr, value, 1);
       // Log writes to TM0CNT_L (0x04000100-0x04000101) for debugging
       if ((addr === 0x04000100 || addr === 0x04000101) && this.timerReloadLog.length < 32) {
-        this.timerReloadLog.push({ addr: tools.hex(addr), value: tools.hex(value, 2), cycles: this.cycles });
+        this.timerReloadLog.push({ addr: tools.hex(addr), value: tools.hex(value, 2), cycles: this.cycles, pc: this.debugPc || 0 });
       }
       // Trigger DMA when high byte of CNT_H is written with enable bit (offset 11 in each 12-byte channel block)
       if (addr >= IO_DMA_START && addr < IO_DMA_END) {
@@ -583,6 +584,7 @@
     }
 
     step() {
+      this.bus.debugPc = this.regs[15] >>> 0;
       if (this.cpsr & CPSR_T) {
         const pc = this.regs[15] >>> 0;
         if (!this._canFetch(pc, 2)) return;

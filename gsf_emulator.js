@@ -175,6 +175,7 @@
       this.fifoLastB = 0;
       this.fifoFillBytesA = 0;
       this.fifoFillBytesB = 0;
+      this.timerReloadLog = []; // log writes to TM0CNT_L for debugging
     }
 
     region(addr) {
@@ -245,6 +246,10 @@
       }
       r.data[r.off] = value;
       this._logIoWrite(addr, value, 1);
+      // Log writes to TM0CNT_L (0x04000100-0x04000101) for debugging
+      if ((addr === 0x04000100 || addr === 0x04000101) && this.timerReloadLog.length < 32) {
+        this.timerReloadLog.push({ addr: tools.hex(addr), value: tools.hex(value, 2), cycles: this.cycles });
+      }
       // Trigger DMA when high byte of CNT_H is written with enable bit (offset 11 in each 12-byte channel block)
       if (addr >= IO_DMA_START && addr < IO_DMA_END) {
         const dmaOff = addr - IO_DMA_START;
@@ -1807,6 +1812,7 @@
       // Enable fast mode — skip all diagnostic tracking
       this.bus.fastMode = true;
       this.cpu.fastMode = true;
+      this.bus.timerReloadLog = [];
       this.bus.fifoQueueA = [];
       this.bus.fifoQueueB = [];
       this.bus.fifoSamplesA = [];
@@ -2142,6 +2148,7 @@
           })),
         },
         timers,
+        timerReloadLog: this.bus.timerReloadLog,
         dma: dmas,
         dmaTransfers: this.bus.dmaTransfers.slice(-16),
         activeTimers: timers.filter(t => t.enabled).map(t => t.ch),

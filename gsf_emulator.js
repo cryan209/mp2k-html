@@ -2171,19 +2171,29 @@
         timers,
         timerReloadLog: this.bus.timerReloadLog,
         timerCodeDump: (() => {
-          // Dump Thumb instruction bytes at the two critical ROM addresses
           const readThumb = addr => {
             const b0 = this.bus.read8(addr), b1 = this.bus.read8(addr+1);
             return tools.hex((b1 << 8) | b0, 4);
           };
-          const win1 = [], win2 = [];
-          for (let i = 0; i < 24; i += 2) { // 12 instructions around path 1
-            win1.push(`${tools.hex(0x081c2470 + i)}:${readThumb(0x081c2470 + i)}`);
-          }
-          for (let i = 0; i < 24; i += 2) { // 12 instructions around path 2
-            win2.push(`${tools.hex(0x081c1210 + i)}:${readThumb(0x081c1210 + i)}`);
-          }
-          return { path1: win1, path2: win2 };
+          const readWord = addr => {
+            const b0=this.bus.read8(addr),b1=this.bus.read8(addr+1),b2=this.bus.read8(addr+2),b3=this.bus.read8(addr+3);
+            return tools.hex(((b3<<24)|(b2<<16)|(b1<<8)|b0)>>>0);
+          };
+          // Path 1: 32 instructions (0x081c2470-0x081c24af) + literal pool (0x081c24b0-0x081c24d8)
+          const win1 = [];
+          for (let i = 0; i < 64; i += 2)
+            win1.push(`${tools.hex(0x081c2470+i)}:${readThumb(0x081c2470+i)}`);
+          const pool1 = [];
+          for (let i = 0; i < 32; i += 4)
+            pool1.push(`${tools.hex(0x081c24b0+i)}:${readWord(0x081c24b0+i)}`);
+          // Path 2: 32 instructions (0x081c1210-0x081c124f) + literal pool (0x081c1250-0x081c1278)
+          const win2 = [];
+          for (let i = 0; i < 64; i += 2)
+            win2.push(`${tools.hex(0x081c1210+i)}:${readThumb(0x081c1210+i)}`);
+          const pool2 = [];
+          for (let i = 0; i < 32; i += 4)
+            pool2.push(`${tools.hex(0x081c1250+i)}:${readWord(0x081c1250+i)}`);
+          return { win1, pool1, win2, pool2 };
         })(),
         dma: dmas,
         dmaTransfers: this.bus.dmaTransfers.slice(-16),

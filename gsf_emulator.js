@@ -1722,11 +1722,30 @@
       return false;
     }
 
+    _directSoundSampleRate(fallback = 13379) {
+      if (!this.bus) return fallback;
+      const soundCntH = this.bus.read16(0x04000082);
+      const timerChoices = [
+        this.bus.fifoSamplesA.length ? ((soundCntH & 0x0400) ? 1 : 0) : null,
+        this.bus.fifoSamplesB.length ? ((soundCntH & 0x4000) ? 1 : 0) : null,
+      ].filter(ch => ch != null);
+      for (const ch of timerChoices.length ? timerChoices : [0, 1]) {
+        const base = 0x04000100 + ch * 4;
+        const reload = this.bus.read16(base);
+        const control = this.bus.read16(base + 2);
+        const period = 0x10000 - reload;
+        if ((control & 0x80) && !(control & 0x04) && period > 0) {
+          return Math.round(GBA_CPU_HZ / (TIMER_PRESCALERS[control & 3] * period));
+        }
+      }
+      return fallback;
+    }
+
     async play(renderSeconds = 10) {
       if (!this.cpu) this._initCpu();
 
-      const GBA_SAMPLE_RATE = 13379;
-      const TARGET_SAMPLES = GBA_SAMPLE_RATE * renderSeconds;
+      const FALLBACK_SAMPLE_RATE = 13379;
+      let targetSamples = FALLBACK_SAMPLE_RATE * renderSeconds;
       const CHUNK = 500000; // instructions per setTimeout slice
 
       // Enable fast mode — skip all diagnostic tracking
@@ -1745,8 +1764,9 @@
           this.cpu.run(CHUNK);
           const ranTotal = this.cpu.instructions - instructionsAtStart;
           const capturedSamples = Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length);
-          if (capturedSamples >= TARGET_SAMPLES || this.cpu.halted || ranTotal >= MAX_INSTRUCTIONS) {
-            renderStopReason = capturedSamples >= TARGET_SAMPLES ? 'target' : this.cpu.halted ? 'halted' : 'cap';
+          targetSamples = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE) * renderSeconds;
+          if (capturedSamples >= targetSamples || this.cpu.halted || ranTotal >= MAX_INSTRUCTIONS) {
+            renderStopReason = capturedSamples >= targetSamples ? 'target' : this.cpu.halted ? 'halted' : 'cap';
             resolve();
           } else {
             setTimeout(tick, 0);
@@ -1764,21 +1784,23 @@
       this.runDiagnostics(5000);
 
       // Build AudioBuffer from collected FIFO samples
-      const nSamples = Math.min(Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length), TARGET_SAMPLES);
+      const sampleRate = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE);
+      targetSamples = sampleRate * renderSeconds;
+      const nSamples = Math.min(Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length), targetSamples);
       this.diagnostics.render = {
         requestedSeconds: renderSeconds,
-        sampleRate: GBA_SAMPLE_RATE,
-        targetSamples: TARGET_SAMPLES,
+        sampleRate,
+        targetSamples,
         renderedSamples: nSamples,
-        renderedMs: Math.round((nSamples / GBA_SAMPLE_RATE) * 1000),
+        renderedMs: Math.round((nSamples / sampleRate) * 1000),
         instructions: this.cpu.instructions - instructionsAtStart,
         stopReason: renderStopReason,
       };
       if (nSamples > 0) {
         try {
-          const audioCtx = new AudioContext({ sampleRate: GBA_SAMPLE_RATE });
+          const audioCtx = new AudioContext({ sampleRate });
           await audioCtx.resume();
-          const buffer = audioCtx.createBuffer(2, nSamples, GBA_SAMPLE_RATE);
+          const buffer = audioCtx.createBuffer(2, nSamples, sampleRate);
           // SOUNDCNT_H 0xa90e: Sound A → right, Sound B → left
           const left  = buffer.getChannelData(0);
           const right = buffer.getChannelData(1);

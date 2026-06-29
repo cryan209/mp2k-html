@@ -1765,7 +1765,7 @@
       if (!this.cpu) this._initCpu();
 
       const FALLBACK_SAMPLE_RATE = 13379;
-      let targetSamples = FALLBACK_SAMPLE_RATE * renderSeconds;
+      const targetCycles = Math.max(1, Math.round(GBA_CPU_HZ * renderSeconds));
       const CHUNK = 500000; // instructions per setTimeout slice
 
       // Enable fast mode — skip all diagnostic tracking
@@ -1778,15 +1778,15 @@
       // Safety cap: bail after 500M instructions if no samples arrive (e.g. timer never enabled)
       const MAX_INSTRUCTIONS = 500_000_000;
       const instructionsAtStart = this.cpu.instructions;
+      const cyclesAtStart = this.bus.cycles;
       let renderStopReason = 'unknown';
       await new Promise(resolve => {
         const tick = () => {
           this.cpu.run(CHUNK);
           const ranTotal = this.cpu.instructions - instructionsAtStart;
-          const capturedSamples = Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length);
-          targetSamples = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE) * renderSeconds;
-          if (capturedSamples >= targetSamples || this.cpu.halted || ranTotal >= MAX_INSTRUCTIONS) {
-            renderStopReason = capturedSamples >= targetSamples ? 'target' : this.cpu.halted ? 'halted' : 'cap';
+          const renderedCycles = this.bus.cycles - cyclesAtStart;
+          if (renderedCycles >= targetCycles || this.cpu.halted || ranTotal >= MAX_INSTRUCTIONS) {
+            renderStopReason = renderedCycles >= targetCycles ? 'target' : this.cpu.halted ? 'halted' : 'cap';
             resolve();
           } else {
             setTimeout(tick, 0);
@@ -1806,20 +1806,24 @@
       // Build AudioBuffer from collected FIFO samples
       const sourceRate = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE);
       const biasOutput = this._soundBiasOutput();
-      targetSamples = sourceRate * renderSeconds;
-      const sourceSamples = Math.min(Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length), targetSamples);
-      const outputSamples = Math.max(1, Math.round((sourceSamples / sourceRate) * biasOutput.outputRate));
+      const renderedCycles = this.bus.cycles - cyclesAtStart;
+      const renderedSeconds = renderedCycles / GBA_CPU_HZ;
+      const sourceSamples = Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length);
+      const observedSourceRate = renderedSeconds > 0 ? Math.round(sourceSamples / renderedSeconds) : sourceRate;
+      const outputSamples = Math.max(1, Math.round(renderedSeconds * biasOutput.outputRate));
       this.diagnostics.render = {
         requestedSeconds: renderSeconds,
         sampleRate: biasOutput.outputRate,
-        sourceRate,
+        sourceRate: observedSourceRate,
+        timerSourceRate: sourceRate,
         outputRate: biasOutput.outputRate,
         dacBits: biasOutput.dacBits,
         soundBiasHex: biasOutput.biasHex,
-        targetSamples,
+        targetCycles,
+        renderedCycles,
         renderedSamples: outputSamples,
         sourceSamples,
-        renderedMs: Math.round((sourceSamples / sourceRate) * 1000),
+        renderedMs: Math.round(renderedSeconds * 1000),
         instructions: this.cpu.instructions - instructionsAtStart,
         stopReason: renderStopReason,
       };
@@ -1833,7 +1837,7 @@
           const right = buffer.getChannelData(1);
           const sampA = this.bus.fifoSamplesA;
           const sampB = this.bus.fifoSamplesB;
-          const step = sourceRate / biasOutput.outputRate;
+          const step = sourceSamples / outputSamples;
           for (let i = 0; i < outputSamples; i++) {
             const sourcePos = i * step;
             right[i] = this._sampleAt(sampA, sourcePos) / 128;

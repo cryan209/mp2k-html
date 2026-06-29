@@ -594,6 +594,7 @@
       this.unsupported = new Map();
       this.psrWrites = [];
       this.swiCalls = [];
+      this.irqDispatches = [];
       this.pcHits = new Map();
       this.recentPcs = [];
       this.branches = [];
@@ -1519,15 +1520,32 @@
     }
 
     _checkAndDispatchIrq() {
-      if (!(this.bus.io[0x208] & 1)) return; // IME off
+      if (!(this.bus.io[0x208] & 1)) return;
       const ie  = this.bus.io[0x200] | (this.bus.io[0x201] << 8);
       const ifl = this.bus.io[0x202] | (this.bus.io[0x203] << 8);
       const pending = ie & ifl & 0x3fff;
       if (!pending) return;
       const handlerAddr = this.bus.read32(0x03007FFC);
       // Require handler to be in ROM/EWRAM/IWRAM (not zero/unmapped)
-      if (!handlerAddr || handlerAddr < 0x02000000) return;
+      if (!handlerAddr || handlerAddr < 0x02000000) {
+        this._recordIrqDispatch({ result: 'no-handler', ie, ifl, pending, handlerAddr });
+        return;
+      }
+      this._recordIrqDispatch({ result: 'dispatch', ie, ifl, pending, handlerAddr });
       this._runIrqHandler(handlerAddr, pending);
+    }
+
+    _recordIrqDispatch(entry) {
+      this.irqDispatches.push({
+        cycles: this.bus.cycles,
+        pcHex: tools.hex(this.regs[15]),
+        ieHex: tools.hex(entry.ie || 0, 4),
+        ifHex: tools.hex(entry.ifl || 0, 4),
+        pendingHex: tools.hex(entry.pending || 0, 4),
+        handlerHex: tools.hex(entry.handlerAddr || 0),
+        result: entry.result,
+      });
+      if (this.irqDispatches.length > 64) this.irqDispatches.shift();
     }
 
     _runIrqHandler(handlerAddr, pending) {
@@ -1571,6 +1589,11 @@
         this.step();
         count++;
       }
+      this._recordIrqDispatch({
+        result: this.regs[15] === SENTINEL ? 'returned' : this.halted ? 'halted' : 'capped',
+        pending,
+        handlerAddr,
+      });
 
       // Save updated IRQ stack pointer (handler may have adjusted it)
       this.r13_irq = this.regs[13];
@@ -2192,15 +2215,18 @@
       const ime = this.bus.read16(0x04000208) & 1;
       const ie = this.bus.read16(0x04000200);
       const flags = this.bus.read16(0x04000202);
+      const handler = this.bus.read32(0x03007FFC);
       return {
         ime,
         ieHex: tools.hex(ie, 4),
         ifHex: tools.hex(flags, 4),
         pendingHex: tools.hex(ime ? (ie & flags) : 0, 4),
+        handlerHex: tools.hex(handler),
         vblankCount: this.bus.vblankCount,
         cycles: this.bus.cycles,
         frameCycles: this.bus.frameCycles,
         recent: this.bus.irqEvents.slice(-24),
+        dispatches: this.cpu?.irqDispatches?.slice(-16) || [],
       };
     }
 

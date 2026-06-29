@@ -5253,7 +5253,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
         ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}${fifoDma}`
         : '';
       const irq = diagnostics?.interrupts;
-      const irqSummary = irq ? ` | vbl:${irq.vblankCount} irq:${irq.pendingHex} ime:${irq.ime}` : '';
+      const irqTrace = irq?.dispatches?.length
+        ? ` irqTrace:[${irq.dispatches.slice(-6).map(d => `${d.result}@${d.pcHex}->${d.handlerHex}/${d.pendingHex}`).join(' ')}]`
+        : '';
+      const irqSummary = irq ? ` | vbl:${irq.vblankCount} irq:${irq.pendingHex} ime:${irq.ime} ih:${irq.handlerHex}${irqTrace}` : '';
       const branch = run?.lastBranch;
       const sourceBranch = run?.faultSourceBranch;
       const branchSummary = branch ? ` via:${branch.kind}@${branch.pcHex}->${branch.targetHex || branch.pcHex}` : '';

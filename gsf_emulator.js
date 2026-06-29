@@ -661,7 +661,6 @@
       this.irqDispatches = [];
       this.irqCallTargets = [];
       this.haltEvents = [];
-      this.gsfHostTicks = [];
       this.pcHits = new Map();
       this.recentPcs = [];
       this.branches = [];
@@ -1620,7 +1619,6 @@
       }
       if (this._isGsfIdleIrqHandler(handlerAddr)) {
         this._clearPendingIrq(pending);
-        this._runGsfHostTick();
         this._recordIrqDispatch({ result: 'idle-loop', ie, ifl, pending, handlerAddr });
         return;
       }
@@ -1691,62 +1689,6 @@
         dma2: dma(2),
       });
       if (this.haltEvents.length > 32) this.haltEvents.shift();
-    }
-
-    _runGsfHostTick() {
-      if (this._inGsfHostTick) return;
-      const tickAddr = this.bus.read32(0x08ffffec) >>> 0;
-      const target = tickAddr & ~1;
-      if (!tickAddr || !this.bus.executableRegion(target)) {
-        this._recordGsfHostTick({ result: 'skipped', tickAddr, steps: 0 });
-        return;
-      }
-
-      this._inGsfHostTick = true;
-      const savedRegs = Array.from(this.regs);
-      const savedCpsr = this.cpsr;
-      const savedSpsr = this.spsr;
-      const savedHalted = this.halted;
-      const savedReason = this.reason;
-      const savedInIrq = this._inIrqDispatch;
-      const sentinel = 0x00000204;
-
-      this.regs[14] = sentinel;
-      this.regs[15] = target >>> 0;
-      if (tickAddr & 1) this.cpsr |= CPSR_T;
-      else this.cpsr &= ~CPSR_T;
-
-      const maxSteps = this.fastMode ? 8192 : 200000;
-      let steps = 0;
-      while (steps < maxSteps) {
-        if (this.regs[15] === sentinel || this.halted) break;
-        this.step();
-        steps++;
-      }
-
-      this._recordGsfHostTick({
-        result: this.regs[15] === sentinel ? 'returned' : this.halted ? 'halted' : 'capped',
-        tickAddr,
-        steps,
-      });
-
-      for (let i = 0; i < 16; i++) this.regs[i] = savedRegs[i];
-      this.cpsr = savedCpsr;
-      this.spsr = savedSpsr;
-      this.halted = savedHalted;
-      this.reason = savedReason;
-      this._inIrqDispatch = savedInIrq;
-      this._inGsfHostTick = false;
-    }
-
-    _recordGsfHostTick(entry) {
-      this.gsfHostTicks.push({
-        result: entry.result,
-        tickHex: tools.hex(entry.tickAddr || 0),
-        steps: entry.steps || 0,
-        cycles: this.bus.cycles,
-      });
-      if (this.gsfHostTicks.length > 32) this.gsfHostTicks.shift();
     }
 
     _runIrqHandler(handlerAddr, pending) {
@@ -2386,7 +2328,6 @@
             r2Hex: tools.hex(call.r2),
           })),
           halts: this.cpu.haltEvents.slice(-12),
-          hostTicks: this.cpu.gsfHostTicks.slice(-12),
         },
         patchPoints: [],
         memPeek: (() => {

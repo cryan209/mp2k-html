@@ -329,7 +329,7 @@
         this.irqVectorWrites.push(entry);
         if (this.irqVectorWrites.length > 32) this.irqVectorWrites.shift();
       }
-      if (addr >= 0x03006000 && addr < 0x03007000) {
+      if ((addr >= 0x02004000 && addr < 0x02008000) || (addr >= 0x03006000 && addr < 0x03007000)) {
         this.soundBufferWriteMap.set(addr & ~3, entry);
         if (entry.value !== 0 || this.soundBufferWrites.length < 8) {
           this.soundBufferWrites.push(entry);
@@ -807,6 +807,19 @@
       });
     }
 
+    _writeMem8(addr, value, kind, detail = {}) {
+      addr >>>= 0;
+      value &= 0xff;
+      const pc = (this.regs[15] - (this.cpsr & CPSR_T ? 2 : 4)) >>> 0;
+      this.bus.write8(addr, value);
+      this.bus.noteMemoryWrite(addr, value, 1, {
+        kind,
+        pc,
+        pcHex: tools.hex(pc),
+        ...detail,
+      });
+    }
+
     _writeMem16(addr, value, kind, detail = {}) {
       addr >>>= 0;
       value &= 0xffff;
@@ -1032,7 +1045,7 @@
         this._setReg(rd, byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3));
       } else {
         const value = this._reg(rd);
-        if (byte) this.bus.write8(addr, value);
+        if (byte) this._writeMem8(addr, value, 'arm-byte-store', { rd, rn });
         else this._writeMem32(addr, value, 'arm-store', { rd, rn });
       }
       if (writeBack || !pre) this._setReg(rn, finalBase);
@@ -1327,7 +1340,7 @@
       const rd = instr & 7;
       const addr = (this.regs[rb] + this.regs[ro]) >>> 0;
       if (load) this._writeReg(rd, byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3), 'thumb-reg-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr), byte });
-      else if (byte) this.bus.write8(addr, this.regs[rd]);
+      else if (byte) this._writeMem8(addr, this.regs[rd], 'thumb-reg-byte-store', { rd, rb, ro });
       else this._writeMem32(addr, this.regs[rd], 'thumb-reg-store', { rd, rb, ro });
     }
 
@@ -1340,7 +1353,7 @@
       const off = byte ? imm : imm << 2;
       const addr = (this.regs[rb] + off) >>> 0;
       if (load) this._writeReg(rd, byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3), 'thumb-imm-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr), byte });
-      else if (byte) this.bus.write8(addr, this.regs[rd]);
+      else if (byte) this._writeMem8(addr, this.regs[rd], 'thumb-imm-byte-store', { rd, rb });
       else this._writeMem32(addr, this.regs[rd], 'thumb-imm-store', { rd, rb });
     }
 

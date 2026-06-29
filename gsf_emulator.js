@@ -166,6 +166,9 @@
       this.timerPhases = [0, 0, 0, 0];
       this.fifoDmaPhase = [0, 0]; // overflow counter for timer 0 and 1; DMA fires every 16
       this.wordWrites = new Map();
+      this.fastMode = false;
+      this.fifoSamplesA = []; // signed 8-bit PCM captured from FIFO A (direct sound A)
+      this.fifoSamplesB = []; // signed 8-bit PCM captured from FIFO B (direct sound B)
     }
 
     region(addr) {
@@ -271,6 +274,7 @@
     }
 
     noteMemoryWrite(addr, value, bytes, source = {}) {
+      if (this.fastMode) return;
       addr >>>= 0;
       value >>>= 0;
       const r = this.region(addr);
@@ -384,9 +388,15 @@
     }
 
     _writeSoundFifo(fifoAddr, word) {
-      // FIFO A = 0x040000a0, FIFO B = 0x040000a4
-      // For now just track that samples are flowing; actual audio output handled externally
-      this.write32(fifoAddr, word);
+      // Capture signed 8-bit samples for audio output
+      const buf = fifoAddr === 0x040000a0 ? this.fifoSamplesA : fifoAddr === 0x040000a4 ? this.fifoSamplesB : null;
+      if (buf !== null) {
+        for (let i = 0; i < 4; i++) {
+          const b = (word >>> (i * 8)) & 0xff;
+          buf.push(b < 128 ? b : b - 256);
+        }
+      }
+      if (!this.fastMode) this.write32(fifoAddr, word);
     }
 
     forceVBlank(reason = 'forced') {
@@ -454,21 +464,21 @@
         this.write8(base + 10, disabled);
         this.write8(base + 11, disabled >>> 8);
       }
-      this.dmaTransfers.push({
-        ch,
-        reason,
-        srcHex: tools.hex(this.read32(base)),
-        dstHex: tools.hex(this.read32(base + 4)),
-        count: maxCount,
-        width: width * 8,
-        controlHex: tools.hex(control, 4),
-      });
-      if (this.dmaTransfers.length > 64) this.dmaTransfers.shift();
+      if (!this.fastMode) {
+        this.dmaTransfers.push({
+          ch, reason,
+          srcHex: tools.hex(this.read32(base)),
+          dstHex: tools.hex(this.read32(base + 4)),
+          count: maxCount, width: width * 8,
+          controlHex: tools.hex(control, 4),
+        });
+        if (this.dmaTransfers.length > 64) this.dmaTransfers.shift();
+      }
       if (control & 0x4000) this.requestIrq(1 << (8 + ch), `dma${ch}`);
     }
 
     _logIoWrite(addr, value, bytes) {
-      if (addr < 0x04000000 || addr >= 0x04000400) return;
+      if (this.fastMode || addr < 0x04000000 || addr >= 0x04000400) return;
       let kind = 'io';
       if (addr >= IO_SOUND_START && addr < IO_SOUND_END) kind = 'sound';
       else if (addr >= IO_TIMER_START && addr < IO_TIMER_END) kind = 'timer';
@@ -487,6 +497,7 @@
       this.halted = false;
       this.reason = '';
       this.instructions = 0;
+      this.fastMode = false;
       this.unsupported = new Map();
       this.psrWrites = [];
       this.swiCalls = [];
@@ -514,7 +525,7 @@
     run(maxInstructions = 20000) {
       const start = this.instructions;
       while (!this.halted && this.instructions - start < maxInstructions) this.step();
-      return this.snapshot();
+      return this.fastMode ? null : this.snapshot();
     }
 
     step() {
@@ -574,7 +585,7 @@
       this.halted = true;
       const sourceText = source ? ` from ${source.kind} ${source.pcHex}->${source.targetHex}` : '';
       this.reason = `pc-out-of-range fetch ${bytes * 8}-bit at ${tools.hex(pc)}${sourceText}`;
-      this.branches.push({
+      if (!this.fastMode) this.branches.push({
         kind: 'fetch-fault',
         pc: pc >>> 0,
         pcHex: tools.hex(pc),
@@ -588,6 +599,7 @@
     }
 
     _tracePc(pc) {
+      if (this.fastMode) return;
       pc >>>= 0;
       this.recentPcs.push(pc);
       if (this.recentPcs.length > 128) this.recentPcs.shift();
@@ -601,6 +613,7 @@
     }
 
     _recordBranch(kind, pc, target, detail = {}) {
+      if (this.fastMode) return;
       this.branches.push({
         kind,
         pc: pc >>> 0,
@@ -618,16 +631,13 @@
     _writeReg(idx, value, kind, pc = null, detail = {}) {
       value >>>= 0;
       this.regs[idx] = value;
-      this.regWrites[idx] = {
-        reg: idx,
-        regName: `r${idx}`,
-        value,
-        valueHex: tools.hex(value),
-        kind,
-        pc: pc == null ? null : pc >>> 0,
-        pcHex: pc == null ? null : tools.hex(pc),
-        ...detail,
-      };
+      if (!this.fastMode) {
+        this.regWrites[idx] = {
+          reg: idx, regName: `r${idx}`, value, valueHex: tools.hex(value), kind,
+          pc: pc == null ? null : pc >>> 0, pcHex: pc == null ? null : tools.hex(pc),
+          ...detail,
+        };
+      }
       return value;
     }
 
@@ -926,14 +936,10 @@
       const after = this._applyPsrFields(before, value, fieldMask);
       if (useSpsr) this.spsr = after;
       else this.cpsr = after;
-      this.psrWrites.push({
-        target: useSpsr ? 'spsr' : 'cpsr',
-        fieldMask,
-        value,
-        before,
-        after,
-      });
-      if (this.psrWrites.length > 128) this.psrWrites.shift();
+      if (!this.fastMode) {
+        this.psrWrites.push({ target: useSpsr ? 'spsr' : 'cpsr', fieldMask, value, before, after });
+        if (this.psrWrites.length > 128) this.psrWrites.shift();
+      }
     }
 
     _applyPsrFields(before, value, fieldMask) {
@@ -1298,8 +1304,10 @@
         this.halted = true;
         this.reason = `SWI ${tools.hex(num, 2)} ${call.name} failed at ${tools.hex(pc)}: ${err.message}`;
       }
-      this.swiCalls.push(call);
-      if (this.swiCalls.length > 128) this.swiCalls.shift();
+      if (!this.fastMode) {
+        this.swiCalls.push(call);
+        if (this.swiCalls.length > 128) this.swiCalls.shift();
+      }
     }
 
     _swiName(num) {
@@ -1619,13 +1627,81 @@
       return false;
     }
 
-    async play() {
-      if (!this.cpu) throw new Error('No GSF CPU image loaded.');
-      this.runDiagnostics(220000);
+    async play(renderSeconds = 10) {
+      if (!this.cpu) this._initCpu();
+
+      const GBA_SAMPLE_RATE = 13379;
+      const TARGET_SAMPLES = GBA_SAMPLE_RATE * renderSeconds;
+      const CHUNK = 500000; // instructions per setTimeout slice
+
+      // Enable fast mode — skip all diagnostic tracking
+      this.bus.fastMode = true;
+      this.cpu.fastMode = true;
+      this.bus.fifoSamplesA = [];
+      this.bus.fifoSamplesB = [];
+
+      // Run in chunks until we have enough FIFO samples (avoids blocking the event loop)
+      // Safety cap: bail after 100M instructions if no samples arrive (e.g. timer never enabled)
+      const MAX_INSTRUCTIONS = 100_000_000;
+      const instructionsAtStart = this.cpu.instructions;
+      await new Promise(resolve => {
+        const tick = () => {
+          this.cpu.run(CHUNK);
+          const ranTotal = this.cpu.instructions - instructionsAtStart;
+          if (this.bus.fifoSamplesA.length >= TARGET_SAMPLES || this.cpu.halted || ranTotal >= MAX_INSTRUCTIONS) {
+            resolve();
+          } else {
+            setTimeout(tick, 0);
+          }
+        };
+        setTimeout(tick, 0);
+      });
+
+      // Restore diagnostic mode and capture a small snapshot of current state
+      this.bus.fastMode = false;
+      this.cpu.fastMode = false;
+      this.cpu.pcHits = new Map();
+      this.cpu.recentPcs = [];
+      this.cpu.branches = [];
+      this.runDiagnostics(5000);
+
+      // Build AudioBuffer from collected FIFO samples
+      const nSamples = Math.min(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length, TARGET_SAMPLES);
+      if (nSamples > 0) {
+        try {
+          const audioCtx = new AudioContext({ sampleRate: GBA_SAMPLE_RATE });
+          await audioCtx.resume();
+          const buffer = audioCtx.createBuffer(2, nSamples, GBA_SAMPLE_RATE);
+          // SOUNDCNT_H 0xa90e: Sound A → right, Sound B → left
+          const left  = buffer.getChannelData(0);
+          const right = buffer.getChannelData(1);
+          const sampA = this.bus.fifoSamplesA;
+          const sampB = this.bus.fifoSamplesB;
+          for (let i = 0; i < nSamples; i++) {
+            right[i] = sampA[i] / 128;
+            left[i]  = sampB[i] / 128;
+          }
+          if (this._audioSrc) { try { this._audioSrc.stop(); } catch (_) {} }
+          if (this._audioCtx) { this._audioCtx.close(); }
+          const src = audioCtx.createBufferSource();
+          src.buffer = buffer;
+          src.loop = true;
+          src.connect(audioCtx.destination);
+          src.start();
+          this._audioCtx = audioCtx;
+          this._audioSrc = src;
+        } catch (err) {
+          console.warn('[GsfEngine] Audio playback failed:', err);
+        }
+      }
+
       return this.diagnostics;
     }
 
-    stop() {}
+    stop() {
+      if (this._audioSrc) { try { this._audioSrc.stop(); } catch (_) {} this._audioSrc = null; }
+      if (this._audioCtx) { this._audioCtx.close(); this._audioCtx = null; }
+    }
 
     _entryAddr() {
       const entry = this.source?.entryAddr || this.library?.entryAddr || this.source?.loadAddr || tools.GBA_ROM_BASE;
@@ -1690,6 +1766,11 @@
           unmappedWrites: this.bus.unmappedWrites,
         },
         audio: this._makeAudioDiagnostics(soundWrites, timerWrites, dmaWrites),
+        fifo: {
+          samplesA: this.bus.fifoSamplesA.length,
+          samplesB: this.bus.fifoSamplesB.length,
+          durationMs: Math.round(this.bus.fifoSamplesA.length / 13.379),
+        },
         interrupts: this._makeInterruptDiagnostics(),
         bios: {
           swiCalls: swiCalls.length,

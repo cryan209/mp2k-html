@@ -234,11 +234,12 @@
         this.unmappedWrites++;
         return;
       }
-      // Timer enable: detect 0→1 transition on TM0-3 CNT_H high byte
-      // Check BEFORE the write so we have the old value
+      // Timer enable: detect 0→1 transition on TM0-3 CNT (low byte of 16-bit control register).
+      // The enable bit is bit 7 of the LOW byte: 0x04000102, 0x04000106, 0x0400010a, 0x0400010e.
+      // Check BEFORE the write so we have the old value.
       let timerEnableInit = -1;
-      if (addr >= 0x04000103 && addr <= 0x0400010f && ((addr - 0x04000103) & 3) === 0) {
-        const ch = (addr - 0x04000103) >> 2;
+      if (addr >= 0x04000102 && addr <= 0x0400010e && ((addr - 0x04000102) & 3) === 0) {
+        const ch = (addr - 0x04000102) >> 2;
         const oldEnable = r.data[r.off] & 0x80;
         if ((value & 0x80) && !oldEnable) timerEnableInit = ch;
       }

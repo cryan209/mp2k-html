@@ -1920,6 +1920,10 @@
 
       const renderSamplesA = this.bus.fifoSamplesA.slice();
       const renderSamplesB = this.bus.fifoSamplesB.slice();
+      const renderFillBytesA = this.bus.fifoFillBytesA;
+      const renderFillBytesB = this.bus.fifoFillBytesB;
+      const renderQueueA = this.bus.fifoQueueA.length;
+      const renderQueueB = this.bus.fifoQueueB.length;
       const sourceRate = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE);
       const biasOutput = this._soundBiasOutput();
       const renderedCycles = cyclesAtRenderEnd - cyclesAtStart;
@@ -1934,7 +1938,7 @@
       this.cpu.pcHits = new Map();
       this.cpu.recentPcs = [];
       this.cpu.branches = [];
-      this.runDiagnostics(5000);
+      this.runDiagnostics(0);
 
       this.diagnostics.render = {
         requestedSeconds: renderSeconds,
@@ -1955,10 +1959,10 @@
       };
       this.diagnostics.fifo.renderSamplesA = renderSamplesA.length;
       this.diagnostics.fifo.renderSamplesB = renderSamplesB.length;
-      this.diagnostics.fifo.fillBytesA = this.bus.fifoFillBytesA;
-      this.diagnostics.fifo.fillBytesB = this.bus.fifoFillBytesB;
-      this.diagnostics.fifo.queueA = this.bus.fifoQueueA.length;
-      this.diagnostics.fifo.queueB = this.bus.fifoQueueB.length;
+      this.diagnostics.fifo.fillBytesA = renderFillBytesA;
+      this.diagnostics.fifo.fillBytesB = renderFillBytesB;
+      this.diagnostics.fifo.queueA = renderQueueA;
+      this.diagnostics.fifo.queueB = renderQueueB;
       if (sourceSamples > 0) {
         try {
           const audioCtx = new AudioContext({ sampleRate: biasOutput.outputRate });

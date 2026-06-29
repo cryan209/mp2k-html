@@ -498,6 +498,8 @@
       this.reason = '';
       this.instructions = 0;
       this.fastMode = false;
+      this.r13_irq = 0x03007FA0; // GBA BIOS initializes IRQ SP here
+      this._inIrqDispatch = false; // re-entrancy guard
       this.unsupported = new Map();
       this.psrWrites = [];
       this.swiCalls = [];
@@ -801,8 +803,18 @@
         case 0xf: result = (~op2.value) >>> 0; break; // MVN
         default: return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
       }
-      if (write) this._setReg(rd, result);
-      if (setFlags || !write) {
+      // ARM exception return: S=1, Rd=15, privileged mode (not User 0x10)
+      const exReturn = write && rd === 15 && setFlags && (this.cpsr & 0x1f) !== 0x10;
+      if (write) {
+        if (exReturn) {
+          this.cpsr = this.spsr; // restore CPSR from SPSR
+          this.regs[15] = result & ~3;
+          if (!this.fastMode) this._recordBranch('exception-return', result, result & ~3);
+        } else {
+          this._setReg(rd, result);
+        }
+      }
+      if (!exReturn && (setFlags || !write)) {
         this._setNZ(result);
         this.cpsr = (this.cpsr & ~(CPSR_C | CPSR_V)) | (carry ? CPSR_C : 0) | (overflow ? CPSR_V : 0);
       }
@@ -959,7 +971,8 @@
       const load = !!(instr & 0x00100000);
       const rn = (instr >>> 16) & 0xf;
       const list = instr & 0xffff;
-      if (psr) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
+      // PSR/S bit: load with PC in list = exception return; otherwise unsupported
+      if (psr && !(load && (list & 0x8000))) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
       const count = this._bitCount(list);
       if (count === 0) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
       const base = this._reg(rn);
@@ -984,6 +997,10 @@
         addr = (addr + 4) >>> 0;
       }
       if (writeBack && !writeBackFirst) this._setReg(rn, finalBase);
+      // Exception return: LDM with S-bit, load=true, PC in list
+      if (psr && load && (list & 0x8000)) {
+        this.cpsr = this.spsr; // restore CPSR from SPSR (mode switch back to interrupted mode)
+      }
     }
 
     _execThumb(instr, pc) {
@@ -1344,6 +1361,7 @@
 
     _biosHalt() {
       this.bus.forceVBlank('halt');
+      if (!this._inIrqDispatch) this._checkAndDispatchIrq();
       return 'advanced to vblank';
     }
 
@@ -1354,6 +1372,7 @@
       let frames = 0;
       while (!this.bus.pendingIrq(mask) && frames < 8) {
         this.bus.forceVBlank('intrwait');
+        if (!this._inIrqDispatch) this._checkAndDispatchIrq();
         frames++;
       }
       return `waited ${frames} frame${frames === 1 ? '' : 's'} for ${tools.hex(mask, 4)}`;
@@ -1364,7 +1383,74 @@
       this.bus.write16(0x04000208, 1);
       this.bus.write16(0x04000202, IRQ_VBLANK);
       this.bus.forceVBlank('vblankintrwait');
+      if (!this._inIrqDispatch) this._checkAndDispatchIrq();
       return 'vblank';
+    }
+
+    _checkAndDispatchIrq() {
+      if (!(this.bus.io[0x208] & 1)) return; // IME off
+      const ie  = this.bus.io[0x200] | (this.bus.io[0x201] << 8);
+      const ifl = this.bus.io[0x202] | (this.bus.io[0x203] << 8);
+      const pending = ie & ifl & 0x3fff;
+      if (!pending) return;
+      const handlerAddr = this.bus.read32(0x03007FFC);
+      // Require handler to be in ROM/EWRAM/IWRAM (not zero/unmapped)
+      if (!handlerAddr || handlerAddr < 0x02000000) return;
+      this._runIrqHandler(handlerAddr, pending);
+    }
+
+    _runIrqHandler(handlerAddr, pending) {
+      this._inIrqDispatch = true;
+
+      // Clear IF bits that we're about to handle (BIOS does this)
+      const ifl = this.bus.io[0x202] | (this.bus.io[0x203] << 8);
+      this.bus.io[0x202] = (ifl & ~pending) & 0xff;
+      this.bus.io[0x203] = ((ifl & ~pending) >> 8) & 0xff;
+
+      // Save full CPU state
+      const savedRegs = Array.from(this.regs);
+      const savedCpsr = this.cpsr;
+      const savedSpsr = this.spsr;
+      const savedHalted = this.halted;
+      const savedReason = this.reason;
+
+      // Enter IRQ mode: use IRQ stack, set SPSR = current CPSR so exception-return works
+      this.regs[13] = this.r13_irq;
+      this.spsr = savedCpsr; // so LDMFD {PC}^ or SUBS PC, LR, #4 restores CPSR correctly
+      // CPSR: IRQ mode (0x12), I=1 (disable further IRQs), ARM
+      this.cpsr = (savedCpsr & 0xffffff00) | 0x92;
+
+      // Sentinel: when handler returns here, we stop. 0x204 is in unmapped BIOS space.
+      const SENTINEL = 0x00000204;
+      this.regs[14] = SENTINEL; // LR for handler to return to
+      if (handlerAddr & 1) {
+        this.regs[15] = (handlerAddr & ~1) >>> 0;
+        this.cpsr |= CPSR_T;
+      } else {
+        this.regs[15] = handlerAddr >>> 0;
+        this.cpsr &= ~CPSR_T;
+      }
+
+      // Run handler until it returns to sentinel or halts
+      const MAX_HANDLER_STEPS = 500000;
+      let count = 0;
+      while (count < MAX_HANDLER_STEPS) {
+        if (this.regs[15] === SENTINEL || this.halted) break;
+        this.step();
+        count++;
+      }
+
+      // Save updated IRQ stack pointer (handler may have adjusted it)
+      this.r13_irq = this.regs[13];
+
+      // Restore CPU state to pre-IRQ values
+      for (let i = 0; i < 16; i++) this.regs[i] = savedRegs[i];
+      this.cpsr = savedCpsr;
+      this.spsr = savedSpsr;
+      this.halted = savedHalted;
+      this.reason = savedReason;
+
+      this._inIrqDispatch = false;
     }
 
     _biosDiv(swapArgs = false) {
@@ -1641,8 +1727,8 @@
       this.bus.fifoSamplesB = [];
 
       // Run in chunks until we have enough FIFO samples (avoids blocking the event loop)
-      // Safety cap: bail after 100M instructions if no samples arrive (e.g. timer never enabled)
-      const MAX_INSTRUCTIONS = 100_000_000;
+      // Safety cap: bail after 500M instructions if no samples arrive (e.g. timer never enabled)
+      const MAX_INSTRUCTIONS = 500_000_000;
       const instructionsAtStart = this.cpu.instructions;
       await new Promise(resolve => {
         const tick = () => {
@@ -1815,7 +1901,8 @@
         notes: [
           'ARM+Thumb CPU is active with data processing, branches, load/store, block transfer, multiply (including long MULL/MLAL), and BIOS SWI stubs.',
           'VCOUNT (0x04000006) computed dynamically from frameCycles; timers tick and overflow with cascade/IRQ/sound-FIFO-DMA support.',
-          'Not implemented: SWP, coprocessor, ARM IRQ dispatch, ARM mode S-flag exception return (Rd=15).',
+          'IRQ dispatch: Halt/VBlankIntrWait SWIs run the handler at [0x03007FFC] as a nested CPU loop; S-flag exception return (SUBS PC,LR,#4 and LDM^) implemented.',
+          'Not implemented: SWP, coprocessor, full IRQ mode register banking for all ARM modes.',
         ],
       };
       return this.diagnostics;

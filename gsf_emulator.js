@@ -543,6 +543,12 @@
       return !!(ime && (ie & flags & mask));
     }
 
+    haltPendingIrq(mask = 0xffff) {
+      const ie = this.read16(0x04000200);
+      const flags = this.read16(0x04000202);
+      return !!(ie & flags & mask);
+    }
+
     _maybeRunDma(chFloat) {
       const ch = chFloat | 0;
       const base = 0x040000b0 + ch * 12;
@@ -1528,10 +1534,14 @@
 
     _biosHalt(pc = this.regs[15] >>> 0) {
       this._recordHaltEvent('before', pc);
-      this.bus.advanceFrame('halt');
+      let frames = 0;
+      while (!this.bus.haltPendingIrq() && frames < 8) {
+        this.bus.advanceFrame('halt');
+        frames++;
+      }
       if (!this._inIrqDispatch) this._checkAndDispatchIrq();
       this._recordHaltEvent('after', pc);
-      return 'advanced to vblank';
+      return `halted ${frames} frame${frames === 1 ? '' : 's'}`;
     }
 
     _biosIntrWait() {
@@ -1539,7 +1549,7 @@
       const mask = this.regs[1] & 0xffff;
       if (discardOld) this.bus.write16(0x04000202, mask);
       let frames = 0;
-      while (!this.bus.pendingIrq(mask) && frames < 8) {
+      while (!this.bus.haltPendingIrq(mask) && frames < 8) {
         this.bus.advanceFrame('intrwait');
         if (!this._inIrqDispatch) this._checkAndDispatchIrq();
         frames++;
@@ -1631,6 +1641,8 @@
         ime: this.bus.read16(0x04000208) & 1,
         ieHex: tools.hex(this.bus.read16(0x04000200), 4),
         ifHex: tools.hex(this.bus.read16(0x04000202), 4),
+        wake: this.bus.haltPendingIrq(),
+        dispatchable: this.bus.pendingIrq(),
         handlerHex: tools.hex(this.bus.read32(0x03007ffc)),
         dma1: dma(1),
         dma2: dma(2),

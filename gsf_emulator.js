@@ -403,6 +403,15 @@
       this._enterVBlank(reason);
     }
 
+    advanceFrame(reason = 'frame-wait') {
+      const cyclesToFrame = GBA_CYCLES_PER_FRAME - this.frameCycles;
+      this.stepCycles(cyclesToFrame > 0 ? cyclesToFrame : GBA_CYCLES_PER_FRAME);
+      if (this.frameCycles === 0) {
+        const last = this.irqEvents[this.irqEvents.length - 1];
+        if (last && last.reason === 'vblank:frame') last.reason = `vblank:${reason}`;
+      }
+    }
+
     _enterVBlank(reason = 'frame') {
       this.vblankCount++;
       // VCOUNT is now computed dynamically from frameCycles; no need to write it
@@ -1360,7 +1369,7 @@
     }
 
     _biosHalt() {
-      this.bus.forceVBlank('halt');
+      this.bus.advanceFrame('halt');
       if (!this._inIrqDispatch) this._checkAndDispatchIrq();
       return 'advanced to vblank';
     }
@@ -1371,7 +1380,7 @@
       if (discardOld) this.bus.write16(0x04000202, mask);
       let frames = 0;
       while (!this.bus.pendingIrq(mask) && frames < 8) {
-        this.bus.forceVBlank('intrwait');
+        this.bus.advanceFrame('intrwait');
         if (!this._inIrqDispatch) this._checkAndDispatchIrq();
         frames++;
       }
@@ -1382,7 +1391,7 @@
       this.bus.write16(0x04000200, this.bus.read16(0x04000200) | IRQ_VBLANK);
       this.bus.write16(0x04000208, 1);
       this.bus.write16(0x04000202, IRQ_VBLANK);
-      this.bus.forceVBlank('vblankintrwait');
+      this.bus.advanceFrame('vblankintrwait');
       if (!this._inIrqDispatch) this._checkAndDispatchIrq();
       return 'vblank';
     }

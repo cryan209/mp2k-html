@@ -5251,8 +5251,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
         ? ` trail:${run.branchTrail.map(b => `${b.kind}@${b.pcHex}->${b.targetHex}${b.rsName ? `(${b.rsName}=${b.rsValueHex}${b.rsWrite ? `<-${b.rsWrite.kind}@${b.rsWrite.pcHex}${stackReadSummary(b.rsWrite)}${slotWriteSummary(b.rsWrite)}${stackSpSummary(b.rsWrite)}` : ''})` : ''}${b.addrHex ? `(read:${b.addrHex}=${b.readValueHex || b.targetHex}${b.spBeforeHex ? ` sp:${b.spBeforeHex}` : ''})` : ''}`).join(',')}`
         : '';
       const pcSummary = run ? ` | +${run.ranInstructions} pc:${run.pcHex}${run.hotPcHex ? ` hot:${run.hotPcHex}/${run.hotPcHits}` : ''}${branchSummary}${sourceSummary}${trailSummary}` : '';
+      const bios = diagnostics?.bios;
+      const biosSummary = bios?.swiCalls ? ` | swi:${bios.swiSummary || bios.swiCalls}${bios.stubbed?.length ? ` stub:[${bios.stubbed.join(',')}]` : ''}` : '';
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${pcSummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${biosSummary}${pcSummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

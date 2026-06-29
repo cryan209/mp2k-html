@@ -569,6 +569,7 @@
       if ((instr & 0x0e000000) === 0x0a000000) return this._branch(instr, pc);
       if ((instr & 0x0ffffff0) === 0x012fff10) return this._bx(instr);
       if ((instr & 0x0fc000f0) === 0x00000090) return this._multiply(instr);
+      if ((instr & 0x0f8000f0) === 0x00800090) return this._multiplyLong(instr);
       if ((instr & 0x0fbf0fff) === 0x010f0000) return this._mrs(instr);
       if ((instr & 0x0db0f000) === 0x0120f000) return this._msr(instr);
       if ((instr & 0x0e000090) === 0x00000090) return this._halfwordDataTransfer(instr);
@@ -693,6 +694,32 @@
       if (accumulate) result = (result + this._reg(rn)) >>> 0;
       this._setReg(rd, result);
       if (setFlags) this._setNZ(result);
+    }
+
+    _multiplyLong(instr) {
+      const isSigned = !(instr & 0x00400000);
+      const accumulate = !!(instr & 0x00200000);
+      const setFlags = !!(instr & 0x00100000);
+      const rdHi = (instr >>> 16) & 0xf;
+      const rdLo = (instr >>> 12) & 0xf;
+      const rs = (instr >>> 8) & 0xf;
+      const rm = instr & 0xf;
+      const pc = (this.regs[15] - 4) >>> 0;
+      const a = isSigned ? BigInt(this.regs[rm] | 0) : BigInt(this.regs[rm] >>> 0);
+      const b = isSigned ? BigInt(this.regs[rs] | 0) : BigInt(this.regs[rs] >>> 0);
+      let result = a * b;
+      if (accumulate) {
+        result += (BigInt(this.regs[rdHi] >>> 0) << 32n) | BigInt(this.regs[rdLo] >>> 0);
+      }
+      const lo = Number(result & 0xffffffffn) >>> 0;
+      const hi = Number((result >> 32n) & 0xffffffffn) >>> 0;
+      this._writeReg(rdLo, lo, 'arm-long-mul', pc);
+      this._writeReg(rdHi, hi, 'arm-long-mul', pc);
+      if (setFlags) {
+        const n = result < 0n ? CPSR_N : 0;
+        const z = result === 0n ? CPSR_Z : 0;
+        this.cpsr = (this.cpsr & ~(CPSR_N | CPSR_Z | CPSR_C | CPSR_V)) | n | z;
+      }
     }
 
     _singleDataTransfer(instr) {
@@ -1587,8 +1614,8 @@
           }));
         })(),
         notes: [
-          'ARM+Thumb CPU is active with data processing, branches, load/store, block transfer, multiply, and BIOS SWI stubs.',
-          'Not implemented: SWP, coprocessor, ARM mode S-flag exception return (Rd=15), long multiply (MULL/MLAL).',
+          'ARM+Thumb CPU is active with data processing, branches, load/store, block transfer, multiply (including long MULL/MLAL), and BIOS SWI stubs.',
+          'Not implemented: SWP, coprocessor, ARM mode S-flag exception return (Rd=15).',
         ],
       };
       return this.diagnostics;

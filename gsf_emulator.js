@@ -199,6 +199,20 @@
 
     read8(addr) {
       addr >>>= 0;
+      // Timer counter readback: reading TM0-3CNT_L/H returns the live counter, not the reload value.
+      // GBA hardware uses a separate shadow reload register; reads reflect the running counter.
+      if (addr >= 0x04000100 && addr <= 0x04000109) {
+        const ch = (addr - 0x04000100) >> 2;
+        const byteOff = (addr - 0x04000100) & 3;
+        if (byteOff <= 1) { // CNT_L (counter) bytes
+          const ctrl = this.io[0x102 + ch * 4]; // control low byte
+          if (ctrl & 0x80) { // timer enabled
+            const counter = Math.floor(this.timerCounters[ch]) & 0xffff;
+            return byteOff === 0 ? (counter & 0xff) : ((counter >> 8) & 0xff);
+          }
+        }
+        // Disabled timer or CNT_H: fall through to io array
+      }
       // VCOUNT (0x04000006): dynamically computed from frame cycle position
       if (addr === 0x04000006) {
         return Math.floor(this.frameCycles / GBA_CYCLES_PER_SCANLINE) % GBA_TOTAL_SCANLINES;
@@ -247,8 +261,8 @@
       }
       r.data[r.off] = value;
       this._logIoWrite(addr, value, 1);
-      // Log writes to TM0CNT_L (0x04000100-0x04000101) for debugging
-      if ((addr === 0x04000100 || addr === 0x04000101) && this.timerReloadLog.length < 32) {
+      // Log writes to TM0CNT_L/H (0x04000100-0x04000103) for debugging timer misconfiguration
+      if (addr >= 0x04000100 && addr <= 0x04000103 && this.timerReloadLog.length < 64) {
         this.timerReloadLog.push({ addr: tools.hex(addr), value: tools.hex(value, 2), cycles: this.cycles, pc: this.debugPc || 0 });
       }
       // Trigger DMA when high byte of CNT_H is written with enable bit (offset 11 in each 12-byte channel block)

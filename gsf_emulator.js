@@ -2170,6 +2170,21 @@
         },
         timers,
         timerReloadLog: this.bus.timerReloadLog,
+        timerCodeDump: (() => {
+          // Dump Thumb instruction bytes at the two critical ROM addresses
+          const readThumb = addr => {
+            const b0 = this.bus.read8(addr), b1 = this.bus.read8(addr+1);
+            return tools.hex((b1 << 8) | b0, 4);
+          };
+          const win1 = [], win2 = [];
+          for (let i = 0; i < 24; i += 2) { // 12 instructions around path 1
+            win1.push(`${tools.hex(0x081c2470 + i)}:${readThumb(0x081c2470 + i)}`);
+          }
+          for (let i = 0; i < 24; i += 2) { // 12 instructions around path 2
+            win2.push(`${tools.hex(0x081c1210 + i)}:${readThumb(0x081c1210 + i)}`);
+          }
+          return { path1: win1, path2: win2 };
+        })(),
         dma: dmas,
         dmaTransfers: this.bus.dmaTransfers.slice(-16),
         activeTimers: timers.filter(t => t.enabled).map(t => t.ch),

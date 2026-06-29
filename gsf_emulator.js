@@ -607,18 +607,43 @@
     step() {
       this.bus.debugPc = this.regs[15] >>> 0;
       this.bus.debugThumb = !!(this.cpsr & CPSR_T);
-      // Capture registers at key BL call sites
+      // Capture registers at key BL call sites and first entry into BL target region
       const _snapPc = this.bus.debugPc;
-      if ((_snapPc === 0x081c248a || _snapPc === 0x081c121a) && this.bus.timerRegSnaps.length < 8) {
-        const r = this.regs;
-        this.bus.timerRegSnaps.push({
-          pc: tools.hex(_snapPc),
-          cycles: this.bus.cycles,
-          r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0),
-          r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
-          r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0),
-          r6: tools.hex(r[6]>>>0), r7: tools.hex(r[7]>>>0),
-        });
+      const _isCallSite = (_snapPc === 0x081c248a || _snapPc === 0x081c121a);
+      // Also capture first execution inside suspected division fn region (0x08001800-0x080019ff)
+      const _isDivFn = _snapPc >= 0x08001800 && _snapPc <= 0x080019ff;
+      // And capture first execution inside IWRAM div fn (0x03000400-0x030005ff)
+      const _isIwramFn = _snapPc >= 0x03000400 && _snapPc <= 0x030005ff;
+      if ((_isCallSite || _isDivFn || _isIwramFn) && this.bus.timerRegSnaps.length < 16) {
+        // Deduplicate: skip if same region already captured
+        const _label = _isCallSite ? 'site' : _isDivFn ? 'div' : 'iwram';
+        if (!this.bus.timerRegSnaps.some(s => s.label === _label)) {
+          const r = this.regs;
+          this.bus.timerRegSnaps.push({
+            label: _label,
+            pc: tools.hex(_snapPc),
+            cycles: this.bus.cycles,
+            r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0),
+            r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
+            r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0),
+            r6: tools.hex(r[6]>>>0), r7: tools.hex(r[7]>>>0),
+            lr: tools.hex(r[14]>>>0),
+          });
+        }
+        // Always push call-site snaps (up to 4)
+        if (_isCallSite && this.bus.timerRegSnaps.filter(s=>s.label==='site').length < 4) {
+          const r = this.regs;
+          this.bus.timerRegSnaps.push({
+            label: 'site',
+            pc: tools.hex(_snapPc),
+            cycles: this.bus.cycles,
+            r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0),
+            r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
+            r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0),
+            r6: tools.hex(r[6]>>>0), r7: tools.hex(r[7]>>>0),
+            lr: tools.hex(r[14]>>>0),
+          });
+        }
       }
       if (this.cpsr & CPSR_T) {
         const pc = this.regs[15] >>> 0;
@@ -2204,18 +2229,23 @@
           const pool2 = [];
           for (let i = 0; i < 44; i += 4)
             pool2.push(`${tools.hex(0x081c1250+i)}:${readWord(0x081c1250+i)}`);
-          // Division function at 0x08001854 (called by path1 twice)
+          // Division fn region (path1 BL target at 0x08001854; also check 0x08001800-0x08001900)
           const fn1 = [];
-          for (let i = 0; i < 48; i += 2)
-            fn1.push(`${tools.hex(0x08001854+i)}:${readThumb(0x08001854+i)}`);
-          // Division function at 0x08002054 (called by path2)
+          for (let i = 0; i < 128; i += 2)
+            fn1.push(`${tools.hex(0x08001800+i)}:${readThumb(0x08001800+i)}`);
+          // fn2 trampoline at 0x08002054 → IWRAM; also dump IWRAM fn at 0x03000528
           const fn2 = [];
           for (let i = 0; i < 48; i += 2)
             fn2.push(`${tools.hex(0x08002054+i)}:${readThumb(0x08002054+i)}`);
-          return { pool1, pool2, fn1, fn2,
-            // Key missing literal
+          const iwramFn = [];
+          for (let i = 0; i < 64; i += 2)
+            iwramFn.push(`${tools.hex(0x03000528+i)}:${readThumb(0x03000528+i)}`);
+          // Also dump IWRAM div fn for path1 BL (0x03000480-0x030004ff)
+          const iwramDiv1 = [];
+          for (let i = 0; i < 64; i += 2)
+            iwramDiv1.push(`${tools.hex(0x03000480+i)}:${readThumb(0x03000480+i)}`);
+          return { pool1, pool2, fn1, fn2, iwramFn, iwramDiv1,
             lit24d0: readWord(0x081c24d0),
-            // Captured register snapshots (set by CPU during execution)
             regSnaps: this.bus.timerRegSnaps || [] };
         })(),
         dma: dmas,

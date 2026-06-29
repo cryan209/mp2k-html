@@ -5266,7 +5266,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const renderSummary = render ? ` | render:${(render.renderedMs / 1000).toFixed(1)}s/${render.stopReason} fifo:${render.fifoFillRate || render.sourceRate || 0}Hz out:${render.outputRate || render.sampleRate}Hz dac:${render.dacBits || '?'}b${render.timerSourceRate ? ` timer:${render.timerSourceRate}` : ''} inst:${render.instructions}` : '';
       const codeDump = audio?.timerCodeDump;
       const codeDumpSummary = codeDump
-        ? ` | lit24d0:${codeDump.lit24d0} pool1:[${codeDump.pool1.join(' ')}] pool2:[${codeDump.pool2.join(' ')}] fn1:[${codeDump.fn1.join(' ')}] fn2:[${codeDump.fn2.join(' ')}] snaps:[${(codeDump.regSnaps||[]).map(s=>`@${s.pc}(c=${s.cycles} r0=${s.r0} r1=${s.r1} r2=${s.r2} r3=${s.r3} r4=${s.r4} r5=${s.r5}`).join(' ')}]`
+        ? ` | lit24d0:${codeDump.lit24d0} fn1:[${(codeDump.fn1||[]).filter(e=>!e.endsWith(':0x0000')).join(' ')}] fn2:[${codeDump.fn2.join(' ')}] iwram:[${(codeDump.iwramFn||[]).join(' ')}] iwramDiv1:[${(codeDump.iwramDiv1||[]).join(' ')}] snaps:[${(codeDump.regSnaps||[]).map(s=>`${s.label}@${s.pc}(c=${s.cycles} r0=${s.r0} r1=${s.r1} r5=${s.r5} lr=${s.lr})`).join(' ')}]`
         : '';
       setStatus(cpu
         ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}${codeDumpSummary}`

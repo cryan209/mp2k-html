@@ -209,6 +209,11 @@
       }
       r.data[r.off] = value;
       this._logIoWrite(addr, value, 1);
+      // Trigger DMA when high byte of CNT_H is written with enable bit (offset 11 in each 12-byte channel block)
+      if (addr >= IO_DMA_START && addr < IO_DMA_END) {
+        const dmaOff = addr - IO_DMA_START;
+        if (dmaOff % 12 === 11) this._maybeRunDma(Math.floor(dmaOff / 12));
+      }
     }
 
     write16(addr, value) {
@@ -1242,7 +1247,10 @@
         const value = fill ? fillValue : this.bus.read32(((src + i * 4) & ~3) >>> 0);
         this._writeMem32(((dst + i * 4) & ~3) >>> 0, value, 'bios-cpufastset', { srcHex: tools.hex(src), dstHex: tools.hex(dst), fill });
       }
-      return `${fill ? 'fill' : 'copy'} ${count} words from ${tools.hex(src)} to ${tools.hex(dst)}`;
+      if (!fill && dst >= 0x03000000 && dst < 0x03008000 && count >= 64 && count <= 4096) {
+        this._maybePatchSoundWork(dst, count);
+      }
+      return `${fill ? 'fill' : 'copy'} ${count} words ${tools.hex(src)}->${tools.hex(dst)}`;
     }
 
     _biosCpuSet() {
@@ -1260,7 +1268,31 @@
         if (word) this._writeMem32((dst + i * bytes) & ~3, value, 'bios-cpuset', { srcHex: tools.hex(src), dstHex: tools.hex(dst), fill, word });
         else this._writeMem16((dst + i * bytes) & ~1, value, 'bios-cpuset', { srcHex: tools.hex(src), dstHex: tools.hex(dst), fill, word });
       }
-      return `${fill ? 'fill' : 'copy'} ${count} ${word ? 'words' : 'halfwords'}`;
+      const result = `${fill ? 'fill' : 'copy'} ${count} ${word ? 'words' : 'halfwords'} ${tools.hex(src)}->${tools.hex(dst)}`;
+      if (!fill && word && dst >= 0x03000000 && dst < 0x03008000 && count >= 64 && count <= 4096) {
+        this._maybePatchSoundWork(dst, count);
+      }
+      return result;
+    }
+
+    _maybePatchSoundWork(driverBase, wordCount) {
+      const soundWorkBase = GBA_SYSTEM_STACK;
+      if (this.bus.read32(soundWorkBase + 8) !== 0) return;
+      // Scan the IWRAM driver copy for a literal pool word that is a valid IWRAM Thumb
+      // address (bit 0 set, in range 0x03000001-0x03007fff). This is typically the
+      // ARM-to-Thumb switchover address stored as a literal after a BX rN instruction.
+      const scanLimit = Math.min(wordCount * 4, 512);
+      let thumbEntry = 0;
+      for (let off = 0; off < scanLimit; off += 4) {
+        const word = this.bus.read32((driverBase + off) >>> 0);
+        if ((word & 1) && word >= 0x03000001 && word < 0x03008000) {
+          thumbEntry = word;
+          break;
+        }
+      }
+      if (thumbEntry) {
+        this._writeMem32(soundWorkBase + 8, thumbEntry, 'soundwork-patch', { driverBase: tools.hex(driverBase), thumbEntry: tools.hex(thumbEntry) });
+      }
     }
 
     _thumbBranch(instr, pc) {
@@ -1531,6 +1563,29 @@
           })),
         },
         patchPoints: [],
+        memPeek: (() => {
+          const peek = (addr, count = 8) => {
+            const words = [];
+            for (let i = 0; i < count; i++) words.push(tools.hex(this.bus.read32((addr + i * 4) >>> 0)));
+            return { addrHex: tools.hex(addr), words };
+          };
+          return {
+            soundWork: peek(0x03007f00, 12),
+            iwramStub: peek(0x03000520, 8),
+            iwramDriver: peek(0x03006000, 8),
+          };
+        })(),
+        iwramWrites: (() => {
+          const writes = this.bus.memoryWrites.filter(w => w.addr >= 0x03000000 && w.addr < 0x03008000);
+          const byAddr = new Map();
+          for (const w of writes) byAddr.set(w.addr & ~3, w);
+          return [...byAddr.values()].sort((a, b) => a.addr - b.addr).map(w => ({
+            addrHex: tools.hex(w.addr),
+            valueHex: tools.hex(w.value),
+            kind: w.kind,
+            pcHex: tools.hex(w.pc),
+          }));
+        })(),
         notes: [
           'ARM+Thumb CPU is active with data processing, branches, load/store, block transfer, multiply, and BIOS SWI stubs.',
           'Not implemented: SWP, coprocessor, ARM mode S-flag exception return (Rd=15), long multiply (MULL/MLAL).',

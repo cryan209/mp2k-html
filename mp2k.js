@@ -5253,8 +5253,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const pcSummary = run ? ` | +${run.ranInstructions} pc:${run.pcHex}${run.hotPcHex ? ` hot:${run.hotPcHex}/${run.hotPcHits}` : ''}${branchSummary}${sourceSummary}${trailSummary}` : '';
       const bios = diagnostics?.bios;
       const biosSummary = bios?.swiCalls ? ` | swi:${bios.swiSummary || bios.swiCalls}${bios.stubbed?.length ? ` stub:[${bios.stubbed.join(',')}]` : ''}` : '';
+      const render = diagnostics?.render;
+      const renderSummary = render ? ` | render:${(render.renderedMs / 1000).toFixed(1)}s/${render.stopReason} inst:${render.instructions}` : '';
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${biosSummary}${pcSummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

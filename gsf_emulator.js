@@ -1739,12 +1739,14 @@
       // Safety cap: bail after 500M instructions if no samples arrive (e.g. timer never enabled)
       const MAX_INSTRUCTIONS = 500_000_000;
       const instructionsAtStart = this.cpu.instructions;
+      let renderStopReason = 'unknown';
       await new Promise(resolve => {
         const tick = () => {
           this.cpu.run(CHUNK);
           const ranTotal = this.cpu.instructions - instructionsAtStart;
           const capturedSamples = Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length);
           if (capturedSamples >= TARGET_SAMPLES || this.cpu.halted || ranTotal >= MAX_INSTRUCTIONS) {
+            renderStopReason = capturedSamples >= TARGET_SAMPLES ? 'target' : this.cpu.halted ? 'halted' : 'cap';
             resolve();
           } else {
             setTimeout(tick, 0);
@@ -1763,6 +1765,15 @@
 
       // Build AudioBuffer from collected FIFO samples
       const nSamples = Math.min(Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length), TARGET_SAMPLES);
+      this.diagnostics.render = {
+        requestedSeconds: renderSeconds,
+        sampleRate: GBA_SAMPLE_RATE,
+        targetSamples: TARGET_SAMPLES,
+        renderedSamples: nSamples,
+        renderedMs: Math.round((nSamples / GBA_SAMPLE_RATE) * 1000),
+        instructions: this.cpu.instructions - instructionsAtStart,
+        stopReason: renderStopReason,
+      };
       if (nSamples > 0) {
         try {
           const audioCtx = new AudioContext({ sampleRate: GBA_SAMPLE_RATE });

@@ -11,6 +11,8 @@
   function createMemoryImage(size = tools.GBA_ROM_LIMIT) {
     return {
       rom: new Uint8Array(size),
+      ewram: new Uint8Array(256 * 1024),
+      iwram: new Uint8Array(32 * 1024),
       segments: [],
       warnings: [],
       patches: [],
@@ -29,17 +31,35 @@
       endAddr: program.endAddr,
     };
     memory.segments.push(segment);
-    if (region?.id !== 'rom') {
-      memory.warnings.push(`${label} loads into ${region?.label || 'unknown memory'}, not ROM; stored as segment only`);
-      return false;
+    if (region?.id === 'rom') {
+      const romOffset = program.loadAddr - tools.GBA_ROM_BASE;
+      if (romOffset < 0 || romOffset + program.clippedSize > memory.rom.length) {
+        memory.warnings.push(`${label} ROM write ${tools.hex(program.loadAddr)} +${program.clippedSize} is out of range`);
+        return false;
+      }
+      memory.rom.set(program.data, romOffset);
+      return true;
     }
-    const romOffset = program.loadAddr - tools.GBA_ROM_BASE;
-    if (romOffset < 0 || romOffset + program.clippedSize > memory.rom.length) {
-      memory.warnings.push(`${label} ROM write ${tools.hex(program.loadAddr)} +${program.clippedSize} is out of range`);
-      return false;
+    if (region?.id === 'ewram') {
+      const off = program.loadAddr - 0x02000000;
+      if (off < 0 || off + program.clippedSize > memory.ewram.length) {
+        memory.warnings.push(`${label} EWRAM write ${tools.hex(program.loadAddr)} +${program.clippedSize} is out of range`);
+        return false;
+      }
+      memory.ewram.set(program.data, off);
+      return true;
     }
-    memory.rom.set(program.data, romOffset);
-    return true;
+    if (region?.id === 'iwram') {
+      const off = program.loadAddr - 0x03000000;
+      if (off < 0 || off + program.clippedSize > memory.iwram.length) {
+        memory.warnings.push(`${label} IWRAM write ${tools.hex(program.loadAddr)} +${program.clippedSize} is out of range`);
+        return false;
+      }
+      memory.iwram.set(program.data, off);
+      return true;
+    }
+    memory.warnings.push(`${label} loads into ${region?.label || 'unknown memory'} (${tools.hex(program.loadAddr)}); not applied`);
+    return false;
   }
 
   const CPSR_N = 0x80000000;
@@ -123,8 +143,8 @@
   class GbaMemoryBus {
     constructor(memory) {
       this.memory = memory;
-      this.ewram = new Uint8Array(256 * 1024);
-      this.iwram = new Uint8Array(32 * 1024);
+      this.ewram = memory.ewram ? new Uint8Array(memory.ewram) : new Uint8Array(256 * 1024);
+      this.iwram = memory.iwram ? new Uint8Array(memory.iwram) : new Uint8Array(32 * 1024);
       this.io = new Uint8Array(1024);
       this.palette = new Uint8Array(1024);
       this.vram = new Uint8Array(96 * 1024);
@@ -1606,9 +1626,9 @@
           tags: entry.tags,
         })),
         segments,
-        romBytesTouched: segments
-          .filter(segment => segment.region === 'rom')
-          .reduce((sum, segment) => sum + segment.dataSize, 0),
+        romBytesTouched: segments.filter(s => s.region === 'rom').reduce((sum, s) => sum + s.dataSize, 0),
+        ewramBytesTouched: segments.filter(s => s.region === 'ewram').reduce((sum, s) => sum + s.dataSize, 0),
+        iwramBytesTouched: segments.filter(s => s.region === 'iwram').reduce((sum, s) => sum + s.dataSize, 0),
         warnings,
       };
     }
@@ -1638,6 +1658,8 @@
       if (report.entries.length) parts.push(`${report.entries.length} entries`);
       parts.push(`${report.segments.length} load segment${report.segments.length === 1 ? '' : 's'}`);
       if (report.romBytesTouched) parts.push(`${report.romBytesTouched} ROM bytes`);
+      if (report.ewramBytesTouched) parts.push(`${report.ewramBytesTouched} EWRAM bytes`);
+      if (report.iwramBytesTouched) parts.push(`${report.iwramBytesTouched} IWRAM bytes`);
       if (report.warnings.length) parts.push(`${report.warnings.length} warning${report.warnings.length === 1 ? '' : 's'}`);
       return parts.join(' | ');
     }

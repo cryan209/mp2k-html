@@ -1661,6 +1661,7 @@
         pendingHex: tools.hex(entry.pending || 0, 4),
         handlerHex: tools.hex(entry.handlerAddr || 0),
         result: entry.result,
+        steps: entry.steps || 0,
       });
       if (this.irqDispatches.length > 64) this.irqDispatches.shift();
     }
@@ -1733,9 +1734,11 @@
         this.cpsr &= ~CPSR_T;
       }
 
-      // Run handler until it returns to sentinel or halts. In fast audio render,
-      // avoid spending hundreds of thousands of steps in bad/empty IRQ trampolines.
-      const MAX_HANDLER_STEPS = this.fastMode ? 512 : 500000;
+      // Run handler until it returns to sentinel or halts. The GSF wrapper's
+      // VBlank thunk can run generated mixer code in IWRAM, so give it more
+      // room during fast rendering than generic IRQ trampolines.
+      const isGsfWrapperIrq = handlerAddr >= 0x08ffff80 && handlerAddr < 0x09000000;
+      const MAX_HANDLER_STEPS = this.fastMode ? (isGsfWrapperIrq ? 8192 : 2048) : 500000;
       let count = 0;
       while (count < MAX_HANDLER_STEPS) {
         if (this.regs[15] === SENTINEL || this.halted) break;
@@ -1746,6 +1749,7 @@
         result: this.regs[15] === SENTINEL ? 'returned' : this.halted ? 'halted' : 'capped',
         pending,
         handlerAddr,
+        steps: count,
       });
 
       // Save updated IRQ stack pointer (handler may have adjusted it)

@@ -5259,7 +5259,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
         : '';
       const irq = diagnostics?.interrupts;
       const irqTrace = irq?.dispatches?.length
-        ? ` irqTrace:[${irq.dispatches.slice(-6).map(d => `${d.result}@${d.pcHex}->${d.handlerHex}/${d.pendingHex}`).join(' ')}]`
+        ? ` irqTrace:[${irq.dispatches.slice(-6).map(d => `${d.result}${d.steps ? `/${d.steps}` : ''}@${d.pcHex}->${d.handlerHex}/${d.pendingHex}`).join(' ')}]`
         : '';
       const irqVector = irq?.vectorWrites?.length
         ? ` irqVec:[${irq.vectorWrites.slice(-4).map(w => `${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`

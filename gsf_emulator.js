@@ -274,6 +274,14 @@
         this._logIoWrite(addr, value, 1);
         return;
       }
+      let loggedValue = value;
+      // SOUNDCNT_H bits 11 and 15 reset Direct Sound FIFOs. They are pulse
+      // controls, not sticky readable state.
+      if (addr === 0x04000083) {
+        if (value & 0x08) this._resetSoundFifo('A');
+        if (value & 0x80) this._resetSoundFifo('B');
+        value &= ~0x88;
+      }
       // Timer enable: detect 0→1 transition on TM0-3 CNT (low byte of 16-bit control register).
       // The enable bit is bit 7 of the LOW byte: 0x04000102, 0x04000106, 0x0400010a, 0x0400010e.
       // Check BEFORE the write so we have the old value.
@@ -293,7 +301,7 @@
         }
       }
       r.data[r.off] = value;
-      this._logIoWrite(addr, value, 1);
+      this._logIoWrite(addr, loggedValue, 1);
       // Log writes to TM0CNT_L/H (0x04000100-0x04000103) for debugging timer misconfiguration
       if (addr >= 0x04000100 && addr <= 0x04000103 && this.timerReloadLog.length < 64) {
         const pc = this.debugPc || 0;
@@ -542,6 +550,16 @@
         else this.fifoFillBytesB += 4;
       }
       if (!this.fastMode) this.write32(fifoAddr, word);
+    }
+
+    _resetSoundFifo(channel) {
+      if (channel === 'A') {
+        this.fifoQueueA = [];
+        this.fifoLastA = 0;
+      } else if (channel === 'B') {
+        this.fifoQueueB = [];
+        this.fifoLastB = 0;
+      }
     }
 
     forceVBlank(reason = 'forced') {

@@ -5300,7 +5300,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const biosSummary = bios?.swiCalls || haltTrace || bios?.swiCountSummary ? ` | swi:${bios?.swiSummary || bios?.swiCalls || 0}${bios?.stubbed?.length ? ` stub:[${bios.stubbed.join(',')}]` : ''} swiTotal:[${bios?.swiCountSummary || ''}]${haltTrace}` : '';
       const psgSummary = diagnostics?.io ? ` | psg:[${diagnostics.io.psgSummary || 'none'}]` : '';
       const psgState = diagnostics?.io?.psgState?.length
-        ? ` psgState:[${diagnostics.io.psgState.map(s => `ch${s.ch}:en=${s.enabled?1:0}/vol=${s.volume}/freq=${s.freq}/duty=${s.dutyFraction}/len=${s.lengthEnabled?1:0}`).join(' ')}]`
+        ? ` psgState:[${diagnostics.io.psgState.map(s => `ch${s.ch}:en=${s.enabled?1:0}/vol=${s.volume}/freq=${s.freq}/duty=${s.dutyFraction}/len=${s.lengthEnabled?1:0}`).join(' ')}] soundCntL=${diagnostics.io.soundCntLHex}`
         : '';
       const render = diagnostics?.render;
       const statA = render?.sampleStatsA;

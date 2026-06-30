@@ -604,7 +604,11 @@
         if (!(soundCntL & (1 << enableBit))) continue;
         mix += this._psgAdvance(ch, this.cycles);
       }
-      const scaled = mix * 6 * ((masterVol + 1) / 8);
+      // Two channels at full volume (15 each) can sum to ±30 before this scale; at the old
+      // ×6 factor that's ±180, which combined with dsValue (already up to ±128) clips hard
+      // and constantly whenever both channels play loud together — audible as buzz/crunch.
+      // ×4 caps the two-channel worst case at ±120, leaving headroom for dsValue.
+      const scaled = mix * 4 * ((masterVol + 1) / 8);
       return Math.max(-128, Math.min(127, Math.round(dsValue + scaled)));
     }
 
@@ -2620,6 +2624,9 @@
             ch, enabled: st.enabled, volume: st.volume, freq: st.freqCur,
             dutyFraction: st.dutyFraction, lengthEnabled: st.lengthEnabled,
           })),
+          // Raw SOUNDCNT_L so we can confirm whether ch0/ch1's L/R routing bits (8,9,12,13)
+          // are actually what's making pcmA vs pcmB differ, rather than guessing.
+          soundCntLHex: tools.hex(this.bus.read16(0x04000080), 4),
         },
         audio: this._makeAudioDiagnostics(soundWrites, timerWrites, dmaWrites),
         fifo: {

@@ -779,6 +779,11 @@
           memR0: memPeek(r[0]>>>0),
           memR1: memPeek(r[1]>>>0),
           memR2: memPeek(r[2]>>>0),
+          // r5 is the mixer's buffer-slot pointer (the one DMA1 trails by one slot, per
+          // dmaDriftLog). Dumping it shows whether the slot DMA is about to consume actually
+          // holds real PCM content or near-zero bytes, i.e. whether this is a content bug
+          // (mixer math) rather than a DMA addressing bug.
+          memR5: memPeek(r[5]>>>0),
         };
         const listKey = isFn2 ? 'fn2CallSnaps' : 'seqCallSnaps';
         if (!this.bus[listKey]) this.bus[listKey] = [];

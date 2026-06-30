@@ -5309,7 +5309,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
         : '';
       // Seq/fn2 snapshot summary
       const memPeek = diagnostics?.memPeek;
-      const fmtSnap = (s) => s ? `n${s.n} r0=${s.r0} r1=${s.r1} r2=${s.r2} r3=${s.r3} r4=${s.r4} r5=${s.r5} m0=[${(s.memR0||[]).join(',')}] m1=[${(s.memR1||[]).join(',')}] m2=[${(s.memR2||[]).join(',')}]` : '';
+      const fmtSnap = (s) => s ? `n${s.n} r0=${s.r0} r1=${s.r1} r2=${s.r2} r3=${s.r3} r4=${s.r4} r5=${s.r5} m0=[${(s.memR0||[]).join(',')}] m1=[${(s.memR1||[]).join(',')}] m2=[${(s.memR2||[]).join(',')}]${s.memR5 ? ` m5=[${s.memR5.join(',')}]` : ''}` : '';
       const fn2Snaps = memPeek?.fn2Calls || [];
       const seqSnaps = memPeek?.seqCalls || [];
       const stepSt = diagnostics?.interrupts?.stepStats;

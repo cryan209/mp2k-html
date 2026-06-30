@@ -5245,6 +5245,15 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const fifoDma = diagnostics?.fifo?.dmaLog?.length
         ? ` dmaSrc:[${dmaShown.map(d => `d${d.ch}@${d.srcHex}${d.canonicalSrcHex && d.canonicalSrcHex !== d.srcHex ? `(${d.canonicalSrcHex})` : ''}->${d.dstHex}/nz${d.nonZeroWords || 0}:${d.words.join('/')}${d.writers?.length ? `<${d.writers.join('/')}>` : ''}`).join(' ')}]`
         : '';
+      const dmaSadEntries = diagnostics?.fifo?.dmaSadLog || [];
+      // First 6 + last 6 SAD/CNTH writes: shows whether the game actually re-points DMA1/2's
+      // sound FIFO source each frame (vs our latch only updating once and going stale).
+      const dmaSadShown = dmaSadEntries.length > 12
+        ? [...dmaSadEntries.slice(0, 6), ...dmaSadEntries.slice(-6)]
+        : dmaSadEntries;
+      const dmaSadLog = dmaSadEntries.length
+        ? ` dmaSad(${dmaSadEntries.length}):[${dmaSadShown.map(d => `d${d.ch}.${d.field}=${d.value}${d.reArmed ? '!' : ''}@${d.pc}/c${d.cycles}`).join(' ')}]`
+        : '';
       const bufferWrites = diagnostics?.fifo?.bufferWrites?.length
         ? ` bufWr:[${diagnostics.fifo.bufferWrites.slice(-6).map(w => `${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`
         : '';
@@ -5255,7 +5264,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const reloadLog = audio?.timerReloadLog?.length ? ` reloadLog:[${audio.timerReloadLog.map(e => `${e.addr}=${e.value}@${e.cycles}(pc=${e.pc}/${e.thumb?'T':'A'}:${e.instrHex})`).join(' ')}]` : '';
       const soundDetail = audio ? ` snd:${audio.sound.soundCntHHex}/${audio.sound.soundBiasHex}` : '';
       const audioSummary = audio
-        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}${fifoDma}${bufferWrites}`
+        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}${fifoDma}${dmaSadLog}${bufferWrites}`
         : '';
       const irq = diagnostics?.interrupts;
       const irqTrace = irq?.dispatches?.length

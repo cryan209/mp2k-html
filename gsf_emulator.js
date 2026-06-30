@@ -167,6 +167,7 @@
       this.dmaTransfers = [];
       this.dmaSourceLatch = [0, 0, 0, 0];
       this.dmaDestLatch = [0, 0, 0, 0];
+      this.dmaSadLog = []; // every write that touches DMA1/DMA2 SAD (sound FIFO source reg), fastMode-safe
       this.memoryWrites = [];
       this.timerCounters = [0, 0, 0, 0];
       this.timerPhases = [0, 0, 0, 0];
@@ -327,6 +328,23 @@
           this.dmaDestLatch[dmaEnableInit] = this.read32(base + 4);
         }
         if (dmaOff % 12 === 11) this._maybeRunDma(Math.floor(dmaOff / 12));
+        // Log every write that completes a DMA1/2 SAD (source addr, field offset 0-3) or
+        // CNT_H high byte (offset 11, enable/control) so we can see whether the game is
+        // actually re-pointing the sound FIFO DMA source each frame, independent of fastMode.
+        const ch = Math.floor(dmaOff / 12);
+        const field = dmaOff % 12;
+        if ((ch === 1 || ch === 2) && (field === 3 || field === 11) && this.dmaSadLog.length < 256) {
+          const base = IO_DMA_START + ch * 12;
+          this.dmaSadLog.push({
+            ch,
+            field: field === 3 ? 'sad' : 'cnth',
+            value: tools.hex(field === 3 ? this.read32(base) : this.read16(base + 10), field === 3 ? 8 : 4),
+            liveLatch: tools.hex(this.dmaSourceLatch[ch]),
+            pc: tools.hex(this.debugPc || 0),
+            cycles: this.cycles,
+            reArmed: dmaEnableInit === ch,
+          });
+        }
       }
       // Initialize timer counter from reload on enable transition
       if (timerEnableInit >= 0) {
@@ -2273,6 +2291,7 @@
       this.bus.fifoFillBytesA = 0;
       this.bus.fifoFillBytesB = 0;
       this.bus.fifoDmaLog = [];
+      this.bus.dmaSadLog = [];
 
       // Run in chunks until we have enough FIFO samples (avoids blocking the event loop)
       // Safety cap: bail after 500M instructions if no samples arrive (e.g. timer never enabled)
@@ -2464,6 +2483,7 @@
             kind: w.kind,
             pcHex: w.pcHex,
           })),
+          dmaSadLog: this.bus.dmaSadLog.slice(),
         },
         interrupts: this._makeInterruptDiagnostics(),
         bios: {

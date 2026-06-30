@@ -1662,6 +1662,7 @@
         handlerHex: tools.hex(entry.handlerAddr || 0),
         result: entry.result,
         steps: entry.steps || 0,
+        reason: entry.reason || '',
       });
       if (this.irqDispatches.length > 64) this.irqDispatches.shift();
     }
@@ -1750,6 +1751,7 @@
         pending,
         handlerAddr,
         steps: count,
+        reason: this.halted ? this.reason : '',
       });
 
       // Save updated IRQ stack pointer (handler may have adjusted it)

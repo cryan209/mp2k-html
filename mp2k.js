@@ -5311,7 +5311,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const sndInfo = memPeek?.soundInfoSearch?.[0];
       const sndInfoSummary = sndInfo ? ` | sndInfo@${sndInfo.base}:[${sndInfo.words.join(',')}]` : '';
       const mplTable = memPeek?.mplTable;
-      const mplSummary = mplTable ? ` | mpl@0x03007100:[${mplTable.join(',')}]` : '';
+      const mplSummary = mplTable?.words ? ` | mpl@0x03007100:[${mplTable.words.join(',')}]` : '';
       setStatus(cpu
         ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}`
         : 'GSF CPU diagnostics unavailable.');

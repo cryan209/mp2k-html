@@ -5300,7 +5300,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
         : '';
       // Seq/fn2 snapshot summary
       const memPeek = diagnostics?.memPeek;
-      const fmtSnap = (s) => s ? `n${s.n} r0=${s.r0} r1=${s.r1} r2=${s.r2} r3=${s.r3} r4=${s.r4} r5=${s.r5} m0=[${(s.memR0||[]).join(',')}] m1=[${(s.memR1||[]).join(',')}]` : '';
+      const fmtSnap = (s) => s ? `n${s.n} r0=${s.r0} r1=${s.r1} r2=${s.r2} r3=${s.r3} r4=${s.r4} r5=${s.r5} m0=[${(s.memR0||[]).join(',')}] m1=[${(s.memR1||[]).join(',')}] m2=[${(s.memR2||[]).join(',')}]` : '';
       const fn2Snaps = memPeek?.fn2Calls || [];
       const seqSnaps = memPeek?.seqCalls || [];
       const stepSt = diagnostics?.interrupts?.stepStats;
@@ -5312,8 +5312,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const sndInfoSummary = sndInfo ? ` | sndInfo@${sndInfo.base}:[${sndInfo.words.join(',')}]` : '';
       const mplTable = memPeek?.mplTable;
       const mplSummary = mplTable?.words ? ` | mpl@0x03007100:[${mplTable.words.join(',')}]` : '';
+      const mpl7200 = memPeek?.mplAt7200;
+      const mpl7200Summary = mpl7200?.words ? ` | mpl@0x03007200:[${mpl7200.words.join(',')}]` : '';
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

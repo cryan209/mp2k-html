@@ -754,6 +754,7 @@
           r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0),
           memR0: memPeek(r[0]>>>0),
           memR1: memPeek(r[1]>>>0),
+          memR2: memPeek(r[2]>>>0),
         };
         const listKey = isFn2 ? 'fn2CallSnaps' : 'seqCallSnaps';
         if (!this.bus[listKey]) this.bus[listKey] = [];
@@ -2485,7 +2486,8 @@
           return {
             soundWork: peek(0x03007f00, 12),
             soundWork2: peek(0x03005fd0, 12),
-            mplTable: peek(0x03007100, 24),
+            mplTable: peek(0x03007100, 48),
+            mplAt7200: peek(0x03007200, 24),
             iwramStub: peek(0x03000520, 8),
             iwramDriver: peek(0x03006000, 8),
             fn2Calls: this.bus.fn2CallSnaps || [],

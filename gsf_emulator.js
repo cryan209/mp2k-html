@@ -1583,9 +1583,13 @@
       const cond = (instr >>> 8) & 0xf;
       if (cond === 0xf) return this._swi(instr & 0xff, pc, 'thumb');
       if (cond === 0xe) {
-        // Undefined encoding — real GBA triggers UND exception; treat as NOP to avoid halt loops
-        const key = `thumb:0xde`;
-        this.unsupported.set(key, (this.unsupported.get(key) || 0) + 1);
+        // ARM7TDMI hardware treats cond=0xE as BAL (always) even though the Thumb spec marks it
+        // undefined. This encoding is used as a tight backward branch in IWRAM mixer loops.
+        const imm = instr & 0xff;
+        const off = ((imm & 0x80 ? imm | 0xffffff00 : imm) << 1) >> 0;
+        const target = (pc + 4 + off) >>> 0;
+        this._recordBranch('thumb-bal', pc, target, { cond });
+        this.regs[15] = target;
         return;
       }
       if (!this._conditionPassed(cond)) return;
@@ -1813,7 +1817,7 @@
       // VBlank thunk can run generated mixer code in IWRAM, so give it more
       // room during fast rendering than generic IRQ trampolines.
       const isGsfWrapperIrq = handlerAddr >= 0x08ffff80 && handlerAddr < 0x09000000;
-      const MAX_HANDLER_STEPS = this.fastMode ? (isGsfWrapperIrq ? 8192 : 2048) : 500000;
+      const MAX_HANDLER_STEPS = this.fastMode ? (isGsfWrapperIrq ? 65536 : 2048) : 500000;
       let count = 0;
       while (count < MAX_HANDLER_STEPS) {
         if (this.regs[15] === SENTINEL || this.halted) break;

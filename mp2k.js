@@ -5317,9 +5317,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const mplKW = memPeek?.mplKeyWrites;
       const mplKWSummary = mplKW?.length ? ` | mplWr:[${mplKW.map(w=>`${w.a}=${w.v}@${w.pc}/${w.k}`).join(' ')}]` : '';
       const mplIW = memPeek?.mplInitWrites;
-      const mplIWSummary = mplIW?.length ? ` | mplInit(${mplIW.length}):[${mplIW.map(w=>`${w.a}=${w.v}@${w.pc}/${w.k}`).join(' ')}]` : '';
+      // Always show count; show first 40 entries to fit before string truncation
+      const mplIWSummary = ` | mplInit(${mplIW?.length||0}):[${(mplIW||[]).slice(0,40).map(w=>`${w.a}=${w.v}@${w.pc}/${w.k}`).join(' ')}]`;
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mplIWSummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

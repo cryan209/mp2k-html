@@ -183,6 +183,7 @@
       this.fifoDmaLog = [];
       this.timerReloadLog = []; // log writes to TM0CNT_L for debugging
       this.timerRegSnaps = []; // register snapshots at key PCs
+      this.fn2CallSnaps = []; // per-VBL fn2 call site snapshots (first 4 + last 4)
       this.debugPc = 0; // set by CPU before each step for write logging
       this.debugThumb = false;
       this.debugRegs = null; // reference to CPU registers array, set by CPU init
@@ -699,6 +700,8 @@
       this.swiCalls = [];
       this.irqDispatches = [];
       this.irqCallTargets = [];
+      this.irqCallTargetsFirst = []; // first 16 call records (from earliest VBLs)
+      this.irqStepStats = { min: Infinity, max: 0, total: 0, count: 0, firstActiveVbl: -1, activeVbls: 0, baselineEstimate: 0 };
       this.haltEvents = [];
       this.pcHits = new Map();
       this.recentPcs = [];
@@ -737,6 +740,23 @@
       const _isDivFn = _snapPc >= 0x08001800 && _snapPc <= 0x080019ff;
       // And capture first execution inside IWRAM div fn (0x03000400-0x030005ff)
       const _isIwramFn = _snapPc >= 0x03000400 && _snapPc <= 0x030005ff;
+      // Capture state at fn2 call site (BX to IWRAM mixer) for per-VBL diagnostics
+      if (_snapPc === 0x081dce1c && this._inIrqDispatch) {
+        const r = this.regs;
+        const n = this.bus._fn2CallCount = (this.bus._fn2CallCount || 0) + 1;
+        const snap = {
+          n, r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0),
+          r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
+          // peek 8 words at [R0] to read SoundWork/channel state
+          mem: (() => { const a = r[0]>>>0; if (a < 0x02000000 || a > 0x04000000) return []; const words = []; for (let i=0;i<8;i++) words.push(tools.hex(this.bus.read32((a+i*4)>>>0))); return words; })(),
+        };
+        const list = this.bus.fn2CallSnaps;
+        if (n <= 4) list.push(snap); // keep first 4
+        else { // keep last 4 in slots [4..7]
+          if (list.length < 8) list.push(snap);
+          else { list.splice(4, 1); list.push(snap); }
+        }
+      }
       if ((_isCallSite || _isDivFn || _isIwramFn) && this.bus.timerRegSnaps.length < 16) {
         // Deduplicate: skip if same region already captured
         const _label = _isCallSite ? 'site' : _isDivFn ? 'div' : 'iwram';
@@ -1743,18 +1763,34 @@
         reason: entry.reason || '',
       });
       if (this.irqDispatches.length > 64) this.irqDispatches.shift();
+      // Update step stats for understanding when channels are active
+      const st = this.irqStepStats;
+      const s = entry.steps || 0;
+      st.total += s; st.count++;
+      if (s < st.min) st.min = s;
+      if (s > st.max) st.max = s;
+      // Estimate baseline (min observed steps when presumably 0 active channels)
+      if (st.count >= 32 && st.min < 5000) st.baselineEstimate = st.min;
+      // Track first VBL with significantly more steps than baseline (= first active channel)
+      const thresh = st.baselineEstimate > 0 ? st.baselineEstimate + 200 : 0;
+      if (thresh > 0 && s > thresh) {
+        if (st.firstActiveVbl < 0) st.firstActiveVbl = st.count;
+        st.activeVbls++;
+      }
     }
 
     _recordIrqCall(kind, pc, target) {
       if (!this._inIrqDispatch) return;
-      this.irqCallTargets.push({
+      const _callEntry = {
         kind,
         pcHex: tools.hex(pc),
         targetHex: tools.hex(target),
         lrHex: tools.hex(this.regs[14]),
         thumb: !!(this.cpsr & CPSR_T),
-      });
+      };
+      this.irqCallTargets.push(_callEntry);
       if (this.irqCallTargets.length > 64) this.irqCallTargets.shift();
+      if (this.irqCallTargetsFirst.length < 16) this.irqCallTargetsFirst.push(_callEntry);
     }
 
     _recordHaltEvent(phase, pc) {
@@ -2438,8 +2474,26 @@
           };
           return {
             soundWork: peek(0x03007f00, 12),
+            soundWork2: peek(0x03005fd0, 12),
             iwramStub: peek(0x03000520, 8),
             iwramDriver: peek(0x03006000, 8),
+            fn2Calls: this.bus.fn2CallSnaps || [],
+            // Find SoundInfo by searching for the fn2 pointer stored in IWRAM
+            soundInfoSearch: (() => {
+              const target = 0x03000F60; // fn2 entry (even, ARM side expects this)
+              const results = [];
+              for (let a = 0x03000000; a < 0x03008000; a += 4) {
+                const v = this.bus.read32(a);
+                if (v === target || v === (target | 1)) results.push({ addrHex: tools.hex(a), valueHex: tools.hex(v) });
+              }
+              // Also peek 32 bytes before each found address (to get SoundInfo base)
+              return results.slice(0, 4).map(r => {
+                const base = (parseInt(r.addrHex, 16) - 8) >>> 0;
+                const words = [];
+                for (let i = 0; i < 16; i++) words.push(tools.hex(this.bus.read32((base + i * 4) >>> 0)));
+                return { ...r, base: tools.hex(base), words };
+              });
+            })(),
           };
         })(),
         iwramWrites: (() => {
@@ -2487,6 +2541,8 @@
         recent: this.bus.irqEvents.slice(-24),
         dispatches: this.cpu?.irqDispatches?.slice(-16) || [],
         calls: this.cpu?.irqCallTargets?.slice(-16) || [],
+        firstCalls: this.cpu?.irqCallTargetsFirst?.slice(0, 16) || [],
+        stepStats: this.cpu?.irqStepStats || {},
       };
     }
 

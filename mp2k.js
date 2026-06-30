@@ -5298,6 +5298,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
         ? ` haltTrace:[${bios.halts.slice(-4).map(h => `${h.phase}@${h.pcHex} wake=${h.wake ? 1 : 0}/${h.dispatchable ? 1 : 0} if=${h.ifHex} d1=${h.dma1?.srcHex}|${h.dma1?.liveSrcHex}->${h.dma1?.dstHex}/${h.dma1?.cntHex}`).join(' ')}]`
         : '';
       const biosSummary = bios?.swiCalls || haltTrace || bios?.swiCountSummary ? ` | swi:${bios?.swiSummary || bios?.swiCalls || 0}${bios?.stubbed?.length ? ` stub:[${bios.stubbed.join(',')}]` : ''} swiTotal:[${bios?.swiCountSummary || ''}]${haltTrace}` : '';
+      const psgSummary = diagnostics?.io?.psgSummary ? ` | psg:[${diagnostics.io.psgSummary}]` : '';
       const render = diagnostics?.render;
       const statA = render?.sampleStatsA;
       const statB = render?.sampleStatsB;
@@ -5339,7 +5340,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const romAt2 = memPeek?.romAt081ddc00;
       const romSummary = (romAt?.words ? ` | rom@081de180:[${romAt.words.join(',')}]` : '') + (romAt2?.words ? ` rom@081ddc00:[${romAt2.words.join(',')}]` : '');
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

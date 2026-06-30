@@ -168,6 +168,7 @@
       this.dmaSourceLatch = [0, 0, 0, 0];
       this.dmaDestLatch = [0, 0, 0, 0];
       this.dmaSadLog = []; // every write that touches DMA1/DMA2 SAD (sound FIFO source reg), fastMode-safe
+      this.psgRegWrites = new Map(); // PSG channel register write tally, fastMode-safe
       this.memoryWrites = [];
       this.timerCounters = [0, 0, 0, 0];
       this.timerPhases = [0, 0, 0, 0];
@@ -270,6 +271,15 @@
       if (!r || r.id === 'rom' || r.off >= r.data.length) {
         this.unmappedWrites++;
         return;
+      }
+      // Tally writes to the PSG channel registers (Square1/2, Wave, Noise), fastMode-safe.
+      // We don't synthesize PSG output at all right now (no oscillators, no mixing into the
+      // output buffer) — if a game's active instruments are PSG-typed rather than Direct
+      // Sound samples, this is the only place we'd ever see that activity.
+      if (addr >= 0x04000060 && addr < 0x04000080) {
+        if (!this.psgRegWrites) this.psgRegWrites = new Map();
+        const name = ioName(addr & ~1);
+        this.psgRegWrites.set(name, (this.psgRegWrites.get(name) || 0) + 1);
       }
       // IF is write-one-to-clear. Hardware IRQ sources set these bits internally;
       // CPU-visible writes acknowledge requests instead of storing the written value.
@@ -2313,6 +2323,7 @@
       this.bus.fifoFillBytesB = 0;
       this.bus.fifoDmaLog = [];
       this.bus.dmaSadLog = [];
+      this.bus.psgRegWrites = new Map();
 
       // Run in chunks until we have enough FIFO samples (avoids blocking the event loop)
       // Safety cap: bail after 500M instructions if no samples arrive (e.g. timer never enabled)
@@ -2491,6 +2502,10 @@
           })),
           unmappedReads: this.bus.unmappedReads,
           unmappedWrites: this.bus.unmappedWrites,
+          // PSG channel register write tally (fastMode-safe). We don't synthesize PSG audio
+          // (no square/wave/noise oscillators) — this is the only signal we have for whether
+          // a song's active instruments are PSG-typed instead of Direct Sound sample-based.
+          psgSummary: [...this.bus.psgRegWrites.entries()].map(([name, n]) => `${name}×${n}`).join(' '),
         },
         audio: this._makeAudioDiagnostics(soundWrites, timerWrites, dmaWrites),
         fifo: {

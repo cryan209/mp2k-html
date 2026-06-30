@@ -5321,9 +5321,12 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const mplIWAll = mplIW || [];
       const suspectAddrs = new Set(['0x0300711c','0x0300711d','0x0300711e','0x0300711f','0x0300715c','0x0300715d','0x0300715e','0x0300715f']);
       const mplSuspect = mplIWAll.filter(w => suspectAddrs.has(w.a));
-      const mplIWSummary = ` | mplInit(${mplIWAll.length}) suspect:[${mplSuspect.map((w,i)=>`#${mplIWAll.indexOf(w)} ${w.a}=${w.v}@${w.pc}/${w.k}`).join(' ')}] first8:[${mplIWAll.slice(32,40).map(w=>`${w.a}=${w.v}@${w.pc}/${w.k}`).join(' ')}]`;
+      const mplIWSummary = ` | mplInit(${mplIWAll.length}) suspect:[${mplSuspect.map((w)=>`#${mplIWAll.indexOf(w)} ${w.a}=${w.v}@${w.pc}/${w.k}`).join(' ')}] first8:[${mplIWAll.slice(32,40).map(w=>`${w.a}=${w.v}@${w.pc}/${w.k}`).join(' ')}]`;
+      const romAt = memPeek?.romAt081de180;
+      const romAt2 = memPeek?.romAt081ddc00;
+      const romSummary = (romAt?.words ? ` | rom@081de180:[${romAt.words.join(',')}]` : '') + (romAt2?.words ? ` rom@081ddc00:[${romAt2.words.join(',')}]` : '');
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

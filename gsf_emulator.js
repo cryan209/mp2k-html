@@ -2492,6 +2492,9 @@
             soundWork: peek(0x03007f00, 12),
             soundWork2: peek(0x03005fd0, 12),
             mplInitWrites: this.bus.mplInitWrites.slice(),
+            // ROM bytes near the suspect init code (to decode the actual instructions)
+            romAt081de180: peek(0x081de180, 8),
+            romAt081ddc00: peek(0x081ddc00, 8),
             mplTable: peek(0x03007100, 48),
             mplAt7200: peek(0x03007200, 24),
             // Track the write that set the (suspected wrong) song data pointer

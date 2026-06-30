@@ -740,8 +740,8 @@
       const _isDivFn = _snapPc >= 0x08001800 && _snapPc <= 0x080019ff;
       // And capture first execution inside IWRAM div fn (0x03000400-0x030005ff)
       const _isIwramFn = _snapPc >= 0x03000400 && _snapPc <= 0x030005ff;
-      // Capture state at fn2 call site and music track processor entry for diagnostics
-      if ((_snapPc === 0x081dce1c || _snapPc === 0x081dcdfd) && this._inIrqDispatch) {
+      // Capture state at fn2 call site and seq call site (BX at 0x081dee48 → seq)
+      if ((_snapPc === 0x081dce1c || _snapPc === 0x081dee48) && this._inIrqDispatch) {
         const r = this.regs;
         const isFn2 = (_snapPc === 0x081dce1c);
         const cnt = isFn2 ? 'fn2' : 'seq';
@@ -1767,19 +1767,21 @@
         reason: entry.reason || '',
       });
       if (this.irqDispatches.length > 64) this.irqDispatches.shift();
-      // Update step stats for understanding when channels are active
+      // Update step stats for understanding when channels are active (only count actual handler runs)
       const st = this.irqStepStats;
       const s = entry.steps || 0;
-      st.total += s; st.count++;
-      if (s < st.min) st.min = s;
-      if (s > st.max) st.max = s;
-      // Estimate baseline (min observed steps when presumably 0 active channels)
-      if (st.count >= 32 && st.min < 5000) st.baselineEstimate = st.min;
-      // Track first VBL with significantly more steps than baseline (= first active channel)
-      const thresh = st.baselineEstimate > 0 ? st.baselineEstimate + 200 : 0;
-      if (thresh > 0 && s > thresh) {
-        if (st.firstActiveVbl < 0) st.firstActiveVbl = st.count;
-        st.activeVbls++;
+      if (entry.result !== 'dispatch' && s > 0) {
+        st.total += s; st.count++;
+        if (s < st.min) st.min = s;
+        if (s > st.max) st.max = s;
+        // Estimate baseline (min observed steps when presumably 0 active channels)
+        if (st.count >= 16 && st.min < 50000) st.baselineEstimate = st.min;
+        // Track first VBL with significantly more steps than baseline (= first active channel)
+        const thresh = st.baselineEstimate > 0 ? st.baselineEstimate + 200 : 0;
+        if (thresh > 0 && s > thresh) {
+          if (st.firstActiveVbl < 0) st.firstActiveVbl = st.count;
+          st.activeVbls++;
+        }
       }
     }
 
@@ -2250,6 +2252,10 @@
       this.cpu.fastMode = true;
       this.bus.timerReloadLog = [];
       this.bus.timerRegSnaps = [];
+      this.bus.fn2CallSnaps = [];
+      this.bus.seqCallSnaps = [];
+      this.bus._fn2CallCount = 0;
+      this.bus._seqCallCount = 0;
       this.bus.fifoQueueA = [];
       this.bus.fifoQueueB = [];
       this.bus.fifoSamplesA = [];
@@ -2479,6 +2485,7 @@
           return {
             soundWork: peek(0x03007f00, 12),
             soundWork2: peek(0x03005fd0, 12),
+            mplTable: peek(0x03007100, 24),
             iwramStub: peek(0x03000520, 8),
             iwramDriver: peek(0x03006000, 8),
             fn2Calls: this.bus.fn2CallSnaps || [],

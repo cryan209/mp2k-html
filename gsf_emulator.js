@@ -128,6 +128,7 @@
       0x040000a0: 'FIFO_A',
       0x040000a4: 'FIFO_B',
     };
+    if (names[addr] !== undefined) return names[addr];
     if (addr >= IO_TIMER_START && addr < IO_TIMER_END) {
       const ch = (addr - IO_TIMER_START) >>> 2;
       return ((addr - IO_TIMER_START) & 2) ? `TM${ch}CNT_H` : `TM${ch}CNT_L`;

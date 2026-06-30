@@ -601,9 +601,27 @@
       const freqHz = 131072 / (2048 - st.freqCur);
       const dt = (nowCycles - st.lastSampleCycles) / GBA_CPU_HZ;
       st.lastSampleCycles = nowCycles;
-      st.phase = (st.phase + freqHz * dt) % 1;
-      if (st.phase < 0) st.phase += 1;
-      return st.phase < st.dutyFraction ? st.volume : -st.volume;
+      const phaseStart = st.phase;
+      const phaseInc = freqHz * dt;
+      st.phase = ((phaseStart + phaseInc) % 1 + 1) % 1;
+      // Average the square wave over this sample's whole time window instead of point-sampling
+      // a single instant. A naive instantaneous sample aliases the square wave's harmonics
+      // above Nyquist (half the ~13kHz output rate) back down as audible noise — this is the
+      // standard band-limiting fix (a box filter matched to the sample period).
+      const fractionHigh = this._squareAreaHigh(phaseStart, phaseInc, st.dutyFraction);
+      return st.volume * (2 * fractionHigh - 1);
+    }
+
+    // Fraction of the interval [start, start+len) (wrapping mod 1) where phase < duty.
+    _squareAreaHigh(start, len, duty) {
+      if (len <= 0) return start < duty ? 1 : 0;
+      if (len >= 1) return duty;
+      const s = ((start % 1) + 1) % 1;
+      const end = s + len;
+      const segments = end <= 1 ? [[s, end]] : [[s, 1], [0, end - 1]];
+      let highTime = 0;
+      for (const [a, b] of segments) highTime += Math.max(0, Math.min(b, duty) - a);
+      return highTime / len;
     }
 
     // Mix the active PSG channels (gated by SOUNDCNT_L's per-channel L/R enable bits) into a

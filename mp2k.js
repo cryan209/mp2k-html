@@ -5314,8 +5314,12 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const seqSnaps = memPeek?.seqCalls || [];
       const stepSt = diagnostics?.interrupts?.stepStats;
       const firstCalls = diagnostics?.interrupts?.firstCalls || [];
+      const dmaDrift = memPeek?.dmaDrift || [];
+      const dmaDriftSummary = dmaDrift.length
+        ? ` driftDma1[${dmaDrift.map(d => `n${d.n}@vbl${d.vbl}:r5=${d.r5}/sad1=${d.dmaSad1}/drift=${d.driftBytes}`).join(' ')}]`
+        : '';
       const seqSnapSummary = (seqSnaps.length || fn2Snaps.length || stepSt)
-        ? ` | stepStats:first=${stepSt?.firstActiveVbl}@${stepSt?.count}vbls/${stepSt?.activeVbls}active firstCalls:[${firstCalls.slice(0,8).map(c=>`${c.kind}@${c.pcHex}->${c.targetHex}`).join(' ')}] fn2[${fn2Snaps.map(fmtSnap).join('|')}] seq[${seqSnaps.map(fmtSnap).join('|')}]`
+        ? ` | stepStats:first=${stepSt?.firstActiveVbl}@${stepSt?.count}vbls/${stepSt?.activeVbls}active firstCalls:[${firstCalls.slice(0,8).map(c=>`${c.kind}@${c.pcHex}->${c.targetHex}`).join(' ')}] fn2[${fn2Snaps.map(fmtSnap).join('|')}] seq[${seqSnaps.map(fmtSnap).join('|')}]${dmaDriftSummary}`
         : '';
       const sndInfo = memPeek?.soundInfoSearch?.[0];
       const sndInfoSummary = sndInfo ? ` | sndInfo@${sndInfo.base}:[${sndInfo.words.join(',')}]` : '';

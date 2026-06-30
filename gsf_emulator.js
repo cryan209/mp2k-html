@@ -186,6 +186,7 @@
       this.timerReloadLog = []; // log writes to TM0CNT_L for debugging
       this.timerRegSnaps = []; // register snapshots at key PCs
       this.fn2CallSnaps = []; // per-VBL fn2 call site snapshots (first 4 + last 4)
+      this.dmaDriftLog = []; // per-VBL DMA1 read-ptr vs mixer write-ptr (r5) drift, first 8 + last 8
       this.debugPc = 0; // set by CPU before each step for write logging
       this.debugThumb = false;
       this.debugRegs = null; // reference to CPU registers array, set by CPU init
@@ -784,6 +785,20 @@
         const list = this.bus[listKey];
         if (n <= 4) list.push(snap);
         else { if (list.length < 8) list.push(snap); else { list.splice(4, 1); list.push(snap); } }
+        // Track how far DMA1's live FIFO read pointer (dmaSourceLatch[1]) has drifted from the
+        // mixer's current write buffer (r5) at this same VBL, mod the 32KB IWRAM mirror. If the
+        // game never re-arms DMA1SAD per-VBL, this should grow without bound instead of staying
+        // pinned near the small per-VBL ring distance.
+        if (isFn2) {
+          const writeAddr = r[5] >>> 0;
+          const readAddr = this.bus.dmaSourceLatch[1] >>> 0;
+          const driftBytes = (readAddr - writeAddr) & 0x7fff;
+          const drift = { n, vbl: this.bus.vblankCount, r5: tools.hex(writeAddr), dmaSad1: tools.hex(readAddr), driftBytes };
+          if (!this.bus.dmaDriftLog) this.bus.dmaDriftLog = [];
+          const dlist = this.bus.dmaDriftLog;
+          if (n <= 8) dlist.push(drift);
+          else { if (dlist.length < 16) dlist.push(drift); else { dlist.splice(8, 1); dlist.push(drift); } }
+        }
       }
       if ((_isCallSite || _isDivFn || _isIwramFn) && this.bus.timerRegSnaps.length < 16) {
         // Deduplicate: skip if same region already captured
@@ -2279,6 +2294,7 @@
       this.bus.timerRegSnaps = [];
       this.bus.fn2CallSnaps = [];
       this.bus.seqCallSnaps = [];
+      this.bus.dmaDriftLog = [];
       this.bus.mplInitWrites = [];
       this.bus._fn2CallCount = 0;
       this.bus._seqCallCount = 0;
@@ -2541,6 +2557,7 @@
             iwramDriver: peek(0x03006000, 8),
             fn2Calls: this.bus.fn2CallSnaps || [],
             seqCalls: this.bus.seqCallSnaps || [],
+            dmaDrift: this.bus.dmaDriftLog || [],
             // Find SoundInfo by searching for the fn2 pointer stored in IWRAM
             soundInfoSearch: (() => {
               const target = 0x03000F60; // fn2 entry (even, ARM side expects this)

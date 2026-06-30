@@ -5288,7 +5288,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const haltTrace = bios?.halts?.length
         ? ` haltTrace:[${bios.halts.slice(-4).map(h => `${h.phase}@${h.pcHex} wake=${h.wake ? 1 : 0}/${h.dispatchable ? 1 : 0} if=${h.ifHex} d1=${h.dma1?.srcHex}|${h.dma1?.liveSrcHex}->${h.dma1?.dstHex}/${h.dma1?.cntHex}`).join(' ')}]`
         : '';
-      const biosSummary = bios?.swiCalls || haltTrace ? ` | swi:${bios?.swiSummary || bios?.swiCalls || 0}${bios?.stubbed?.length ? ` stub:[${bios.stubbed.join(',')}]` : ''}${haltTrace}` : '';
+      const biosSummary = bios?.swiCalls || haltTrace || bios?.swiCountSummary ? ` | swi:${bios?.swiSummary || bios?.swiCalls || 0}${bios?.stubbed?.length ? ` stub:[${bios.stubbed.join(',')}]` : ''} swiTotal:[${bios?.swiCountSummary || ''}]${haltTrace}` : '';
       const render = diagnostics?.render;
       const statA = render?.sampleStatsA;
       const statB = render?.sampleStatsB;

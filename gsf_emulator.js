@@ -702,6 +702,7 @@
       this.unsupported = new Map();
       this.psrWrites = [];
       this.swiCalls = [];
+      this.swiCounts = new Uint32Array(256); // cheap per-number tally, kept even in fastMode
       this.irqDispatches = [];
       this.irqCallTargets = [];
       this.irqCallTargetsFirst = []; // first 16 call records (from earliest VBLs)
@@ -1630,6 +1631,7 @@
     }
 
     _swi(num, pc, state) {
+      this.swiCounts[num & 0xff]++;
       const call = {
         num,
         name: this._swiName(num),
@@ -2471,6 +2473,12 @@
             for (const c of swiCalls) counts.set(c.name, (counts.get(c.name) || 0) + 1);
             return [...counts.entries()].map(([name, n]) => `${name}×${n}`).join(' ');
           })(),
+          // Cheap per-number tally that survives fastMode (unlike swiCalls/swiSummary above,
+          // which are only logged when fastMode is off and so read 0 right after play()).
+          swiCountSummary: Array.from(this.cpu.swiCounts)
+            .map((n, num) => (n ? `${this.cpu._swiName(num)}×${n}` : null))
+            .filter(Boolean)
+            .join(' '),
           stubbed: swiCalls.filter(c => c.result === 'stubbed').map(c => c.name).filter((v, i, a) => a.indexOf(v) === i),
           recent: swiCalls.slice(-32).map(call => ({
             ...call,

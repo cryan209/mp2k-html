@@ -282,6 +282,12 @@
         if (value & 0x80) this._resetSoundFifo('B');
         value &= ~0x88;
       }
+      if (addr >= 0x040000a0 && addr < 0x040000a8) {
+        const channel = addr < 0x040000a4 ? 'A' : 'B';
+        this._pushSoundFifoByte(channel, loggedValue);
+        if (channel === 'A') this.fifoFillBytesA++;
+        else this.fifoFillBytesB++;
+      }
       // Timer enable: detect 0→1 transition on TM0-3 CNT (low byte of 16-bit control register).
       // The enable bit is bit 7 of the LOW byte: 0x04000102, 0x04000106, 0x0400010a, 0x0400010e.
       // Check BEFORE the write so we have the old value.
@@ -540,16 +546,22 @@
     }
 
     _writeSoundFifo(fifoAddr, word) {
-      const queue = fifoAddr === 0x040000a0 ? this.fifoQueueA : fifoAddr === 0x040000a4 ? this.fifoQueueB : null;
-      if (queue !== null) {
-        for (let i = 0; i < 4; i++) {
-          const b = (word >>> (i * 8)) & 0xff;
-          queue.push(b < 128 ? b : b - 256);
-        }
-        if (fifoAddr === 0x040000a0) this.fifoFillBytesA += 4;
+      const channel = fifoAddr === 0x040000a0 ? 'A' : fifoAddr === 0x040000a4 ? 'B' : null;
+      if (channel) {
+        for (let i = 0; i < 4; i++) this._pushSoundFifoByte(channel, (word >>> (i * 8)) & 0xff);
+        if (channel === 'A') this.fifoFillBytesA += 4;
         else this.fifoFillBytesB += 4;
       }
-      if (!this.fastMode) this.write32(fifoAddr, word);
+      if (!this.fastMode) {
+        for (let i = 0; i < 4; i++) this._logIoWrite((fifoAddr + i) >>> 0, (word >>> (i * 8)) & 0xff, 1);
+      }
+    }
+
+    _pushSoundFifoByte(channel, value) {
+      const queue = channel === 'A' ? this.fifoQueueA : channel === 'B' ? this.fifoQueueB : null;
+      if (!queue || queue.length >= 32) return;
+      const byte = value & 0xff;
+      queue.push(byte < 128 ? byte : byte - 256);
     }
 
     _resetSoundFifo(channel) {

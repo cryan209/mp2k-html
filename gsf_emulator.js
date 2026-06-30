@@ -1944,7 +1944,11 @@
       const key = `0x${(instr >>> 24).toString(16).padStart(2, '0')}`;
       this.unsupported.set(key, (this.unsupported.get(key) || 0) + 1);
       this.halted = true;
-      this.reason = `unsupported ARM ${tools.hex(instr)} at ${tools.hex(pc)}`;
+      const source = this.branches.slice().reverse().find(branch => branch.kind !== 'fetch-fault') || null;
+      const lo = this.bus.read16(pc & ~1);
+      const hi = this.bus.read16((pc + 2) & ~1);
+      const sourceText = source ? ` from ${source.kind} ${source.pcHex}->${source.targetHex}` : '';
+      this.reason = `unsupported ARM ${tools.hex(instr)} at ${tools.hex(pc)} h:${tools.hex(lo, 4)}/${tools.hex(hi, 4)}${sourceText}`;
     }
   }
 

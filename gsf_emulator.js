@@ -952,6 +952,7 @@
       if ((instr & 0x0f8000f0) === 0x00800090) return this._multiplyLong(instr);
       if ((instr & 0x0fbf0fff) === 0x010f0000) return this._mrs(instr);
       if ((instr & 0x0db0f000) === 0x0120f000) return this._msr(instr);
+      if ((instr & 0x0fb00ff0) === 0x01000090) return this._swp(instr);
       if ((instr & 0x0e000090) === 0x00000090) return this._halfwordDataTransfer(instr);
       if ((instr & 0x0e000000) === 0x08000000) return this._blockDataTransfer(instr);
       if ((instr & 0x0c000000) === 0x04000000) return this._singleDataTransfer(instr);
@@ -1155,6 +1156,24 @@
       return ror32(value, amount);
     }
 
+    _swp(instr) {
+      const byte = !!(instr & 0x00400000);
+      const rn = (instr >>> 16) & 0xf;
+      const rd = (instr >>> 12) & 0xf;
+      const rm = instr & 0xf;
+      const addr = this._reg(rn);
+      const pc = (this.regs[15] - 4) >>> 0;
+      if (byte) {
+        const old = this.bus.read8(addr);
+        this._writeMem8(addr, this.regs[rm], 'arm-swpb', { rd, rn, rm });
+        this._setReg(rd, old);
+      } else {
+        const old = this.bus.read32(addr & ~3);
+        this._writeMem32(addr & ~3, this.regs[rm], 'arm-swp', { rd, rn, rm });
+        this._setReg(rd, old);
+      }
+    }
+
     _halfwordDataTransfer(instr) {
       const immediateOffset = !!(instr & 0x00400000);
       const pre = !!(instr & 0x01000000);
@@ -1267,6 +1286,7 @@
       if ((instr & 0xfc00) === 0x4400) return this._thumbHiRegBx(instr);
       if ((instr & 0xf800) === 0x4800) return this._thumbPcLoad(instr, pc);
       if ((instr & 0xf200) === 0x5000) return this._thumbRegOffsetLoadStore(instr);
+      if ((instr & 0xf200) === 0x5200) return this._thumbSignExtendLoadStore(instr);
       if ((instr & 0xe000) === 0x6000) return this._thumbImmLoadStore(instr);
       if ((instr & 0xf000) === 0x8000) return this._thumbHalfwordLoadStore(instr);
       if ((instr & 0xf000) === 0x9000) return this._thumbSpLoadStore(instr);
@@ -1437,6 +1457,25 @@
       else this._writeMem32(addr, this.regs[rd], 'thumb-reg-store', { rd, rb, ro });
     }
 
+    _thumbSignExtendLoadStore(instr) {
+      const h = !!(instr & 0x0800);
+      const s = !!(instr & 0x0400);
+      const ro = (instr >>> 6) & 7;
+      const rb = (instr >>> 3) & 7;
+      const rd = instr & 7;
+      const addr = (this.regs[rb] + this.regs[ro]) >>> 0;
+      const pc = (this.regs[15] - 2) >>> 0;
+      if (!h && !s) {
+        this._writeMem16(addr & ~1, this.regs[rd], 'thumb-strh', { rd, rb, ro });
+      } else if (!h) {
+        this._writeReg(rd, signExtend8(this.bus.read8(addr)) >>> 0, 'thumb-ldsb', pc, { addrHex: tools.hex(addr) });
+      } else if (!s) {
+        this._writeReg(rd, this.bus.read16(addr & ~1), 'thumb-ldrh', pc, { addrHex: tools.hex(addr) });
+      } else {
+        this._writeReg(rd, signExtend16(this.bus.read16(addr & ~1)) >>> 0, 'thumb-ldsh', pc, { addrHex: tools.hex(addr) });
+      }
+    }
+
     _thumbImmLoadStore(instr) {
       const load = !!(instr & 0x0800);
       const byte = !!(instr & 0x1000);
@@ -1543,7 +1582,12 @@
     _thumbCondBranch(instr, pc) {
       const cond = (instr >>> 8) & 0xf;
       if (cond === 0xf) return this._swi(instr & 0xff, pc, 'thumb');
-      if (cond === 0xe) return this._unsupportedThumb(instr, pc);
+      if (cond === 0xe) {
+        // Undefined encoding — real GBA triggers UND exception; treat as NOP to avoid halt loops
+        const key = `thumb:0xde`;
+        this.unsupported.set(key, (this.unsupported.get(key) || 0) + 1);
+        return;
+      }
       if (!this._conditionPassed(cond)) return;
       const imm = instr & 0xff;
       const off = ((imm & 0x80 ? imm | 0xffffff00 : imm) << 1) >> 0;

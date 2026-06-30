@@ -192,6 +192,18 @@
       this.debugPc = 0; // set by CPU before each step for write logging
       this.debugThumb = false;
       this.debugRegs = null; // reference to CPU registers array, set by CPU init
+      // PSG Square1 (ch 0) and Square2 (ch 1) oscillator state. Square2 has no sweep.
+      this.psg = [0, 1].map(ch => ({
+        enabled: false,
+        triggerCycles: 0,
+        lastSampleCycles: 0,
+        freqRaw: 0, freqCur: 0,
+        dutyFraction: 0.5,
+        volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
+        lengthEnabled: false, lengthCyclesTotal: Infinity,
+        sweepShift: 0, sweepDir: 0, sweepPeriod: 0, sweepStepsApplied: 0,
+        phase: 0,
+      }));
     }
 
     region(addr) {
@@ -323,6 +335,12 @@
       }
       r.data[r.off] = value;
       this._logIoWrite(addr, loggedValue, 1);
+      // PSG trigger: writing the high byte of SOUND1CNT_X (ch0) or SOUND2CNT_H (ch1) with
+      // bit7 set (= bit15 of the 16-bit register, the Trigger/Initial bit) restarts the
+      // channel — relatch frequency, duty/envelope/volume, length, and (ch0) sweep.
+      if ((addr === 0x04000065 || addr === 0x0400006d) && (value & 0x80)) {
+        this._psgTrigger(addr === 0x04000065 ? 0 : 1);
+      }
       // Log writes to TM0CNT_L/H (0x04000100-0x04000103) for debugging timer misconfiguration
       if (addr >= 0x04000100 && addr <= 0x04000103 && this.timerReloadLog.length < 64) {
         const pc = this.debugPc || 0;
@@ -496,14 +514,98 @@
       const before = queue.length;
       const value = queue.length ? queue.shift() : (channel === 'A' ? this.fifoLastA : this.fifoLastB);
       const after = queue.length;
+      const mixed = this._mixPsgInto(channel, value);
       if (channel === 'A') {
         this.fifoLastA = value;
-        this.fifoSamplesA.push(value);
+        this.fifoSamplesA.push(mixed);
       } else {
         this.fifoLastB = value;
-        this.fifoSamplesB.push(value);
+        this.fifoSamplesB.push(mixed);
       }
       if (after <= 16 && (before > 16 || before <= 1)) this._requestSoundFifoDma(channel);
+    }
+
+    // PSG trigger ("Initial"/restart): relatch frequency, duty/envelope/volume, length, and
+    // (Square1 only) sweep from the channel's control registers. Called when the high byte of
+    // SOUND1CNT_X (ch 0) or SOUND2CNT_H (ch 1) is written with the trigger bit set.
+    _psgTrigger(ch) {
+      const st = this.psg[ch];
+      const freqReg = ch === 0 ? this.read16(0x04000064) : this.read16(0x0400006c);
+      const envReg = ch === 0 ? this.read16(0x04000062) : this.read16(0x04000068);
+      st.freqRaw = freqReg & 0x7ff;
+      st.freqCur = st.freqRaw;
+      st.lengthEnabled = !!(freqReg & 0x4000);
+      const dutyBits = (envReg >>> 6) & 3;
+      st.dutyFraction = [0.125, 0.25, 0.5, 0.75][dutyBits];
+      st.volInit = (envReg >>> 12) & 0xf;
+      st.volume = st.volInit;
+      st.envDir = (envReg >>> 11) & 1; // 0=decrease, 1=increase
+      st.envStep = (envReg >>> 8) & 7;
+      st.envStepsApplied = 0;
+      const lengthData = envReg & 0x3f;
+      st.lengthCyclesTotal = st.lengthEnabled ? (64 - lengthData) * (GBA_CPU_HZ / 256) : Infinity;
+      if (ch === 0) {
+        const sweepReg = this.read16(0x04000060);
+        st.sweepShift = sweepReg & 7;
+        st.sweepDir = (sweepReg >>> 3) & 1; // 0=increase, 1=decrease
+        st.sweepPeriod = (sweepReg >>> 4) & 7;
+        st.sweepStepsApplied = 0;
+      }
+      st.phase = 0;
+      st.triggerCycles = this.cycles;
+      st.lastSampleCycles = this.cycles;
+      st.enabled = true;
+    }
+
+    // Advance envelope/length/(ch0)sweep timing to `nowCycles` and return this channel's
+    // current waveform sample. Idempotent w.r.t. nowCycles, so it's safe to call once per
+    // stereo output channel even if both land on the same cycle.
+    _psgAdvance(ch, nowCycles) {
+      const st = this.psg[ch];
+      if (!st.enabled) return 0;
+      const elapsed = nowCycles - st.triggerCycles;
+      if (st.lengthEnabled && elapsed >= st.lengthCyclesTotal) { st.enabled = false; return 0; }
+      if (st.envStep > 0) {
+        const period = st.envStep * (GBA_CPU_HZ / 64);
+        const stepsNow = Math.floor(elapsed / period);
+        if (stepsNow > st.envStepsApplied) {
+          st.envStepsApplied = stepsNow;
+          st.volume = Math.max(0, Math.min(15, st.volInit + (st.envDir ? stepsNow : -stepsNow)));
+        }
+      }
+      if (ch === 0 && st.sweepPeriod > 0) {
+        const period = st.sweepPeriod * (GBA_CPU_HZ / 128);
+        const stepsNow = Math.floor(elapsed / period);
+        while (st.sweepStepsApplied < stepsNow) {
+          st.sweepStepsApplied++;
+          const delta = st.freqCur >> st.sweepShift;
+          st.freqCur = st.sweepDir ? (st.freqCur - delta) : (st.freqCur + delta);
+          if (st.freqCur > 2047 || st.freqCur < 0) { st.enabled = false; return 0; }
+        }
+      }
+      const freqHz = 131072 / (2048 - st.freqCur);
+      const dt = (nowCycles - st.lastSampleCycles) / GBA_CPU_HZ;
+      st.lastSampleCycles = nowCycles;
+      st.phase = (st.phase + freqHz * dt) % 1;
+      if (st.phase < 0) st.phase += 1;
+      return st.phase < st.dutyFraction ? st.volume : -st.volume;
+    }
+
+    // Mix the active PSG channels (gated by SOUNDCNT_L's per-channel L/R enable bits) into a
+    // Direct Sound FIFO sample. 'A' maps to the right output, 'B' to left (matching the
+    // existing FIFO_A→right/FIFO_B→left convention used at final mixdown).
+    _mixPsgInto(channel, dsValue) {
+      const soundCntL = this.read16(0x04000080);
+      const isRight = channel === 'A';
+      const masterVol = isRight ? (soundCntL & 7) : ((soundCntL >>> 4) & 7);
+      let mix = 0;
+      for (let ch = 0; ch < 2; ch++) {
+        const enableBit = isRight ? (8 + ch) : (12 + ch);
+        if (!(soundCntL & (1 << enableBit))) continue;
+        mix += this._psgAdvance(ch, this.cycles);
+      }
+      const scaled = mix * 6 * ((masterVol + 1) / 8);
+      return Math.max(-128, Math.min(127, Math.round(dsValue + scaled)));
     }
 
     _requestSoundFifoDma(channel) {
@@ -2325,6 +2427,14 @@
       this.bus.fifoDmaLog = [];
       this.bus.dmaSadLog = [];
       this.bus.psgRegWrites = new Map();
+      this.bus.psg = [0, 1].map(() => ({
+        enabled: false, triggerCycles: 0, lastSampleCycles: 0,
+        freqRaw: 0, freqCur: 0, dutyFraction: 0.5,
+        volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
+        lengthEnabled: false, lengthCyclesTotal: Infinity,
+        sweepShift: 0, sweepDir: 0, sweepPeriod: 0, sweepStepsApplied: 0,
+        phase: 0,
+      }));
 
       // Run in chunks until we have enough FIFO samples (avoids blocking the event loop)
       // Safety cap: bail after 500M instructions if no samples arrive (e.g. timer never enabled)
@@ -2503,10 +2613,13 @@
           })),
           unmappedReads: this.bus.unmappedReads,
           unmappedWrites: this.bus.unmappedWrites,
-          // PSG channel register write tally (fastMode-safe). We don't synthesize PSG audio
-          // (no square/wave/noise oscillators) — this is the only signal we have for whether
-          // a song's active instruments are PSG-typed instead of Direct Sound sample-based.
+          // PSG channel register write tally (fastMode-safe).
           psgSummary: [...this.bus.psgRegWrites.entries()].map(([name, n]) => `${name}×${n}`).join(' '),
+          // Square1/Square2 final state, for sanity-checking the new PSG synth at a glance.
+          psgState: this.bus.psg.map((st, ch) => ({
+            ch, enabled: st.enabled, volume: st.volume, freq: st.freqCur,
+            dutyFraction: st.dutyFraction, lengthEnabled: st.lengthEnabled,
+          })),
         },
         audio: this._makeAudioDiagnostics(soundWrites, timerWrites, dmaWrites),
         fifo: {

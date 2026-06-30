@@ -163,6 +163,7 @@
       this.irqVectorWrites = [];
       this.soundBufferWrites = [];
       this.soundBufferWriteMap = new Map();
+      this.mplInitWrites = []; // first 256 writes to 0x03007100-0x0300717f (VBL 1 init trace)
       this.dmaTransfers = [];
       this.dmaSourceLatch = [0, 0, 0, 0];
       this.dmaDestLatch = [0, 0, 0, 0];
@@ -374,6 +375,9 @@
         if (this.irqVectorWrites.length > 32) this.irqVectorWrites.shift();
       }
       const canonicalAddr = this.canonicalAddr(addr);
+      if (addr >= 0x03007100 && addr < 0x03007180 && this.mplInitWrites.length < 256) {
+        this.mplInitWrites.push({ a: tools.hex(addr), v: tools.hex(value), k: source.kind, pc: source.pc !== undefined ? tools.hex(source.pc) : '?' });
+      }
       if ((r.id === 'ewram' && r.off >= 0x4000 && r.off < 0x8000) || r.id === 'iwram') {
         this.soundBufferWriteMap.set(canonicalAddr & ~3, entry);
         if (entry.value !== 0 || this.soundBufferWrites.length < 8) {
@@ -2255,6 +2259,7 @@
       this.bus.timerRegSnaps = [];
       this.bus.fn2CallSnaps = [];
       this.bus.seqCallSnaps = [];
+      this.bus.mplInitWrites = [];
       this.bus._fn2CallCount = 0;
       this.bus._seqCallCount = 0;
       this.bus.fifoQueueA = [];
@@ -2486,6 +2491,7 @@
           return {
             soundWork: peek(0x03007f00, 12),
             soundWork2: peek(0x03005fd0, 12),
+            mplInitWrites: this.bus.mplInitWrites.slice(),
             mplTable: peek(0x03007100, 48),
             mplAt7200: peek(0x03007200, 24),
             // Track the write that set the (suspected wrong) song data pointer

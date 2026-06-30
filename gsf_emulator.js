@@ -2488,6 +2488,18 @@
             soundWork2: peek(0x03005fd0, 12),
             mplTable: peek(0x03007100, 48),
             mplAt7200: peek(0x03007200, 24),
+            // Track the write that set the (suspected wrong) song data pointer
+            mplKeyWrites: (() => {
+              const addrs = [0x03007100, 0x03007104, 0x03007108, 0x0300710c,
+                             0x03007110, 0x03007114, 0x03007118, 0x0300711c,
+                             0x03007140, 0x03007144, 0x03007148, 0x0300714c,
+                             0x03007150, 0x03007154, 0x03007158, 0x0300715c,
+                             0x03007160, 0x03007164, 0x03007168, 0x0300716c];
+              return addrs.map(a => {
+                const w = this.bus.soundBufferWriteMap.get(a);
+                return w ? { a: tools.hex(a), v: tools.hex(w.value), pc: tools.hex(w.pc), k: w.kind } : null;
+              }).filter(Boolean);
+            })(),
             iwramStub: peek(0x03000520, 8),
             iwramDriver: peek(0x03006000, 8),
             fn2Calls: this.bus.fn2CallSnaps || [],

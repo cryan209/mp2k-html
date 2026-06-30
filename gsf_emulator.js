@@ -458,17 +458,17 @@
 
     _consumeFifoChannel(channel) {
       const queue = channel === 'A' ? this.fifoQueueA : this.fifoQueueB;
-      if (queue.length <= 0) this._requestSoundFifoDma(channel);
+      const before = queue.length;
       const value = queue.length ? queue.shift() : (channel === 'A' ? this.fifoLastA : this.fifoLastB);
+      const after = queue.length;
       if (channel === 'A') {
         this.fifoLastA = value;
         this.fifoSamplesA.push(value);
-        if (this.fifoQueueA.length <= 16) this._requestSoundFifoDma('A');
       } else {
         this.fifoLastB = value;
         this.fifoSamplesB.push(value);
-        if (this.fifoQueueB.length <= 16) this._requestSoundFifoDma('B');
       }
+      if (after <= 16 && (before > 16 || before <= 1)) this._requestSoundFifoDma(channel);
     }
 
     _requestSoundFifoDma(channel) {

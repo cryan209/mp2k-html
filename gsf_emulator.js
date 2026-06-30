@@ -740,22 +740,26 @@
       const _isDivFn = _snapPc >= 0x08001800 && _snapPc <= 0x080019ff;
       // And capture first execution inside IWRAM div fn (0x03000400-0x030005ff)
       const _isIwramFn = _snapPc >= 0x03000400 && _snapPc <= 0x030005ff;
-      // Capture state at fn2 call site (BX to IWRAM mixer) for per-VBL diagnostics
-      if (_snapPc === 0x081dce1c && this._inIrqDispatch) {
+      // Capture state at fn2 call site and music track processor entry for diagnostics
+      if ((_snapPc === 0x081dce1c || _snapPc === 0x081dcdfd) && this._inIrqDispatch) {
         const r = this.regs;
-        const n = this.bus._fn2CallCount = (this.bus._fn2CallCount || 0) + 1;
+        const isFn2 = (_snapPc === 0x081dce1c);
+        const cnt = isFn2 ? 'fn2' : 'seq';
+        const cntKey = `_${cnt}CallCount`;
+        const n = this.bus[cntKey] = (this.bus[cntKey] || 0) + 1;
+        const memPeek = (a) => { if (a < 0x02000000 || a > 0x09000000) return []; const ws = []; for (let i=0;i<8;i++) ws.push(tools.hex(this.bus.read32((a+i*4)>>>0))); return ws; };
         const snap = {
           n, r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0),
           r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
-          // peek 8 words at [R0] to read SoundWork/channel state
-          mem: (() => { const a = r[0]>>>0; if (a < 0x02000000 || a > 0x04000000) return []; const words = []; for (let i=0;i<8;i++) words.push(tools.hex(this.bus.read32((a+i*4)>>>0))); return words; })(),
+          r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0),
+          memR0: memPeek(r[0]>>>0),
+          memR1: memPeek(r[1]>>>0),
         };
-        const list = this.bus.fn2CallSnaps;
-        if (n <= 4) list.push(snap); // keep first 4
-        else { // keep last 4 in slots [4..7]
-          if (list.length < 8) list.push(snap);
-          else { list.splice(4, 1); list.push(snap); }
-        }
+        const listKey = isFn2 ? 'fn2CallSnaps' : 'seqCallSnaps';
+        if (!this.bus[listKey]) this.bus[listKey] = [];
+        const list = this.bus[listKey];
+        if (n <= 4) list.push(snap);
+        else { if (list.length < 8) list.push(snap); else { list.splice(4, 1); list.push(snap); } }
       }
       if ((_isCallSite || _isDivFn || _isIwramFn) && this.bus.timerRegSnaps.length < 16) {
         // Deduplicate: skip if same region already captured
@@ -2478,6 +2482,7 @@
             iwramStub: peek(0x03000520, 8),
             iwramDriver: peek(0x03006000, 8),
             fn2Calls: this.bus.fn2CallSnaps || [],
+            seqCalls: this.bus.seqCallSnaps || [],
             // Find SoundInfo by searching for the fn2 pointer stored in IWRAM
             soundInfoSearch: (() => {
               const target = 0x03000F60; // fn2 entry (even, ARM side expects this)

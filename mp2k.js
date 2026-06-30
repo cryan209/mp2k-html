@@ -5298,8 +5298,20 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const codeDumpSummary = codeDump
         ? ` | lit24d0:${codeDump.lit24d0} fn1:[${(codeDump.fn1||[]).filter(e=>!e.endsWith(':0x0000')).join(' ')}] fn2:[${codeDump.fn2.join(' ')}] iwram:[${(codeDump.iwramFn||[]).join(' ')}] iwramDiv1:[${(codeDump.iwramDiv1||[]).join(' ')}] snaps:[${(codeDump.regSnaps||[]).map(s=>`${s.label}@${s.pc}(c=${s.cycles} r0=${s.r0} r1=${s.r1} r5=${s.r5} lr=${s.lr})`).join(' ')}]`
         : '';
+      // Seq/fn2 snapshot summary
+      const memPeek = diagnostics?.memPeek;
+      const fmtSnap = (s) => s ? `n${s.n} r0=${s.r0} r1=${s.r1} r2=${s.r2} r3=${s.r3} r4=${s.r4} r5=${s.r5} m0=[${(s.memR0||[]).join(',')}] m1=[${(s.memR1||[]).join(',')}]` : '';
+      const fn2Snaps = memPeek?.fn2Calls || [];
+      const seqSnaps = memPeek?.seqCalls || [];
+      const stepSt = diagnostics?.interrupts?.stepStats;
+      const firstCalls = diagnostics?.interrupts?.firstCalls || [];
+      const seqSnapSummary = (seqSnaps.length || fn2Snaps.length || stepSt)
+        ? ` | stepStats:first=${stepSt?.firstActiveVbl}@${stepSt?.count}vbls/${stepSt?.activeVbls}active firstCalls:[${firstCalls.slice(0,8).map(c=>`${c.kind}@${c.pcHex}->${c.targetHex}`).join(' ')}] fn2[${fn2Snaps.map(fmtSnap).join('|')}] seq[${seqSnaps.map(fmtSnap).join('|')}]`
+        : '';
+      const sndInfo = memPeek?.soundInfoSearch?.[0];
+      const sndInfoSummary = sndInfo ? ` | sndInfo@${sndInfo.base}:[${sndInfo.words.join(',')}]` : '';
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}${codeDumpSummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

@@ -204,6 +204,12 @@
         sweepShift: 0, sweepDir: 0, sweepPeriod: 0, sweepStepsApplied: 0,
         phase: 0,
       }));
+      // Per-channel trigger stats: how many retriggers keep the same frequency (suggests
+      // vibrato/pitch-bend re-pokes rather than new notes, which would cause audible phase-
+      // reset clicks) and how close together they land. fastMode-safe.
+      this.psgTriggerStats = [0, 1].map(() => ({
+        total: 0, sameFreq: 0, minGapCycles: Infinity, sumGapCycles: 0, gapSamples: 0,
+      }));
     }
 
     region(addr) {
@@ -532,6 +538,15 @@
       const st = this.psg[ch];
       const freqReg = ch === 0 ? this.read16(0x04000064) : this.read16(0x0400006c);
       const envReg = ch === 0 ? this.read16(0x04000062) : this.read16(0x04000068);
+      const stats = this.psgTriggerStats[ch];
+      stats.total++;
+      if (st.enabled && (freqReg & 0x7ff) === st.freqRaw) stats.sameFreq++;
+      if (st.enabled) {
+        const gap = this.cycles - st.triggerCycles;
+        stats.minGapCycles = Math.min(stats.minGapCycles, gap);
+        stats.sumGapCycles += gap;
+        stats.gapSamples++;
+      }
       st.freqRaw = freqReg & 0x7ff;
       st.freqCur = st.freqRaw;
       st.lengthEnabled = !!(freqReg & 0x4000);
@@ -2439,6 +2454,9 @@
         sweepShift: 0, sweepDir: 0, sweepPeriod: 0, sweepStepsApplied: 0,
         phase: 0,
       }));
+      this.bus.psgTriggerStats = [0, 1].map(() => ({
+        total: 0, sameFreq: 0, minGapCycles: Infinity, sumGapCycles: 0, gapSamples: 0,
+      }));
 
       // Run in chunks until we have enough FIFO samples (avoids blocking the event loop)
       // Safety cap: bail after 500M instructions if no samples arrive (e.g. timer never enabled)
@@ -2627,6 +2645,16 @@
           // Raw SOUNDCNT_L so we can confirm whether ch0/ch1's L/R routing bits (8,9,12,13)
           // are actually what's making pcmA vs pcmB differ, rather than guessing.
           soundCntLHex: tools.hex(this.bus.read16(0x04000080), 4),
+          // How many PSG retriggers keep the same frequency (vibrato/pitch-bend re-pokes,
+          // which hard-reset phase every time and can sound like clicking) vs land far apart
+          // (genuinely new notes). avgGapMs near a single-digit number means very frequent
+          // retriggers regardless of cause.
+          psgTriggerStats: this.bus.psgTriggerStats.map((s, ch) => ({
+            ch, total: s.total, sameFreq: s.sameFreq,
+            sameFreqPct: s.total ? Math.round((s.sameFreq / s.total) * 100) : 0,
+            avgGapMs: s.gapSamples ? Math.round((s.sumGapCycles / s.gapSamples / GBA_CPU_HZ) * 1000) : null,
+            minGapMs: Number.isFinite(s.minGapCycles) ? Math.round((s.minGapCycles / GBA_CPU_HZ) * 1000) : null,
+          })),
         },
         audio: this._makeAudioDiagnostics(soundWrites, timerWrites, dmaWrites),
         fifo: {

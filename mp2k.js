@@ -5302,6 +5302,9 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const psgState = diagnostics?.io?.psgState?.length
         ? ` psgState:[${diagnostics.io.psgState.map(s => `ch${s.ch}:en=${s.enabled?1:0}/vol=${s.volume}/freq=${s.freq}/duty=${s.dutyFraction}/len=${s.lengthEnabled?1:0}`).join(' ')}] soundCntL=${diagnostics.io.soundCntLHex}`
         : '';
+      const psgTriggerStats = diagnostics?.io?.psgTriggerStats?.length
+        ? ` psgTrig:[${diagnostics.io.psgTriggerStats.map(s => `ch${s.ch}:n=${s.total}/sameFreq=${s.sameFreqPct}%/avgGap=${s.avgGapMs}ms/minGap=${s.minGapMs}ms`).join(' ')}]`
+        : '';
       const render = diagnostics?.render;
       const statA = render?.sampleStatsA;
       const statB = render?.sampleStatsB;
@@ -5343,7 +5346,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const romAt2 = memPeek?.romAt081ddc00;
       const romSummary = (romAt?.words ? ` | rom@081de180:[${romAt.words.join(',')}]` : '') + (romAt2?.words ? ` rom@081ddc00:[${romAt2.words.join(',')}]` : '');
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

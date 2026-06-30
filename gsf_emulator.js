@@ -933,6 +933,12 @@
       return idx === 15 ? (this.regs[15] + 4) >>> 0 : this.regs[idx] >>> 0;
     }
 
+    _armStoreRegValue(idx) {
+      // ARM stores of R15 write the instruction address + 12, not the normal
+      // data-processing PC value of instruction address + 8.
+      return idx === 15 ? (this.regs[15] + 8) >>> 0 : this._reg(idx);
+    }
+
     _setReg(idx, value) {
       value >>>= 0;
       this._writeReg(idx, value, 'arm-set-reg', (this.regs[15] - 4) >>> 0);
@@ -1100,7 +1106,7 @@
       if (load) {
         this._setReg(rd, byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3));
       } else {
-        const value = this._reg(rd);
+        const value = this._armStoreRegValue(rd);
         if (byte) this._writeMem8(addr, value, 'arm-byte-store', { rd, rn });
         else this._writeMem32(addr, value, 'arm-store', { rd, rn });
       }
@@ -1212,7 +1218,7 @@
         if (load) {
           this._setReg(reg, this.bus.read32(addr & ~3));
         } else {
-          this._writeMem32(addr, this._reg(reg), 'arm-block-store', { reg, rn });
+          this._writeMem32(addr, this._armStoreRegValue(reg), 'arm-block-store', { reg, rn });
         }
         addr = (addr + 4) >>> 0;
       }

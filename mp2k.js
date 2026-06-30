@@ -5317,8 +5317,11 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const mplKW = memPeek?.mplKeyWrites;
       const mplKWSummary = mplKW?.length ? ` | mplWr:[${mplKW.map(w=>`${w.a}=${w.v}@${w.pc}/${w.k}`).join(' ')}]` : '';
       const mplIW = memPeek?.mplInitWrites;
-      // Always show count; show first 40 entries to fit before string truncation
-      const mplIWSummary = ` | mplInit(${mplIW?.length||0}):[${(mplIW||[]).slice(0,40).map(w=>`${w.a}=${w.v}@${w.pc}/${w.k}`).join(' ')}]`;
+      // Show all writes to the two suspect addresses (song ptr fields), plus first 8 entries for context
+      const mplIWAll = mplIW || [];
+      const suspectAddrs = new Set(['0x0300711c','0x0300711d','0x0300711e','0x0300711f','0x0300715c','0x0300715d','0x0300715e','0x0300715f']);
+      const mplSuspect = mplIWAll.filter(w => suspectAddrs.has(w.a));
+      const mplIWSummary = ` | mplInit(${mplIWAll.length}) suspect:[${mplSuspect.map((w,i)=>`#${mplIWAll.indexOf(w)} ${w.a}=${w.v}@${w.pc}/${w.k}`).join(' ')}] first8:[${mplIWAll.slice(32,40).map(w=>`${w.a}=${w.v}@${w.pc}/${w.k}`).join(' ')}]`;
       setStatus(cpu
         ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${audioSummary}${irqSummary}${biosSummary}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}`
         : 'GSF CPU diagnostics unavailable.');

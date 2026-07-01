@@ -521,6 +521,16 @@
         const log = this.literalWatchLog;
         if (log.length < 300) log.push({ vbl: this.vblankCount, ...entry });
       }
+      // Golden Sun (modified-mp2k) crash investigation: a POP{R0};BX R0 at
+      // 0x081c1fe0 reads 0 off the stack at 0x03007eec instead of a real function
+      // pointer. Watch every write in that stack window to see what (if anything)
+      // ever wrote a real value there, and what last touched it before the crash.
+      if (addr < 0x03007f00 && addr + bytes > 0x03007e80) {
+        if (!this.stackCrashWatchLog) this.stackCrashWatchLog = [];
+        if (this.stackCrashWatchLog.length < 400) {
+          this.stackCrashWatchLog.push({ vbl: this.vblankCount, ...entry });
+        }
+      }
       const canonicalAddr = this.canonicalAddr(addr);
       if (addr >= 0x03007100 && addr < 0x03007180 && this.mplInitWrites.length < 256) {
         this.mplInitWrites.push({ a: tools.hex(addr), v: tools.hex(value), k: source.kind, pc: source.pc !== undefined ? tools.hex(source.pc) : '?' });
@@ -3372,6 +3382,7 @@
             spStoreOperands: this.bus.spStoreOperands || [],
             literalWatchAddr: this.bus._literalWatchAddr ? tools.hex(this.bus._literalWatchAddr) : null,
             literalWatchLog: this.bus.literalWatchLog || [],
+            stackCrashWatchLog: this.bus.stackCrashWatchLog || [],
             mixCheckpoints: {
               fee: this.bus._cpFee || 0,
               c1000: this.bus._cp1000 || 0,

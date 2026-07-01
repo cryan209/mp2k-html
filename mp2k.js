@@ -5395,6 +5395,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const literalWatchSummary = literalWatchAddr
         ? ` | literalWatch(${literalWatchAddr}, ${literalWatchLog.length} writes):[${literalWatchLog.map(w => `vbl${w.vbl}:${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`
         : '';
+      const stackCrashWatchLog = memPeek?.stackCrashWatchLog || [];
+      const stackCrashWatchSummary = stackCrashWatchLog.length
+        ? ` | stackCrashWatch(0x03007e80-0x03007f00, ${stackCrashWatchLog.length} writes):[${stackCrashWatchLog.map(w => `vbl${w.vbl}:${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`
+        : '';
       const mixCmp = memPeek?.mixCmpTrace || [];
       const mixCmpRuns = [];
       for (const e of mixCmp) {
@@ -5441,7 +5445,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
         ? ` | fifoDmaTally:requested=${fdt.requested}/disabled=${fdt.disabled}/wrongTiming=${fdt.wrongTiming}/ran=${fdt.ran}/bufSize=${fdt.bufferSize}/base=[${(fdt.sourceBase || []).join(',')}]/zeroWords=${fdt.zeroWords}/nonZeroWords=${fdt.nonZeroWords}`
         : '';
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${mixVolSummary}${mixCmpSummary}${spWatchSummary}${spStoreOperandsSummary}${literalAt081dce2cSummary}${literalWatchSummary}${mixGateSummary}${cpSummary}${romMixDumpSummary}${romPrologueDumpSummary}${romSpStoreDumpSummary}${irqPcTraceSummary}${handlerVblSpanSummary}${fifoDmaTallySummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${mixVolSummary}${mixCmpSummary}${spWatchSummary}${spStoreOperandsSummary}${literalAt081dce2cSummary}${literalWatchSummary}${mixGateSummary}${cpSummary}${romMixDumpSummary}${romPrologueDumpSummary}${romSpStoreDumpSummary}${irqPcTraceSummary}${handlerVblSpanSummary}${stackCrashWatchSummary}${fifoDmaTallySummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

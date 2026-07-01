@@ -79,6 +79,7 @@
   const GBA_CYCLES_PER_SCANLINE = 1232; // 280896 / 228 scanlines (exact)
   const GBA_TOTAL_SCANLINES = 228;
   const GBA_VBLANK_SCANLINE = 160;
+  const GBA_VBLANK_CYCLE = GBA_VBLANK_SCANLINE * GBA_CYCLES_PER_SCANLINE; // 197120
   const GBA_SYSTEM_STACK = 0x03007f00;
   const TIMER_PRESCALERS = [1, 64, 256, 1024];
   const IRQ_VBLANK = 0x0001;
@@ -159,6 +160,7 @@
       this.unmappedWrites = 0;
       this.cycles = 0;
       this.frameCycles = 0;
+      this._vblankFiredThisFrame = false;
       this.vblankCount = 0;
       this.irqEvents = [];
       this.irqVectorWrites = [];
@@ -550,9 +552,18 @@
       this.cycles += cycles;
       this.frameCycles += cycles;
       this._tickTimers(cycles);
+      // The VBlank IRQ fires when the scanline counter enters the VBlank region
+      // (scanline 160), not at the full-frame wrap (scanline 0/227->0). Firing it at
+      // the wrap made VCOUNT read back ~0 inside every VBlank IRQ handler after the
+      // first (instead of ~160), since frameCycles had just been reset right before
+      // the handler's own instructions started accumulating cycles again.
+      if (!this._vblankFiredThisFrame && this.frameCycles >= GBA_VBLANK_CYCLE) {
+        this._vblankFiredThisFrame = true;
+        this._enterVBlank();
+      }
       while (this.frameCycles >= GBA_CYCLES_PER_FRAME) {
         this.frameCycles -= GBA_CYCLES_PER_FRAME;
-        this._enterVBlank();
+        this._vblankFiredThisFrame = false;
       }
     }
 
@@ -1025,9 +1036,15 @@
     }
 
     advanceFrame(reason = 'frame-wait') {
-      const cyclesToFrame = GBA_CYCLES_PER_FRAME - this.frameCycles;
-      this.stepCycles(cyclesToFrame > 0 ? cyclesToFrame : GBA_CYCLES_PER_FRAME);
-      if (this.frameCycles === 0) {
+      // Skip forward to the VBlank boundary (scanline 160), matching real hardware
+      // timing for BIOS Halt/IntrWait/VBlankIntrWait callers waiting on the VBlank IRQ
+      // — not the full-frame wrap, which landed frameCycles at 0 right as the handler
+      // started running.
+      let cyclesToVBlank = GBA_VBLANK_CYCLE - this.frameCycles;
+      if (cyclesToVBlank <= 0) cyclesToVBlank += GBA_CYCLES_PER_FRAME;
+      const wasFired = this._vblankFiredThisFrame;
+      this.stepCycles(cyclesToVBlank);
+      if (!wasFired && this._vblankFiredThisFrame) {
         const last = this.irqEvents[this.irqEvents.length - 1];
         if (last && last.reason === 'vblank:frame') last.reason = `vblank:${reason}`;
       }

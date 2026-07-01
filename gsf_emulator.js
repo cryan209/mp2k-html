@@ -1224,6 +1224,17 @@
       else if (_snapPc === 0x03001056) this.bus._cp1056 = (this.bus._cp1056 || 0) + 1;
       else if (_snapPc === 0x030010fc) this.bus._cp10fc = (this.bus._cp10fc || 0) + 1;
       else if (_snapPc === 0x03001110) this.bus._cp1110 = (this.bus._cp1110 || 0) + 1;
+      // Finer-grained checkpoints across the untaken branch at 0x1000 (BEQ 0x1018) — VBL 1 always
+      // took that branch, so 0x1002-0x1016 were never captured by mixLoopTrace. If later VBLs
+      // fall through instead of branching, this pinpoints exactly where they end up.
+      else if (_snapPc === 0x03001002) this.bus._cp1002 = (this.bus._cp1002 || 0) + 1;
+      else if (_snapPc === 0x03001008) this.bus._cp1008 = (this.bus._cp1008 || 0) + 1;
+      else if (_snapPc === 0x0300100c) this.bus._cp100c = (this.bus._cp100c || 0) + 1;
+      else if (_snapPc === 0x03001010) this.bus._cp1010 = (this.bus._cp1010 || 0) + 1;
+      else if (_snapPc === 0x03001012) this.bus._cp1012 = (this.bus._cp1012 || 0) + 1;
+      else if (_snapPc === 0x03001014) this.bus._cp1014 = (this.bus._cp1014 || 0) + 1;
+      else if (_snapPc === 0x03001016) this.bus._cp1016 = (this.bus._cp1016 || 0) + 1;
+      else if (_snapPc === 0x03001018) this.bus._cp1018 = (this.bus._cp1018 || 0) + 1;
       // Whole-render trace of the branch that decides whether to enter the ARM PCM mixer at
       // all: LDRB r0,[r4+1] / TST r0,#8 / BEQ 0x03001254 (mixer entry) at PC 0x03001128-0x1130.
       // mixVolTrace showed the mixer runs exactly once (VBL 1) across the whole 30s render, so
@@ -3188,11 +3199,20 @@
             mixCheckpoints: {
               fee: this.bus._cpFee || 0,
               c1000: this.bus._cp1000 || 0,
+              c1002: this.bus._cp1002 || 0,
+              c1008: this.bus._cp1008 || 0,
+              c100c: this.bus._cp100c || 0,
+              c1010: this.bus._cp1010 || 0,
+              c1012: this.bus._cp1012 || 0,
+              c1014: this.bus._cp1014 || 0,
+              c1016: this.bus._cp1016 || 0,
+              c1018: this.bus._cp1018 || 0,
               c101c: this.bus._cp101c || 0,
               c1056: this.bus._cp1056 || 0,
               c10fc: this.bus._cp10fc || 0,
               c1110: this.bus._cp1110 || 0,
             },
+            romAt03001000: (() => { const ws=[]; for(let i=0;i<12;i++) ws.push(tools.hex(this.bus.read16((0x03001000+i*2)>>>0),4)); return ws; })(),
             seqCalls: this.bus.seqCallSnaps || [],
             dmaDrift: this.bus.dmaDriftLog || [],
             // Find SoundInfo by searching for the fn2 pointer stored in IWRAM

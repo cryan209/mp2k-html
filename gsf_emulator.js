@@ -1142,6 +1142,22 @@
       const width = (control & 0x0400) ? 4 : 2;
       if (!count) count = ch === 3 ? 0x10000 : 0x4000;
       const maxCount = Math.min(count, 0x10000);
+      // DMA writes go straight through write8/16/32 and never call noteMemoryWrite,
+      // so they're invisible to address-watch logs (e.g. stackCrashWatchLog). Flag
+      // any transfer whose destination range overlaps the Golden Sun crash-stack
+      // window so a DMA-driven corruption doesn't masquerade as "nothing wrote it".
+      const dmaSpanBytes = maxCount * width;
+      const dmaEndExclusive = (dst + dmaSpanBytes) >>> 0;
+      if (dst < 0x03007f00 && dmaEndExclusive > 0x03007e80) {
+        if (!this.dmaStackOverlaps) this.dmaStackOverlaps = [];
+        if (this.dmaStackOverlaps.length < 64) {
+          this.dmaStackOverlaps.push({
+            vbl: this.vblankCount, ch, reason,
+            srcHex: tools.hex(src), dstHex: tools.hex(dst),
+            count: maxCount, width, dstEndHex: tools.hex(dmaEndExclusive),
+          });
+        }
+      }
       for (let i = 0; i < maxCount; i++) {
         const value = width === 4 ? this.read32(src) : this.read16(src);
         if (width === 4) this.write32(dst, value);
@@ -3383,6 +3399,7 @@
             literalWatchAddr: this.bus._literalWatchAddr ? tools.hex(this.bus._literalWatchAddr) : null,
             literalWatchLog: this.bus.literalWatchLog || [],
             stackCrashWatchLog: this.bus.stackCrashWatchLog || [],
+            dmaStackOverlaps: this.bus.dmaStackOverlaps || [],
             mixCheckpoints: {
               fee: this.bus._cpFee || 0,
               c1000: this.bus._cp1000 || 0,

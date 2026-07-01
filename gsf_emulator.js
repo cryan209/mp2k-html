@@ -866,9 +866,13 @@
       const dmaCh = channel === 'A' ? 1 : 2;
       const base = IO_DMA_START + dmaCh * 12;
       const ctrl = (this.io[base - 0x04000000 + 10] | (this.io[base - 0x04000000 + 11] << 8));
-      if (!(ctrl & 0x8000)) return;
+      // Fastmode-safe tally of how often refill is requested vs. actually granted, to check
+      // whether Direct Sound FIFO DMA is refiring continuously (as intended) or only firing
+      // once at startup and then going silent for the rest of the render.
+      this.fifoDmaReqTally = (this.fifoDmaReqTally || 0) + 1;
+      if (!(ctrl & 0x8000)) { this.fifoDmaReqDisabled = (this.fifoDmaReqDisabled || 0) + 1; return; }
       const timing = (ctrl >>> 12) & 3;
-      if (timing !== 3) return;
+      if (timing !== 3) { this.fifoDmaReqWrongTiming = (this.fifoDmaReqWrongTiming || 0) + 1; return; }
       this._runSoundFifoDma(dmaCh);
     }
 
@@ -892,6 +896,7 @@
     }
 
     _runSoundFifoDma(ch) {
+      this.fifoDmaRunTally = (this.fifoDmaRunTally || 0) + 1;
       const base = IO_DMA_START + ch * 12;
       if (!this.dmaSourceLatch[ch]) this.dmaSourceLatch[ch] = this.read32(base);
       if (!this.dmaDestLatch[ch]) this.dmaDestLatch[ch] = this.read32(base + 4);
@@ -3087,6 +3092,12 @@
             })(),
             fn2Calls: this.bus.fn2CallSnaps || [],
             mixerLoopTrace: this.bus.mixerLoopTrace || [],
+            fifoDmaTally: {
+              requested: this.bus.fifoDmaReqTally || 0,
+              disabled: this.bus.fifoDmaReqDisabled || 0,
+              wrongTiming: this.bus.fifoDmaReqWrongTiming || 0,
+              ran: this.bus.fifoDmaRunTally || 0,
+            },
             mixerPcmTrace: this.bus.mixerPcmTrace || [],
             seqCalls: this.bus.seqCallSnaps || [],
             dmaDrift: this.bus.dmaDriftLog || [],

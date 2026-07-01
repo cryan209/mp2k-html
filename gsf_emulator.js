@@ -67,6 +67,12 @@
   const CPSR_C = 0x20000000;
   const CPSR_V = 0x10000000;
   const CPSR_T = 0x00000020;
+  const MODE_USER = 0x10;
+  const MODE_FIQ = 0x11;
+  const MODE_IRQ = 0x12;
+  const MODE_SUPERVISOR = 0x13;
+  const MODE_ABORT = 0x17;
+  const MODE_UNDEFINED = 0x1b;
   const MODE_SYSTEM = 0x1f;
   const IO_SOUND_START = 0x04000060;
   const IO_SOUND_END = 0x040000a8;
@@ -1228,6 +1234,27 @@
       this.instructions = 0;
       this.fastMode = false;
       this.r13_irq = 0x03007FA0; // GBA BIOS initializes IRQ SP here
+      // Real ARM7TDMI banks r13/r14 (+ SPSR) separately per privileged mode -- User
+      // and System share one bank, but IRQ/Supervisor/Abort/Undefined each get their
+      // own, and FIQ additionally banks r8-r12. Without this, a ROM that switches
+      // CPSR mode mid-handler (e.g. IRQ -> System) keeps using whatever r13 value
+      // was live in the *other* mode instead of that mode's own stack pointer,
+      // corrupting whichever stack happens to alias it. See Golden Sun (modified
+      // mp2k) investigation: a BX-via-popped-R0 crash traced to exactly this.
+      const usrBank = { r13: GBA_SYSTEM_STACK, r14: 0 };
+      this.bankedR13R14 = {
+        [MODE_USER]: usrBank,
+        [MODE_SYSTEM]: usrBank,
+        [MODE_FIQ]: { r13: 0, r14: 0 },
+        [MODE_IRQ]: { r13: this.r13_irq, r14: 0 },
+        [MODE_SUPERVISOR]: { r13: 0x03007FE0, r14: 0 }, // GBA BIOS initializes SVC SP here
+        [MODE_ABORT]: { r13: 0, r14: 0 },
+        [MODE_UNDEFINED]: { r13: 0, r14: 0 },
+      };
+      this.bankedR8to12Fiq = { r8: 0, r9: 0, r10: 0, r11: 0, r12: 0 };
+      this.bankedSpsr = {
+        [MODE_FIQ]: 0, [MODE_IRQ]: 0, [MODE_SUPERVISOR]: 0, [MODE_ABORT]: 0, [MODE_UNDEFINED]: 0,
+      };
       this._inIrqDispatch = false; // re-entrancy guard
       this.unsupported = new Map();
       this.psrWrites = [];
@@ -1830,6 +1857,7 @@
       const exReturn = write && rd === 15 && setFlags && (this.cpsr & 0x1f) !== 0x10;
       if (write) {
         if (exReturn) {
+          this._switchCpuMode(this.spsr & 0x1f); // bank-switch while this.cpsr still reflects the old mode
           this.cpsr = this.spsr; // restore CPSR from SPSR
           this.regs[15] = result & ~3;
           if (!this.fastMode) this._recordBranch('exception-return', result, result & ~3);
@@ -1976,6 +2004,38 @@
       this._setReg(rd, useSpsr ? this.spsr : this.cpsr);
     }
 
+    // Swap banked r13/r14 (+ r8-r12 for FIQ) when the active CPSR mode changes.
+    // Called from any place that can change the mode bits: MSR and CPSR-from-SPSR
+    // exception returns. this.spsr always reflects "the current mode's SPSR" the
+    // same way regs[13]/regs[14] reflect "the current mode's banked registers" --
+    // swapped in _switchCpuMode rather than kept as 5 separate live fields.
+    _switchCpuMode(newMode) {
+      const oldMode = this.cpsr & 0x1f;
+      newMode &= 0x1f;
+      if (newMode === oldMode) return;
+      if (oldMode === MODE_FIQ) {
+        const b = this.bankedR8to12Fiq;
+        b.r8 = this.regs[8]; b.r9 = this.regs[9]; b.r10 = this.regs[10]; b.r11 = this.regs[11]; b.r12 = this.regs[12];
+      }
+      const oldBank = this.bankedR13R14[oldMode];
+      if (oldBank) { oldBank.r13 = this.regs[13]; oldBank.r14 = this.regs[14]; }
+      if (oldMode in this.bankedSpsr) this.bankedSpsr[oldMode] = this.spsr;
+
+      if (newMode === MODE_FIQ) {
+        const b = this.bankedR8to12Fiq;
+        this.regs[8] = b.r8; this.regs[9] = b.r9; this.regs[10] = b.r10; this.regs[11] = b.r11; this.regs[12] = b.r12;
+      } else if (oldMode === MODE_FIQ) {
+        // Leaving FIQ without entering it again: r8-r12 already hold the FIQ
+        // values above; nothing else banks them, so no restore needed here --
+        // the non-FIQ modes' r8-r12 are simply whatever was last live before FIQ
+        // was entered, which real hardware doesn't restore automatically either
+        // (FIQ's r8-r12 bank only round-trips through FIQ entry/exit).
+      }
+      const newBank = this.bankedR13R14[newMode];
+      if (newBank) { this.regs[13] = newBank.r13; this.regs[14] = newBank.r14; }
+      if (newMode in this.bankedSpsr) this.spsr = this.bankedSpsr[newMode];
+    }
+
     _msr(instr) {
       const useSpsr = !!(instr & 0x00400000);
       const fieldMask = (instr >>> 16) & 0xf;
@@ -1987,8 +2047,14 @@
       }
       const before = useSpsr ? this.spsr : this.cpsr;
       const after = this._applyPsrFields(before, value, fieldMask);
-      if (useSpsr) this.spsr = after;
-      else this.cpsr = after;
+      if (useSpsr) {
+        this.spsr = after;
+      } else {
+        // Bank-switch while this.cpsr still reflects the *old* mode (it reads
+        // `this.cpsr & 0x1f` to know what to save), then commit the new value.
+        if (fieldMask & 0x1) this._switchCpuMode(after & 0x1f);
+        this.cpsr = after;
+      }
       if (!this.fastMode) {
         this.psrWrites.push({ target: useSpsr ? 'spsr' : 'cpsr', fieldMask, value, before, after });
         if (this.psrWrites.length > 128) this.psrWrites.shift();
@@ -2040,6 +2106,7 @@
       if (writeBack && !writeBackFirst) this._setReg(rn, finalBase);
       // Exception return: LDM with S-bit, load=true, PC in list
       if (psr && load && (list & 0x8000)) {
+        this._switchCpuMode(this.spsr & 0x1f); // bank-switch while this.cpsr still reflects the old mode
         this.cpsr = this.spsr; // restore CPSR from SPSR (mode switch back to interrupted mode)
       }
     }
@@ -2583,8 +2650,12 @@
       const savedHalted = this.halted;
       const savedReason = this.reason;
 
-      // Enter IRQ mode: use IRQ stack, set SPSR = current CPSR so exception-return works
-      this.regs[13] = this.r13_irq;
+      // Enter IRQ mode via the same bank-switch path a real MSR/exception would take,
+      // so the outgoing (interrupted) mode's r13/r14 land in its own bank -- if the
+      // handler itself does an internal CPSR mode switch (e.g. back to System to call
+      // something), it needs to see the *actual* interrupted stack pointer there, not
+      // whatever IRQ's r13 happens to hold mid-handler.
+      this._switchCpuMode(MODE_IRQ);
       this.spsr = savedCpsr; // so LDMFD {PC}^ or SUBS PC, LR, #4 restores CPSR correctly
       // CPSR: IRQ mode (0x12), I=1 (disable further IRQs), ARM
       this.cpsr = (savedCpsr & 0xffffff00) | 0x92;
@@ -2638,8 +2709,12 @@
         reason: this.halted ? this.reason : '',
       });
 
-      // Save updated IRQ stack pointer (handler may have adjusted it)
-      this.r13_irq = this.regs[13];
+      // Save updated IRQ stack pointer (handler may have adjusted it). Read from the
+      // bank rather than this.regs[13] directly -- if the handler switched CPSR mode
+      // internally and hasn't switched back by the time it hits the sentinel, the
+      // live regs[13] would belong to whatever mode is currently active, not IRQ.
+      this.r13_irq = (this.cpsr & 0x1f) === MODE_IRQ ? this.regs[13] : this.bankedR13R14[MODE_IRQ].r13;
+      this.bankedR13R14[MODE_IRQ].r13 = this.r13_irq;
 
       // Restore CPU state to pre-IRQ values
       for (let i = 0; i < 16; i++) this.regs[i] = savedRegs[i];

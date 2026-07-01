@@ -5270,6 +5270,13 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const reloadEffectLog = reloadEffectCh2.length
         ? ` reloadFxD2(${reloadEffectCh2.length}):[${reloadEffectShown.map(r => `c${r.cycles}:old${r.oldLatch}->sad${r.freshSad}(rewound${r.rewoundBytes})`).join(' ')}]`
         : '';
+      // Whether each VBlank IRQ dispatch actually took the DMA1/DMA2 SAD-reload branch
+      // (0x081dd78c) or skipped it -- shows the real hit/miss period, not just the
+      // ~14-VBlank average inferred from dmaSad log timestamps.
+      const dmaReloadBranch = diagnostics?.fifo?.dmaReloadBranchLog || [];
+      const dmaReloadBranchLog = dmaReloadBranch.length
+        ? ` dmaReloadBranch(${dmaReloadBranch.length}):[${dmaReloadBranch.map(r => `${r.vbl}${r.hit ? '+' : '-'}`).join(',')}]`
+        : '';
       const bufferWrites = diagnostics?.fifo?.bufferWrites?.length
         ? ` bufWr:[${diagnostics.fifo.bufferWrites.slice(-6).map(w => `${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`
         : '';
@@ -5287,7 +5294,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const reloadLog = audio?.timerReloadLog?.length ? ` reloadLog:[${audio.timerReloadLog.map(e => `${e.addr}=${e.value}@${e.cycles}(pc=${e.pc}/${e.thumb?'T':'A'}:${e.instrHex})`).join(' ')}]` : '';
       const soundDetail = audio ? ` snd:${audio.sound.soundCntHHex}/${audio.sound.soundBiasHex}` : '';
       const audioSummary = audio
-        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${allTimersSummary}${soundDetail}${reloadLog}${fifoDma}${dmaSadLog}${reloadEffectLog}${bufferWrites}`
+        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${allTimersSummary}${soundDetail}${reloadLog}${fifoDma}${dmaSadLog}${reloadEffectLog}${dmaReloadBranchLog}${bufferWrites}`
         : '';
       const irq = diagnostics?.interrupts;
       const irqTrace = irq?.dispatches?.length

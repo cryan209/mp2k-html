@@ -1168,13 +1168,27 @@
     _beginIrqPcTrace() {
       this._irqPcTrace = [];
       this._irqPcTraceHitWrapper = false;
+      this._irqPcTraceHitReloadBlock = false;
     }
+    // The DMA1/DMA2 SAD-reload code (0x081dd78c-0x081dd7a6, confirmed by dmaSad log)
+    // is only taken 1 in 14 VBlanks even though the buffer (1584 bytes, 224B/VBlank)
+    // only needs a reload every 7 VBlanks -- track exactly which VBlanks take this
+    // branch vs which skip straight to 0x081dd7a8, to find the real period/gating.
     _recordIrqPcTraceStep(pc) {
+      if (pc === 0x081dd78c) {
+        if (!this.dmaReloadBranchLog) this.dmaReloadBranchLog = [];
+        if (this.dmaReloadBranchLog.length < 120) this.dmaReloadBranchLog.push({ vbl: this.vblankCount, hit: true });
+        this._irqPcTraceHitReloadBlock = true;
+      }
       if (!this._irqPcTrace) return;
       if (this._irqPcTrace.length < 80) this._irqPcTrace.push(tools.hex(pc));
       if (pc === 0x081dcdc6) this._irqPcTraceHitWrapper = true;
     }
     _endIrqPcTrace() {
+      if (!this._irqPcTraceHitReloadBlock) {
+        if (!this.dmaReloadBranchLog) this.dmaReloadBranchLog = [];
+        if (this.dmaReloadBranchLog.length < 120) this.dmaReloadBranchLog.push({ vbl: this.vblankCount, hit: false });
+      }
       if (!this._irqPcTrace) return;
       if (this._irqPcTraceHitWrapper) {
         this.lastHitIrqPcTrace = this._irqPcTrace;
@@ -3237,6 +3251,7 @@
       this.bus.fifoDmaLog = [];
       this.bus.dmaSadLog = [];
       this.bus.reloadEffectLog = [];
+      this.bus.dmaReloadBranchLog = [];
       this.bus.psgRegWrites = new Map();
       this.bus.psg = [0, 1].map(() => ({
         enabled: false, triggerCycles: 0, lastSampleCycles: 0,
@@ -3503,6 +3518,7 @@
           })),
           dmaSadLog: this.bus.dmaSadLog.slice(),
           reloadEffectLog: (this.bus.reloadEffectLog || []).slice(),
+          dmaReloadBranchLog: (this.bus.dmaReloadBranchLog || []).slice(),
         },
         interrupts: this._makeInterruptDiagnostics(),
         bios: {

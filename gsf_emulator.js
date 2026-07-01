@@ -168,6 +168,17 @@
       this.dmaTransfers = [];
       this.dmaSourceLatch = [0, 0, 0, 0];
       this.dmaDestLatch = [0, 0, 0, 0];
+      // Each Direct Sound FIFO DMA channel's *initial* source address, captured the first time
+      // its source latch is set. Real hardware has no "buffer size" register — the DMA's
+      // internal source pointer just increments by 16 bytes forever, only ever wrapping via the
+      // 32KB IWRAM physical-address mirror. mp2k's actual per-channel mix buffer is far smaller
+      // than that (see dsFifoBufferSize below), so relying on the 32KB mirror means the pointer
+      // spends most of its time reading unrelated IWRAM (stack, other tracks' state, code)
+      // instead of the freshly-mixed samples — which is consistent with Direct Sound going
+      // silent/noisy after the first buffer pass. Confine each channel's source pointer to its
+      // own buffer window instead.
+      this.dmaSourceBase = [0, 0, 0, 0];
+      this.dsFifoBufferSize = 0;
       this.dmaSadLog = []; // every write that touches DMA1/DMA2 SAD (sound FIFO source reg), fastMode-safe
       this.psgRegWrites = new Map(); // PSG channel register write tally, fastMode-safe
       this.memoryWrites = [];
@@ -900,6 +911,14 @@
       const base = IO_DMA_START + ch * 12;
       if (!this.dmaSourceLatch[ch]) this.dmaSourceLatch[ch] = this.read32(base);
       if (!this.dmaDestLatch[ch]) this.dmaDestLatch[ch] = this.read32(base + 4);
+      if (!this.dmaSourceBase[ch]) {
+        this.dmaSourceBase[ch] = this.dmaSourceLatch[ch];
+        // DMA1 feeds FIFO A, DMA2 feeds FIFO B — mp2k lays their mix buffers out back-to-back,
+        // so the distance between their bases is each channel's own buffer size.
+        if (this.dmaSourceBase[1] && this.dmaSourceBase[2] && !this.dsFifoBufferSize) {
+          this.dsFifoBufferSize = Math.abs(this.dmaSourceBase[2] - this.dmaSourceBase[1]) >>> 0;
+        }
+      }
       const src = this.dmaSourceLatch[ch] >>> 0;
       const dst = this.dmaDestLatch[ch] >>> 0; // should be FIFO address (0x040000a0 or 0x040000a4)
       const words = [];
@@ -936,9 +955,18 @@
       const base = IO_DMA_START + ch * 12;
       const control = this.read16(base + 10);
       const sourceControl = (control >>> 7) & 3;
-      if (sourceControl === 1) return (src - bytes) >>> 0;
-      if (sourceControl === 2) return src >>> 0;
-      return (src + bytes) >>> 0;
+      let next;
+      if (sourceControl === 1) next = (src - bytes) >>> 0;
+      else if (sourceControl === 2) next = src >>> 0;
+      else next = (src + bytes) >>> 0;
+      // Confine the running source pointer to this channel's own mix-output buffer window
+      // (see dsFifoBufferSize above) instead of letting it drift through the rest of IWRAM.
+      const size = this.dsFifoBufferSize;
+      const bufBase = this.dmaSourceBase[ch];
+      if (size && bufBase) {
+        next = (bufBase + (((next - bufBase) % size) + size) % size) >>> 0;
+      }
+      return next;
     }
 
     _writeSoundFifo(fifoAddr, word) {
@@ -3097,6 +3125,8 @@
               disabled: this.bus.fifoDmaReqDisabled || 0,
               wrongTiming: this.bus.fifoDmaReqWrongTiming || 0,
               ran: this.bus.fifoDmaRunTally || 0,
+              bufferSize: this.bus.dsFifoBufferSize || 0,
+              sourceBase: (this.bus.dmaSourceBase || []).map(v => tools.hex(v)),
             },
             mixerPcmTrace: this.bus.mixerPcmTrace || [],
             seqCalls: this.bus.seqCallSnaps || [],

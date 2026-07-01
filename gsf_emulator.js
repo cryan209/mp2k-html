@@ -669,9 +669,13 @@
       const freqHz = 131072 / (2048 - st.freqCur);
       const dt = (nowCycles - st.lastSampleCycles) / GBA_CPU_HZ;
       st.lastSampleCycles = nowCycles;
-      // One full pass through all 32 samples = one waveform period.
-      st.phase = ((st.phase + freqHz * dt) % 32 + 32) % 32;
-      const raw = this._waveSample(Math.floor(st.phase));
+      // freqHz*dt is the fraction of ONE FULL PERIOD elapsed (0..1) — a full period is all 32
+      // samples, so the sample-index increment needs an explicit ×32. Without it the wave
+      // advanced through its table 32x too slowly, playing every note two octaves-plus flat
+      // (a ~294Hz tone here came out around ~9Hz) — audible as noise/buzz, not a musical pitch.
+      st.phase = ((st.phase + freqHz * dt) % 1 + 1) % 1;
+      const index = Math.min(31, Math.floor(st.phase * 32));
+      const raw = this._waveSample(index);
       const level = st.forceVolume ? 0.75 : st.outputLevel;
       return raw * level;
     }

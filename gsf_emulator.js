@@ -228,6 +228,8 @@
         divRatio: 0, widthMode: 0, shiftFreq: 0,
         lfsr: 0x7fff, phaseCycles: 0,
       };
+      this.noiseTriggerLog = []; // first 8 + last 8 Noise trigger snapshots (gap/div/shift/width)
+      this._noiseTriggerCount = 0;
     }
 
     region(addr) {
@@ -678,6 +680,8 @@
       const st = this.psgNoise;
       const envReg = this.read16(0x04000078);
       const freqReg = this.read16(0x0400007c);
+      const prevTriggerCycles = st.triggerCycles;
+      const wasEnabled = st.enabled;
       st.volInit = (envReg >>> 12) & 0xf;
       st.volume = st.volInit;
       st.envDir = (envReg >>> 11) & 1;
@@ -694,6 +698,18 @@
       st.triggerCycles = this.cycles;
       st.lastSampleCycles = this.cycles;
       st.enabled = true;
+      // Trigger log: unlike Square's phase, Noise's LFSR IS reset to the same seed (0x7fff) on
+      // every trigger per real hardware. If this channel is retriggered very frequently (like
+      // Sappy's sustain-via-retrigger pattern seen on Square), the LFSR would keep replaying
+      // the same short pseudo-random sequence from scratch each time instead of running freely
+      // — turning broadband noise into an audible repeating buzz/tone. Log gap + settings per
+      // trigger so we can see whether that's actually happening here.
+      const gapCycles = wasEnabled ? this.cycles - prevTriggerCycles : null;
+      const entry = { volInit: st.volInit, div: st.divRatio, width: st.widthMode, shift: st.shiftFreq, gapMs: gapCycles !== null ? Math.round((gapCycles / GBA_CPU_HZ) * 1000) : null, cycles: this.cycles };
+      if (!this.noiseTriggerLog) this.noiseTriggerLog = [];
+      const n = ++this._noiseTriggerCount;
+      if (n <= 8) this.noiseTriggerLog.push(entry);
+      else { if (this.noiseTriggerLog.length < 16) this.noiseTriggerLog.push(entry); else { this.noiseTriggerLog.splice(8, 1); this.noiseTriggerLog.push(entry); } }
     }
 
     _noiseAdvance(nowCycles) {
@@ -2650,6 +2666,8 @@
         divRatio: 0, widthMode: 0, shiftFreq: 0,
         lfsr: 0x7fff, phaseCycles: 0,
       };
+      this.bus.noiseTriggerLog = [];
+      this.bus._noiseTriggerCount = 0;
 
       // Run in chunks until we have enough FIFO samples (avoids blocking the event loop)
       // Safety cap: bail after 500M instructions if no samples arrive (e.g. timer never enabled)
@@ -2843,6 +2861,8 @@
             const st = this.bus.psgNoise;
             return { enabled: st.enabled, volume: st.volume, divRatio: st.divRatio, shiftFreq: st.shiftFreq, widthMode: st.widthMode };
           })(),
+          noiseTriggerLog: (this.bus.noiseTriggerLog || []).slice(),
+          noiseTriggerCount: this.bus._noiseTriggerCount || 0,
           // Raw SOUNDCNT_L so we can confirm whether ch0/ch1's L/R routing bits (8,9,12,13)
           // are actually what's making pcmA vs pcmB differ, rather than guessing.
           soundCntLHex: tools.hex(this.bus.read16(0x04000080), 4),

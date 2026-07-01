@@ -450,8 +450,23 @@
         const dmaOff = addr - IO_DMA_START;
         if (dmaEnableInit >= 0) {
           const base = IO_DMA_START + dmaEnableInit * 12;
-          this.dmaSourceLatch[dmaEnableInit] = this.read32(base);
+          const oldLatch = this.dmaSourceLatch[dmaEnableInit];
+          const freshSad = this.read32(base);
+          this.dmaSourceLatch[dmaEnableInit] = freshSad;
           this.dmaDestLatch[dmaEnableInit] = this.read32(base + 4);
+          // Does the re-arm actually rewind the running pointer back toward SAD (a real reset),
+          // or does the visible SAD register itself already sit wherever the pointer had already
+          // drifted to (meaning the "reload" is a no-op and the pointer just keeps marching on)?
+          if (!this.reloadEffectLog) this.reloadEffectLog = [];
+          if (this.reloadEffectLog.length < 4000) {
+            this.reloadEffectLog.push({
+              ch: dmaEnableInit,
+              cycles: this.cycles,
+              oldLatch: tools.hex(oldLatch >>> 0),
+              freshSad: tools.hex(freshSad >>> 0),
+              rewoundBytes: (oldLatch >>> 0) - (freshSad >>> 0),
+            });
+          }
         }
         if (dmaOff % 12 === 11) this._maybeRunDma(Math.floor(dmaOff / 12));
         // Log every write that completes a DMA1/2 SAD (source addr, field offset 0-3) or
@@ -3209,6 +3224,7 @@
       this.bus.fifoFillBytesB = 0;
       this.bus.fifoDmaLog = [];
       this.bus.dmaSadLog = [];
+      this.bus.reloadEffectLog = [];
       this.bus.psgRegWrites = new Map();
       this.bus.psg = [0, 1].map(() => ({
         enabled: false, triggerCycles: 0, lastSampleCycles: 0,
@@ -3474,6 +3490,7 @@
             pcHex: w.pcHex,
           })),
           dmaSadLog: this.bus.dmaSadLog.slice(),
+          reloadEffectLog: (this.bus.reloadEffectLog || []).slice(),
         },
         interrupts: this._makeInterruptDiagnostics(),
         bios: {

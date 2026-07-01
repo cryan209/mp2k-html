@@ -5258,6 +5258,18 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const dmaSadLog = dmaSadEntries.length
         ? ` dmaSad(${dmaSadEntries.length}):[${dmaSadShown.map(d => `d${d.ch}.${d.field}=${d.value}${d.reArmed ? '!' : ''}@${d.pc}/c${d.cycles}`).join(' ')}]`
         : '';
+      // rewoundBytes: for each DMA re-arm, how far the running pointer got pulled BACK toward
+      // the visible SAD register. ~0 or negative means the "reload" was a no-op (SAD was never
+      // rewritten, or already sat wherever the pointer had drifted to) — the pointer just keeps
+      // marching forward across re-arms instead of resetting to the buffer start.
+      const reloadEffectEntries = diagnostics?.fifo?.reloadEffectLog || [];
+      const reloadEffectCh2 = reloadEffectEntries.filter(r => r.ch === 2);
+      const reloadEffectShown = reloadEffectCh2.length > 20
+        ? [...reloadEffectCh2.slice(0, 10), ...reloadEffectCh2.slice(-10)]
+        : reloadEffectCh2;
+      const reloadEffectLog = reloadEffectCh2.length
+        ? ` reloadFxD2(${reloadEffectCh2.length}):[${reloadEffectShown.map(r => `c${r.cycles}:old${r.oldLatch}->sad${r.freshSad}(rewound${r.rewoundBytes})`).join(' ')}]`
+        : '';
       const bufferWrites = diagnostics?.fifo?.bufferWrites?.length
         ? ` bufWr:[${diagnostics.fifo.bufferWrites.slice(-6).map(w => `${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`
         : '';
@@ -5275,7 +5287,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const reloadLog = audio?.timerReloadLog?.length ? ` reloadLog:[${audio.timerReloadLog.map(e => `${e.addr}=${e.value}@${e.cycles}(pc=${e.pc}/${e.thumb?'T':'A'}:${e.instrHex})`).join(' ')}]` : '';
       const soundDetail = audio ? ` snd:${audio.sound.soundCntHHex}/${audio.sound.soundBiasHex}` : '';
       const audioSummary = audio
-        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${allTimersSummary}${soundDetail}${reloadLog}${fifoDma}${dmaSadLog}${bufferWrites}`
+        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${allTimersSummary}${soundDetail}${reloadLog}${fifoDma}${dmaSadLog}${reloadEffectLog}${bufferWrites}`
         : '';
       const irq = diagnostics?.interrupts;
       const irqTrace = irq?.dispatches?.length

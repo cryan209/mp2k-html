@@ -292,7 +292,7 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   bus.write32(0x03007ffc, 0x08000100);
   bus.write16(0x04000200, 0x0001); // IE: vblank
   bus.write16(0x04000208, 1);      // IME
-  cpu.run(40000); // ~25k ROM-ARM instructions crosses VBlank at 197120 cycles
+  cpu.run(60000); // ROM-ARM instructions cross VBlank at 197120 cycles (cost varies with WAITCNT)
   check((bus.read32(0x02000000) >>> 0) === 0x04000000, 'handler saw r0 = 0x04000000 (IO base)');
   check((bus.read32(0x02000004) >>> 0) === 0x08000008, 'stacked lr = interrupted PC + 4 (got 0x' + (bus.read32(0x02000004) >>> 0).toString(16) + ')');
   check((cpu.r13_irq >>> 0) === 0x03007fa0, 'IRQ sp restored after BIOS frame pop (got 0x' + (cpu.r13_irq >>> 0).toString(16) + ')');
@@ -356,6 +356,80 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   cpuB.cpsr &= ~0x80;
   cpuB.step();
   check(cpuB.irqDispatches.length > 0, 'clearing CPSR.I allows dispatch');
+})();
+
+// --- 16. open bus: unmapped and BIOS-region reads return latches, not 0 ---
+(function () {
+  var memory = E.createMemoryImage();
+  var view = new DataView(memory.rom.buffer);
+  view.setUint32(0, 0xe1a00000, true); // mov r0, r0 (nop)
+  var bus = new E.GbaMemoryBus(memory);
+  var cpu = new E.Arm7Cpu(bus, 0x08000000);
+  check((bus.read32(0x00000000) >>> 0) === 0xe129f000, 'BIOS region reads startup latch');
+  cpu.step(); // fetch loads the prefetch latch
+  check((bus.read32(0x01000000) >>> 0) === 0xe1a00000, 'unmapped read returns last fetched opcode');
+  check((bus.read8(0x01000002)) === 0xa0, 'open bus is byte-laned');
+  // SWI updates the BIOS latch
+  var memB = E.createMemoryImage();
+  new DataView(memB.rom.buffer).setUint32(0, 0xef060000, true); // swi Div
+  var busB = new E.GbaMemoryBus(memB);
+  var cpuB = new E.Arm7Cpu(busB, 0x08000000);
+  cpuB.regs[0] = 6; cpuB.regs[1] = 2;
+  cpuB.step();
+  check((busB.read32(0x00000000) >>> 0) === 0xe3a02004, 'BIOS latch reflects post-SWI value');
+})();
+
+// --- 17. LDM/STM edge cases ---
+(function () {
+  var memory = E.createMemoryImage();
+  var view = new DataView(memory.rom.buffer);
+  view.setUint32(0x00, 0xe8b00003, true); // ldmia r0!, {r0, r1}   base in list -> loaded value wins
+  view.setUint32(0x04, 0xe8a20004, true); // stmia r2!, {r2}       base first -> stores OLD base
+  view.setUint32(0x08, 0xe8a4000c, true); // stmia r4!, {r2, r3}   r4 not in list, normal
+  view.setUint32(0x0c, 0xe8a50060, true); // stmia r5!, {r5, r6}   base NOT first -> stores NEW base
+  view.setUint32(0x10, 0xe8a70000, true); // stmia r7!, {}         empty rlist: stores PC+12, r7 += 0x40
+  var bus = new E.GbaMemoryBus(memory);
+  var cpu = new E.Arm7Cpu(bus, 0x08000000);
+  bus.write32(0x02000300, 0x11111111);
+  bus.write32(0x02000304, 0x22222222);
+  cpu.regs[0] = 0x02000300;
+  cpu.step(); // ldmia r0!, {r0, r1}
+  check((cpu.regs[0] >>> 0) === 0x11111111, 'LDM base-in-list: loaded value wins over writeback');
+  check((cpu.regs[1] >>> 0) === 0x22222222, 'LDM second register loaded');
+  cpu.regs[2] = 0x02000400;
+  cpu.step(); // stmia r2!, {r2}
+  check((bus.read32(0x02000400) >>> 0) === 0x02000400, 'STM base-first stores OLD base');
+  check((cpu.regs[2] >>> 0) === 0x02000404, 'STM writeback applied');
+  cpu.regs[2] = 0xdead0001; cpu.regs[3] = 0xdead0002; cpu.regs[4] = 0x02000410;
+  cpu.step(); // stmia r4!, {r2, r3}
+  check((bus.read32(0x02000414) >>> 0) === 0xdead0002, 'normal STM stores registers');
+  cpu.regs[5] = 0x02000420; cpu.regs[6] = 0x66666666;
+  cpu.step(); // stmia r5!, {r5, r6}: r6 is below? no - r5 is first (bit5 < bit6) so OLD base...
+  check((bus.read32(0x02000420) >>> 0) === 0x02000420, 'STM base-first-of-two stores OLD base');
+  cpu.regs[7] = 0x02000440;
+  cpu.step(); // stmia r7!, {}
+  check((bus.read32(0x02000440) >>> 0) === 0x08000010 + 12 >>> 0, 'empty-rlist STM stores PC+12 (got 0x' + (bus.read32(0x02000440) >>> 0).toString(16) + ')');
+  check((cpu.regs[7] >>> 0) === 0x02000480, 'empty-rlist STM advances base by 0x40');
+})();
+
+// --- 18. WAITCNT reprograms ROM fetch costs ---
+(function () {
+  var bus = freshBus();
+  check(bus.romCostThumb[0] === 3 && bus.romCostArm[0] === 5, 'default WS0 costs (s=2)');
+  check(bus.romCostThumb[2] === 9, 'default WS2 thumb cost (s=8)');
+  bus.write16(0x04000204, 0x4317); // typical game setting: WS0 3,1 + prefetch
+  check(bus.romCostThumb[0] === 2 && bus.romCostArm[0] === 3, 'WS0 costs after WAITCNT=0x4317');
+})();
+
+// --- 19. timer 2-cycle start delay ---
+(function () {
+  var bus = freshBus();
+  bus.write16(0x04000100, 0x1000); // reload
+  bus.write16(0x04000102, 0x0080); // enable, prescaler 1
+  bus.stepCycles(2);
+  check(bus.read16(0x04000100) === 0x1000, 'timer holds reload during 2-cycle start delay');
+  bus.stepCycles(4);
+  check(bus.read16(0x04000100) === 0x1004, 'timer ticks after start delay (got 0x' + bus.read16(0x04000100).toString(16) + ')');
 })();
 
 print(failures === 0 ? 'ALL PASS' : failures + ' FAILURES');

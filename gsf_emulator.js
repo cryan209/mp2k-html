@@ -179,6 +179,19 @@
       // DISPSTAT bit 3; ROMs that configure it get hardware behavior, ROMs that never
       // touch it keep the historical always-fire fallback.
       this.dispstatWritten = false;
+      // Open-bus value: the last opcode fetched by the CPU. Unmapped reads return this
+      // (per 16/32-bit lane) instead of 0, matching GBA prefetch-latch behavior.
+      this.openBus = 0;
+      // BIOS-region open bus: reading 0x00000000-0x00003FFF from outside the BIOS
+      // returns the last opcode the BIOS itself fetched. With the BIOS fully HLE'd we
+      // track the documented values: 0xE129F000 after startup, 0xE3A02004 after a SWI,
+      // 0xE55EC002 after an IRQ handler returns. Anti-piracy checks read these.
+      this.biosOpenBus = 0xe129f000;
+      // Cached per-wait-state ROM fetch costs (index 0/1/2 = 0x08/0x0A/0x0C regions),
+      // derived from WAITCNT sequential-wait bits: cost = 1+s (Thumb), 1+2s (ARM).
+      // Defaults reflect WAITCNT=0 (s-waits 2/4/8).
+      this.romCostThumb = [3, 5, 9];
+      this.romCostArm = [5, 9, 17];
       this._vblankFiredThisFrame = false;
       this.vblankCount = 0;
       this.irqEvents = [];
@@ -342,7 +355,10 @@
       const r = this.region(addr);
       if (!r || r.off >= r.data.length) {
         this.unmappedReads++;
-        return 0;
+        // Open bus: unmapped reads return the prefetch latch (last fetched opcode),
+        // byte-laned by address; BIOS-region reads return the tracked BIOS latch.
+        const latch = addr < 0x00004000 ? this.biosOpenBus : this.openBus;
+        return (latch >>> ((addr & 3) << 3)) & 0xff;
       }
       return r.data[r.off];
     }
@@ -370,6 +386,12 @@
       if (r.id === 'iwram' && (r.off === 0x7ff8 || r.off === 0x7ff9)) this.biosIrqFlagsWritten = true;
       // Track whether the ROM ever configures DISPSTAT — see dispstatWritten above.
       if (addr === 0x04000004 || addr === 0x04000005) this.dispstatWritten = true;
+      // WAITCNT (0x04000204): recompute the cached ROM fetch costs when the game
+      // reprograms the Game Pak wait states.
+      if (addr === 0x04000204 || addr === 0x04000205) {
+        r.data[r.off] = value;
+        this._updateWaitstates();
+      }
       // Tally writes to the PSG channel registers (Square1/2, Wave, Noise), fastMode-safe.
       // We don't synthesize PSG output at all right now (no oscillators, no mixing into the
       // output buffer) — if a game's active instruments are PSG-typed rather than Direct
@@ -519,11 +541,12 @@
           });
         }
       }
-      // Initialize timer counter from reload on enable transition
+      // Initialize timer counter from reload on enable transition. Hardware starts
+      // counting 2 cycles after the enable write; a negative phase models the delay.
       if (timerEnableInit >= 0) {
         const base = 0x04000100 + timerEnableInit * 4;
         this.timerCounters[timerEnableInit] = (this.io[base - 0x04000000] | (this.io[base - 0x04000000 + 1] << 8));
-        this.timerPhases[timerEnableInit] = 0;
+        this.timerPhases[timerEnableInit] = -2;
       }
     }
 
@@ -663,6 +686,23 @@
       }
     }
 
+    // Derive per-region ROM fetch costs from WAITCNT's sequential-wait bits. Thumb
+    // fetch = one 16-bit access (1+s cycles); ARM fetch = two (1+2s). WS0 s-wait:
+    // bit4 (0=2, 1=1); WS1: bit7 (0=4, 1=1); WS2: bit10 (0=8, 1=1). Games that program
+    // the typical 3,1 + prefetch setup get Thumb ROM code at 2 cycles/instruction.
+    _updateWaitstates() {
+      const w = this.io[0x204] | (this.io[0x205] << 8);
+      const sWaits = [
+        (w & 0x0010) ? 1 : 2,
+        (w & 0x0080) ? 1 : 4,
+        (w & 0x0400) ? 1 : 8,
+      ];
+      for (let i = 0; i < 3; i++) {
+        this.romCostThumb[i] = 1 + sWaits[i];
+        this.romCostArm[i] = 1 + 2 * sWaits[i];
+      }
+    }
+
     // Walk every scanline-boundary and HBlank point crossed in (from, to] and fire the
     // associated hardware events: HBlank DMA (visible lines only), HBlank IRQ, and
     // VCount-match IRQ. Large steps (Halt slices) cross many boundaries; per-instruction
@@ -716,6 +756,7 @@
         const prescaler = TIMER_PRESCALERS[ctrl & 3];
         const reload = (this.io[base - 0x04000000] | (this.io[base - 0x04000000 + 1] << 8));
         this.timerPhases[ch] += cycles;
+        if (this.timerPhases[ch] < 0) continue; // 2-cycle start delay still pending
         let ticks = Math.floor(this.timerPhases[ch] / prescaler);
         this.timerPhases[ch] -= ticks * prescaler;
         while (ticks > 0) {
@@ -1710,6 +1751,7 @@
         if (!this._canFetch(pc, 2)) return;
         this._tracePc(pc);
         const instr = this.bus.read16(pc);
+        this.bus.openBus = ((instr << 16) | instr) >>> 0; // prefetch latch (Thumb repeats on both lanes)
         this.regs[15] = (pc + 2) >>> 0;
         this.instructions++;
         this._execThumb(instr, pc);
@@ -1721,6 +1763,7 @@
       if (!this._canFetch(pc, 4)) return;
       this._tracePc(pc);
       const instr = this.bus.read32(pc);
+      this.bus.openBus = instr >>> 0; // prefetch latch for open-bus reads
       this.regs[15] = (pc + 4) >>> 0;
       this.instructions++;
       if (!this._conditionPassed(instr >>> 28)) {
@@ -1735,11 +1778,14 @@
     // by DMA transfers that ran inside the previous instruction. The old flat 4 charged
     // IWRAM Thumb code (where mp2k mixers live, on a zero-wait 32-bit bus) 4x its real
     // cost, so mixer/IRQ handlers routinely overran their VBlank budget in emulated time
-    // even though they comfortably fit on hardware. ROM Thumb keeps the previous cost of
-    // 4 (~prefetchless S+waits), so ROM-heavy code timing is unchanged.
+    // even though they comfortably fit on hardware. ROM costs come from the WAITCNT-
+    // derived cache on the bus, per wait-state region (0x08/0x0A/0x0C mirrors).
     _chargeCycles(pc, thumb) {
       let cost;
-      if (pc >= 0x08000000) cost = thumb ? 4 : 8;             // Game Pak ROM (16-bit bus + waits)
+      if (pc >= 0x08000000) {
+        const ws = pc >= 0x0c000000 ? 2 : pc >= 0x0a000000 ? 1 : 0;
+        cost = thumb ? this.bus.romCostThumb[ws] : this.bus.romCostArm[ws];
+      }
       else if (pc >= 0x03000000 && pc < 0x04000000) cost = 1; // IWRAM: 32-bit, zero-wait
       else if (pc >= 0x02000000 && pc < 0x03000000) cost = thumb ? 3 : 6; // EWRAM: 16-bit, 2 waits
       else cost = 1;
@@ -2325,8 +2371,17 @@
       // PSR/S bit: load with PC in list = exception return; otherwise unsupported
       if (psr && !(load && (list & 0x8000))) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
       const count = this._bitCount(list);
-      if (count === 0) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
       const base = this._reg(rn);
+      // ARMv4 empty-rlist quirk: R15 alone is transferred and the base moves by 0x40
+      // (as if all 16 registers had been named). Some ROMs use this deliberately.
+      if (count === 0) {
+        const emptyAddr = up ? (pre ? (base + 4) >>> 0 : base) : (pre ? (base - 0x40) >>> 0 : (base - 0x3c) >>> 0);
+        const emptyFinal = up ? (base + 0x40) >>> 0 : (base - 0x40) >>> 0;
+        if (load) this._setReg(15, this.bus.read32(emptyAddr & ~3));
+        else this._writeMem32(emptyAddr, this._armStoreRegValue(15), 'arm-block-store', { reg: 15, rn, emptyRlist: true });
+        if (writeBack) this._setReg(rn, emptyFinal);
+        return;
+      }
       let addr;
       let finalBase;
       if (up) {
@@ -2336,18 +2391,24 @@
         addr = pre ? (base - count * 4) >>> 0 : (base - (count - 1) * 4) >>> 0;
         finalBase = (base - count * 4) >>> 0;
       }
-      const writeBackFirst = writeBack && (!load || !(list & (1 << rn)));
+      const baseInList = !!(list & (1 << rn));
+      // STM with the base in the list stores the OLD base value only when it is the
+      // first (lowest) register in the list; later positions store the written-back
+      // value. LDM with the base in the list suppresses writeback (loaded value wins).
+      const baseIsFirst = baseInList && (list & ((1 << rn) - 1)) === 0;
+      const writeBackFirst = writeBack && (!load || !baseInList);
       if (writeBackFirst) this._setReg(rn, finalBase);
       for (let reg = 0; reg < 16; reg++) {
         if (!(list & (1 << reg))) continue;
         if (load) {
           this._setReg(reg, this.bus.read32(addr & ~3));
         } else {
-          this._writeMem32(addr, this._armStoreRegValue(reg), 'arm-block-store', { reg, rn });
+          const value = (reg === rn && baseIsFirst) ? base : this._armStoreRegValue(reg);
+          this._writeMem32(addr, value, 'arm-block-store', { reg, rn });
         }
         addr = (addr + 4) >>> 0;
       }
-      if (writeBack && !writeBackFirst) this._setReg(rn, finalBase);
+      if (writeBack && !writeBackFirst && !(load && baseInList)) this._setReg(rn, finalBase);
       // Exception return: LDM with S-bit, load=true, PC in list
       if (psr && load && (list & 0x8000)) {
         this._switchCpuMode(this.spsr & 0x1f); // bank-switch while this.cpsr still reflects the old mode
@@ -2601,6 +2662,17 @@
       const pop = !!(instr & 0x0800);
       const extra = !!(instr & 0x0100);
       const list = instr & 0xff;
+      // ARMv4 empty-rlist quirk (no registers, no LR/PC bit): R15 transfers, SP +/- 0x40.
+      if (!list && !extra) {
+        if (pop) {
+          this._setRegThumb(15, this.bus.read32(this.regs[13] & ~3));
+          this._writeReg(13, (this.regs[13] + 0x40) >>> 0, 'thumb-pop-sp', (this.regs[15] - 2) >>> 0);
+        } else {
+          this._writeReg(13, (this.regs[13] - 0x40) >>> 0, 'thumb-push-sp', (this.regs[15] - 2) >>> 0);
+          this._writeMem32(this.regs[13], (this.regs[15] + 4) >>> 0, 'thumb-push', { reg: 15, emptyRlist: true });
+        }
+        return;
+      }
       if (pop) {
         for (let r = 0; r < 8; r++) {
           if (!(list & (1 << r))) continue;
@@ -2649,10 +2721,24 @@
       const list = instr & 0xff;
       let addr = this.regs[rb] >>> 0;
       const rbInList = !!(list & (1 << rb));
+      // ARMv4 empty-rlist quirk: R15 is transferred and the base advances by 0x40.
+      if (!list) {
+        if (load) this._setRegThumb(15, this.bus.read32(addr & ~3));
+        else this._writeMem32(addr, (this.regs[15] + 4) >>> 0, 'thumb-multi-store', { r: 15, rb, emptyRlist: true });
+        this.regs[rb] = (addr + 0x40) >>> 0;
+        return;
+      }
+      // STMIA with rb in the list stores the OLD base only when rb is the first
+      // (lowest) register in the list; later positions store the written-back value.
+      const rbIsFirst = rbInList && (list & ((1 << rb) - 1)) === 0;
+      const finalAddr = (addr + this._bitCount(list) * 4) >>> 0;
       for (let r = 0; r < 8; r++) {
         if (!(list & (1 << r))) continue;
         if (load) this._writeReg(r, this.bus.read32(addr & ~3), 'thumb-multi-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~3), rb });
-        else this._writeMem32(addr, this.regs[r], 'thumb-multi-store', { r, rb });
+        else {
+          const value = (r === rb && !rbIsFirst) ? finalAddr : this.regs[r];
+          this._writeMem32(addr, value, 'thumb-multi-store', { r, rb });
+        }
         addr = (addr + 4) >>> 0;
       }
       if (!load || !rbInList) this.regs[rb] = addr >>> 0;
@@ -2730,6 +2816,9 @@
         this.halted = true;
         this.reason = `SWI ${tools.hex(num, 2)} ${call.name} failed at ${tools.hex(pc)}: ${err.message}`;
       }
+      // BIOS open-bus latch: after any SWI the last BIOS opcode fetched is the
+      // documented post-SWI value (GBATEK "reading from BIOS memory").
+      this.bus.biosOpenBus = 0xe3a02004;
       if (!this.fastMode) {
         this.swiCalls.push(call);
         if (this.swiCalls.length > 128) this.swiCalls.shift();
@@ -3046,6 +3135,10 @@
       this.spsr = savedSpsr;
       this.halted = savedHalted;
       this.reason = savedReason;
+
+      // BIOS open-bus latch: documented post-IRQ value (the BIOS return sequence's
+      // final opcode). Anti-piracy checks distinguish this from the post-SWI value.
+      this.bus.biosOpenBus = 0xe55ec002;
 
       this._irqDepth--;
       this._inIrqDispatch = this._irqDepth > 0;

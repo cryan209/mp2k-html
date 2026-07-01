@@ -86,6 +86,7 @@
   const GBA_TOTAL_SCANLINES = 228;
   const GBA_VBLANK_SCANLINE = 160;
   const GBA_VBLANK_CYCLE = GBA_VBLANK_SCANLINE * GBA_CYCLES_PER_SCANLINE; // 197120
+  const GBA_HBLANK_CYCLE_IN_LINE = 1006; // HBlank flag/IRQ/DMA point within each scanline
   const GBA_SYSTEM_STACK = 0x03007f00;
   const TIMER_PRESCALERS = [1, 64, 256, 1024];
   const IRQ_VBLANK = 0x0001;
@@ -166,6 +167,14 @@
       this.unmappedWrites = 0;
       this.cycles = 0;
       this.frameCycles = 0;
+      // Bus-stall cycles owed by DMA/SWI work that ran "for free" inside an instruction;
+      // drained by the CPU on its next step so DMA time is charged without re-entering
+      // stepCycles (and thus _tickTimers) recursively from inside a timer tick.
+      this.stallCycles = 0;
+      // Whether the ROM has ever written the BIOS IRQ-acknowledge flags halfword at
+      // 0x03007FF8. Well-behaved ISRs mirror IF there for IntrWait; degenerate GSF stubs
+      // never do, and IntrWait falls back to raw IE&IF semantics for those.
+      this.biosIrqFlagsWritten = false;
       this._vblankFiredThisFrame = false;
       this.vblankCount = 0;
       this.irqEvents = [];
@@ -269,7 +278,14 @@
       if (addr >= 0x05000000 && addr < 0x05000400) return { id: 'palette', data: this.palette, off: addr - 0x05000000 };
       if (addr >= 0x06000000 && addr < 0x06018000) return { id: 'vram', data: this.vram, off: addr - 0x06000000 };
       if (addr >= 0x07000000 && addr < 0x07000400) return { id: 'oam', data: this.oam, off: addr - 0x07000000 };
-      if (addr >= tools.GBA_ROM_BASE && addr < tools.GBA_ROM_BASE + this.memory.rom.length) return { id: 'rom', data: this.memory.rom, off: addr - tools.GBA_ROM_BASE };
+      if (addr >= 0x08000000 && addr < 0x0e000000) {
+        // Game Pak ROM is mirrored at 0x0A000000 (wait state 1) and 0x0C000000 (wait
+        // state 2); sound engines deliberately stream sample data through those mirrors
+        // to use different waitstate settings, so all three must resolve to the image.
+        const off = (addr - 0x08000000) & 0x01ffffff;
+        if (off < this.memory.rom.length) return { id: 'rom', data: this.memory.rom, off };
+        return null;
+      }
       if (addr >= 0x0e000000 && addr < 0x0e010000) return { id: 'sram', data: this.sram, off: addr - 0x0e000000 };
       return null;
     }
@@ -279,6 +295,7 @@
       if (!r) return addr >>> 0;
       if (r.id === 'ewram') return (0x02000000 + r.off) >>> 0;
       if (r.id === 'iwram') return (0x03000000 + r.off) >>> 0;
+      if (r.id === 'rom') return (0x08000000 + r.off) >>> 0;
       return addr >>> 0;
     }
 
@@ -307,12 +324,16 @@
       if (addr === 0x04000006) {
         return Math.floor(this.frameCycles / GBA_CYCLES_PER_SCANLINE) % GBA_TOTAL_SCANLINES;
       }
-      // DISPSTAT (0x04000004) bit 0: VBlank flag, set when VCOUNT >= 160
+      // DISPSTAT (0x04000004): bit 0 VBlank flag (VCOUNT >= 160), bit 1 HBlank flag
+      // (set from cycle 1006 of each 1232-cycle scanline), bit 2 VCount match flag.
       if (addr === 0x04000004) {
         const r = this.region(addr);
         const base = r ? r.data[r.off] : 0;
-        const inVBlank = Math.floor(this.frameCycles / GBA_CYCLES_PER_SCANLINE) >= GBA_VBLANK_SCANLINE ? 1 : 0;
-        return (base & ~1) | inVBlank;
+        const line = Math.floor(this.frameCycles / GBA_CYCLES_PER_SCANLINE) % GBA_TOTAL_SCANLINES;
+        const inVBlank = line >= GBA_VBLANK_SCANLINE ? 1 : 0;
+        const inHBlank = (this.frameCycles % GBA_CYCLES_PER_SCANLINE) >= GBA_HBLANK_CYCLE_IN_LINE ? 2 : 0;
+        const vMatch = line === this.io[5] ? 4 : 0;
+        return (base & ~7) | inVBlank | inHBlank | vMatch;
       }
       const r = this.region(addr);
       if (!r || r.off >= r.data.length) {
@@ -340,6 +361,9 @@
         this.unmappedWrites++;
         return;
       }
+      // Track whether the ROM's ISR ever mirrors IF into the BIOS IRQ flags halfword at
+      // 0x03007FF8 (any IWRAM mirror) — IntrWait HLE keys its wait condition off this.
+      if (r.id === 'iwram' && (r.off === 0x7ff8 || r.off === 0x7ff9)) this.biosIrqFlagsWritten = true;
       // Tally writes to the PSG channel registers (Square1/2, Wave, Noise), fastMode-safe.
       // We don't synthesize PSG output at all right now (no oscillators, no mixing into the
       // output buffer) — if a game's active instruments are PSG-typed rather than Direct
@@ -468,7 +492,9 @@
             });
           }
         }
-        if (dmaOff % 12 === 11) this._maybeRunDma(Math.floor(dmaOff / 12));
+        // Immediate DMA fires on the enable bit's 0→1 edge only — rewriting CNT_H with
+        // the enable bit already set changes settings but does not retrigger on hardware.
+        if (dmaEnableInit >= 0) this._maybeRunDma(dmaEnableInit);
         // Log every write that completes a DMA1/2 SAD (source addr, field offset 0-3) or
         // CNT_H high byte (offset 11, enable/control) so we can see whether the game is
         // actually re-pointing the sound FIFO DMA source each frame, independent of fastMode.
@@ -505,7 +531,8 @@
       }
       this.write8(addr, value);
       this.write8((addr + 1) >>> 0, value >>> 8);
-      if (addr >= IO_DMA_START && addr < IO_DMA_END && ((addr - IO_DMA_START) % 12) === 10) this._maybeRunDma((addr - IO_DMA_START) / 12);
+      // DMA enable-edge triggering is handled entirely in write8 (offset 11, the CNT_H
+      // high byte) — a second trigger here double-ran immediate DMAs on 16-bit writes.
     }
 
     write32(addr, value) {
@@ -614,6 +641,7 @@
       this.cycles += cycles;
       this.frameCycles += cycles;
       this._tickTimers(cycles);
+      this._processScanlineEvents(this.frameCycles - cycles, this.frameCycles);
       // The VBlank IRQ fires when the scanline counter enters the VBlank region
       // (scanline 160), not at the full-frame wrap (scanline 0/227->0). Firing it at
       // the wrap made VCOUNT read back ~0 inside every VBlank IRQ handler after the
@@ -626,6 +654,50 @@
       while (this.frameCycles >= GBA_CYCLES_PER_FRAME) {
         this.frameCycles -= GBA_CYCLES_PER_FRAME;
         this._vblankFiredThisFrame = false;
+      }
+    }
+
+    // Walk every scanline-boundary and HBlank point crossed in (from, to] and fire the
+    // associated hardware events: HBlank DMA (visible lines only), HBlank IRQ, and
+    // VCount-match IRQ. Large steps (Halt slices) cross many boundaries; per-instruction
+    // steps cross at most one, so the loop body almost never runs.
+    _processScanlineEvents(from, to) {
+      let line = Math.floor(from / GBA_CYCLES_PER_SCANLINE);
+      while (true) {
+        const lineStart = line * GBA_CYCLES_PER_SCANLINE;
+        const hblankAt = lineStart + GBA_HBLANK_CYCLE_IN_LINE;
+        if (from < hblankAt) {
+          if (hblankAt > to) break;
+          this._enterHBlank(line % GBA_TOTAL_SCANLINES);
+        }
+        const nextLineStart = lineStart + GBA_CYCLES_PER_SCANLINE;
+        if (nextLineStart > to) break;
+        this._enterScanline((line + 1) % GBA_TOTAL_SCANLINES);
+        line++;
+      }
+    }
+
+    _enterHBlank(line) {
+      // DISPSTAT bit 4: HBlank IRQ enable (fires on every line, including VBlank).
+      if (this.io[4] & 0x10) this.requestIrq(0x0002, 'hblank');
+      // HBlank-timed DMA (start timing 2) triggers on visible scanlines only.
+      if (line < GBA_VBLANK_SCANLINE) this._runTimedDma(2, 'hblank');
+    }
+
+    _enterScanline(line) {
+      // DISPSTAT bit 5: VCount-match IRQ enable; the target line is DISPSTAT's high byte.
+      if ((this.io[4] & 0x20) && line === this.io[5]) this.requestIrq(0x0004, 'vcount');
+    }
+
+    // Run every enabled DMA channel armed with the given start timing (1 = VBlank,
+    // 2 = HBlank). Timing 3 (sound FIFO on ch1/2) has its own dedicated path.
+    _runTimedDma(timing, reason) {
+      for (let ch = 0; ch < 4; ch++) {
+        const base = IO_DMA_START + ch * 12;
+        const ctrl = (this.io[base - 0x04000000 + 10] | (this.io[base - 0x04000000 + 11] << 8));
+        if (!(ctrl & 0x8000)) continue;
+        if (((ctrl >>> 12) & 3) !== timing) continue;
+        this._runDma(ch, reason);
       }
     }
 
@@ -682,11 +754,9 @@
     _consumeFifoChannel(channel) {
       const queue = channel === 'A' ? this.fifoQueueA : this.fifoQueueB;
       const metaQueue = channel === 'A' ? this.fifoQueueMetaA : this.fifoQueueMetaB;
-      const before = queue.length;
       const wasEmpty = !queue.length;
       const value = queue.length ? queue.shift() : (channel === 'A' ? this.fifoLastA : this.fifoLastB);
       const meta = wasEmpty ? null : metaQueue.shift();
-      const after = queue.length;
       const mixed = this._mixPsgInto(channel, value);
       const trace = {
         addr: meta ? meta.addr : null,
@@ -712,7 +782,12 @@
         this.dsOnlySamplesB.push(value);
         this.dmaSrcTraceB.push(trace);
       }
-      if (after <= 16 && (before > 16 || before <= 1)) this._requestSoundFifoDma(channel);
+      // Hardware is level-triggered: on each timer overflow, if the FIFO holds 16 bytes
+      // or fewer and a special-timing DMA is armed, it transfers 16 more. The previous
+      // edge-triggered heuristic dropped requests that landed while the game had the DMA
+      // momentarily disabled for a re-arm, leaving the FIFO to underrun before refills
+      // resumed — an audible click backed by a stale repeated byte.
+      if (queue.length <= 16) this._requestSoundFifoDma(channel);
     }
 
     // Live PSG frequency/length-enable update: called on EVERY write to SOUND1CNT_X (ch0) or
@@ -955,6 +1030,9 @@
     // 'A' maps to the right output, 'B' to left (matching the existing FIFO_A→right/
     // FIFO_B→left convention used at final mixdown).
     _mixPsgInto(channel, dsValue) {
+      // SOUNDCNT_X bit 7: PSG+FIFO master enable. When off, all sound circuits are
+      // powered down and the output is silence regardless of channel state.
+      if (!(this.io[0x84] & 0x80)) return 0;
       const soundCntL = this.read16(0x04000080);
       const soundCntH = this.read16(0x04000082);
       const isRight = channel === 'A';
@@ -1062,6 +1140,7 @@
       // Advance the internal DMA source latch. The visible DMAxSAD register is an initial value register.
       this.dmaSourceLatch[ch] = this._advanceDmaSource(ch, src, 16);
       // Don't disable — repeat bit is set, DMA stays active.
+      this.stallCycles += 12; // ~2N+2S per word for a 4-word FIFO burst
     }
 
     _advanceDmaSource(ch, src, bytes) {
@@ -1159,6 +1238,15 @@
       // VCOUNT is now computed dynamically from frameCycles; no need to write it
       this.write16(0x04000004, this.read16(0x04000004) | 0x0001);
       this.requestIrq(IRQ_VBLANK, `vblank:${reason}`);
+      // VBlank-timed DMA (start timing 1) fires once per frame at VBlank entry.
+      this._runTimedDma(1, 'vblank');
+    }
+
+    // Advance to the next scanline boundary. Used by the BIOS Halt/IntrWait HLE so
+    // mid-frame IRQs (timer-driven engines especially) wake the CPU at roughly the
+    // right time instead of being coalesced at the next VBlank.
+    advanceScanline() {
+      this.stepCycles(GBA_CYCLES_PER_SCANLINE - (this.frameCycles % GBA_CYCLES_PER_SCANLINE));
     }
 
     // Watch every VBlank IRQ dispatch to see whether execution actually reaches the
@@ -1243,20 +1331,33 @@
 
     _runDma(ch, reason = 'manual') {
       const base = 0x040000b0 + ch * 12;
-      let src = this.read32(base);
-      let dst = this.read32(base + 4);
-      let count = this.read16(base + 8);
       const control = this.read16(base + 10);
       const width = (control & 0x0400) ? 4 : 2;
+      // Internal address latches: loaded from SAD/DAD on the enable 0→1 edge (see write8);
+      // repeat-mode DMA (VBlank/HBlank timed) must continue from where the last transfer
+      // stopped, not restart from the visible registers each trigger.
+      if (!this.dmaSourceLatch[ch]) this.dmaSourceLatch[ch] = this.read32(base);
+      if (!this.dmaDestLatch[ch]) this.dmaDestLatch[ch] = this.read32(base + 4);
+      let src = this.dmaSourceLatch[ch] >>> 0;
+      let dst = this.dmaDestLatch[ch] >>> 0;
+      // The word count is re-read (reloaded) on every trigger, matching hardware repeat.
+      let count = this.read16(base + 8);
       if (!count) count = ch === 3 ? 0x10000 : 0x4000;
       const maxCount = Math.min(count, 0x10000);
+      // Address control: SAD bits 7-8 (0/3=increment, 1=decrement, 2=fixed),
+      // DAD bits 5-6 (0=increment, 1=decrement, 2=fixed, 3=increment+reload).
+      const srcCtl = (control >>> 7) & 3;
+      const dstCtl = (control >>> 5) & 3;
+      const srcStep = srcCtl === 1 ? -width : srcCtl === 2 ? 0 : width;
+      const dstStep = dstCtl === 1 ? -width : dstCtl === 2 ? 0 : width;
       // DMA writes go straight through write8/16/32 and never call noteMemoryWrite,
       // so they're invisible to address-watch logs (e.g. stackCrashWatchLog). Flag
       // any transfer whose destination range overlaps the Golden Sun crash-stack
       // window so a DMA-driven corruption doesn't masquerade as "nothing wrote it".
-      const dmaSpanBytes = maxCount * width;
-      const dmaEndExclusive = (dst + dmaSpanBytes) >>> 0;
-      if (dst < 0x03007f00 && dmaEndExclusive > 0x03007e80) {
+      const dmaSpanBytes = dstStep === 0 ? width : maxCount * width;
+      const dstLo = dstStep < 0 ? (dst - dmaSpanBytes + width) >>> 0 : dst;
+      const dmaEndExclusive = (dstLo + dmaSpanBytes) >>> 0;
+      if (dstLo < 0x03007f00 && dmaEndExclusive > 0x03007e80) {
         if (!this.dmaStackOverlaps) this.dmaStackOverlaps = [];
         if (this.dmaStackOverlaps.length < 64) {
           this.dmaStackOverlaps.push({
@@ -1270,9 +1371,17 @@
         const value = width === 4 ? this.read32(src) : this.read16(src);
         if (width === 4) this.write32(dst, value);
         else this.write16(dst, value);
-        src = (src + width) >>> 0;
-        dst = (dst + width) >>> 0;
+        src = (src + srcStep) >>> 0;
+        dst = (dst + dstStep) >>> 0;
       }
+      this.dmaSourceLatch[ch] = src;
+      // Dest control 3 (increment+reload) rewinds the internal dest pointer to DAD after
+      // every transfer — the classic HBlank-effects mode.
+      this.dmaDestLatch[ch] = dstCtl === 3 ? this.read32(base + 4) : dst;
+      // Charge the bus time this transfer really costs (~2 cycles per unit on ROM/EWRAM);
+      // accumulated as a stall the CPU drains on its next step, to avoid re-entering
+      // stepCycles from inside a timer tick or VBlank event.
+      this.stallCycles += 2 * maxCount + 4;
       if (!(control & 0x0200)) {
         const disabled = control & ~0x8000;
         this.write8(base + 10, disabled);
@@ -1591,7 +1700,7 @@
         this.regs[15] = (pc + 2) >>> 0;
         this.instructions++;
         this._execThumb(instr, pc);
-        this.bus.stepCycles(4);
+        this._chargeCycles(pc, true);
         return;
       }
       const pc = this.regs[15] >>> 0;
@@ -1602,11 +1711,31 @@
       this.regs[15] = (pc + 4) >>> 0;
       this.instructions++;
       if (!this._conditionPassed(instr >>> 28)) {
-        this.bus.stepCycles(4);
+        this._chargeCycles(pc, false);
         return;
       }
       this._execArm(instr, pc);
-      this.bus.stepCycles(4);
+      this._chargeCycles(pc, false);
+    }
+
+    // Region-aware per-instruction cycle cost, plus draining any bus-stall cycles owed
+    // by DMA transfers that ran inside the previous instruction. The old flat 4 charged
+    // IWRAM Thumb code (where mp2k mixers live, on a zero-wait 32-bit bus) 4x its real
+    // cost, so mixer/IRQ handlers routinely overran their VBlank budget in emulated time
+    // even though they comfortably fit on hardware. ROM Thumb keeps the previous cost of
+    // 4 (~prefetchless S+waits), so ROM-heavy code timing is unchanged.
+    _chargeCycles(pc, thumb) {
+      let cost;
+      if (pc >= 0x08000000) cost = thumb ? 4 : 8;             // Game Pak ROM (16-bit bus + waits)
+      else if (pc >= 0x03000000 && pc < 0x04000000) cost = 1; // IWRAM: 32-bit, zero-wait
+      else if (pc >= 0x02000000 && pc < 0x03000000) cost = thumb ? 3 : 6; // EWRAM: 16-bit, 2 waits
+      else cost = 1;
+      const stall = this.bus.stallCycles;
+      if (stall > 0) {
+        this.bus.stallCycles = 0;
+        cost += stall;
+      }
+      this.bus.stepCycles(cost);
     }
 
     snapshot() {
@@ -1992,6 +2121,29 @@
       }
     }
 
+    // ARM7TDMI unaligned load behavior: LDR from a non-word-aligned address reads the
+    // aligned word rotated right by 8x the byte offset; LDRH from an odd address reads
+    // the aligned halfword rotated right by 8; LDRSH from an odd address degrades to
+    // LDRSB. Code (memcpy tails, packed readers) does rely on these rotations.
+    _ldrWord(addr) {
+      addr >>>= 0;
+      const value = this.bus.read32(addr & ~3);
+      const rot = (addr & 3) << 3;
+      return rot ? ror32(value, rot) : value;
+    }
+
+    _ldrHalf(addr) {
+      addr >>>= 0;
+      const value = this.bus.read16(addr & ~1);
+      return (addr & 1) ? ror32(value, 8) : value;
+    }
+
+    _ldrSignedHalf(addr) {
+      addr >>>= 0;
+      if (addr & 1) return signExtend8(this.bus.read8(addr)) >>> 0;
+      return signExtend16(this.bus.read16(addr)) >>> 0;
+    }
+
     _singleDataTransfer(instr) {
       const immediateOffset = !(instr & 0x02000000);
       if (!immediateOffset && (instr & 0x00000010)) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
@@ -2008,7 +2160,7 @@
       const addr = pre ? offsetAddr : base;
       const finalBase = pre ? offsetAddr : (up ? (base + off) >>> 0 : (base - off) >>> 0);
       if (load) {
-        this._setReg(rd, byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3));
+        this._setReg(rd, byte ? this.bus.read8(addr) : this._ldrWord(addr));
       } else {
         const value = this._armStoreRegValue(rd);
         if (byte) this._writeMem8(addr, value, 'arm-byte-store', { rd, rn });
@@ -2041,7 +2193,7 @@
         this._writeMem8(addr, this.regs[rm], 'arm-swpb', { rd, rn, rm });
         this._setReg(rd, old);
       } else {
-        const old = this.bus.read32(addr & ~3);
+        const old = this._ldrWord(addr);
         this._writeMem32(addr & ~3, this.regs[rm], 'arm-swp', { rd, rn, rm });
         this._setReg(rd, old);
       }
@@ -2067,9 +2219,9 @@
       if (!load && !halfword) return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
 
       if (load) {
-        if (sign && halfword) this._setReg(rd, signExtend16(this.bus.read16(addr & ~1)) >>> 0);
+        if (sign && halfword) this._setReg(rd, this._ldrSignedHalf(addr));
         else if (sign) this._setReg(rd, signExtend8(this.bus.read8(addr)) >>> 0);
-        else if (halfword) this._setReg(rd, this.bus.read16(addr & ~1));
+        else if (halfword) this._setReg(rd, this._ldrHalf(addr));
         else return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
       } else {
         this._writeMem16(addr, this._reg(rd), 'arm-halfword-store', { rd, rn });
@@ -2364,7 +2516,7 @@
       const rb = (instr >>> 3) & 7;
       const rd = instr & 7;
       const addr = (this.regs[rb] + this.regs[ro]) >>> 0;
-      if (load) this._writeReg(rd, byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3), 'thumb-reg-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr), byte });
+      if (load) this._writeReg(rd, byte ? this.bus.read8(addr) : this._ldrWord(addr), 'thumb-reg-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr), byte });
       else if (byte) this._writeMem8(addr, this.regs[rd], 'thumb-reg-byte-store', { rd, rb, ro });
       else this._writeMem32(addr, this.regs[rd], 'thumb-reg-store', { rd, rb, ro });
     }
@@ -2382,9 +2534,9 @@
       } else if (!h) {
         this._writeReg(rd, signExtend8(this.bus.read8(addr)) >>> 0, 'thumb-ldsb', pc, { addrHex: tools.hex(addr) });
       } else if (!s) {
-        this._writeReg(rd, this.bus.read16(addr & ~1), 'thumb-ldrh', pc, { addrHex: tools.hex(addr) });
+        this._writeReg(rd, this._ldrHalf(addr), 'thumb-ldrh', pc, { addrHex: tools.hex(addr) });
       } else {
-        this._writeReg(rd, signExtend16(this.bus.read16(addr & ~1)) >>> 0, 'thumb-ldsh', pc, { addrHex: tools.hex(addr) });
+        this._writeReg(rd, this._ldrSignedHalf(addr), 'thumb-ldsh', pc, { addrHex: tools.hex(addr) });
       }
     }
 
@@ -2396,7 +2548,7 @@
       const rd = instr & 7;
       const off = byte ? imm : imm << 2;
       const addr = (this.regs[rb] + off) >>> 0;
-      if (load) this._writeReg(rd, byte ? this.bus.read8(addr) : this.bus.read32(addr & ~3), 'thumb-imm-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr), byte });
+      if (load) this._writeReg(rd, byte ? this.bus.read8(addr) : this._ldrWord(addr), 'thumb-imm-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr), byte });
       else if (byte) this._writeMem8(addr, this.regs[rd], 'thumb-imm-byte-store', { rd, rb });
       else this._writeMem32(addr, this.regs[rd], 'thumb-imm-store', { rd, rb });
     }
@@ -2407,7 +2559,7 @@
       const rb = (instr >>> 3) & 7;
       const rd = instr & 7;
       const addr = (this.regs[rb] + imm) >>> 0;
-      if (load) this._writeReg(rd, this.bus.read16(addr & ~1), 'thumb-halfword-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~1) });
+      if (load) this._writeReg(rd, this._ldrHalf(addr), 'thumb-halfword-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~1) });
       else this._writeMem16(addr, this.regs[rd], 'thumb-halfword-store', { rd, rb });
     }
 
@@ -2415,7 +2567,7 @@
       const load = !!(instr & 0x0800);
       const rd = (instr >>> 8) & 7;
       const addr = (this.regs[13] + ((instr & 0xff) << 2)) >>> 0;
-      if (load) this._writeReg(rd, this.bus.read32(addr & ~3), 'thumb-sp-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~3) });
+      if (load) this._writeReg(rd, this._ldrWord(addr), 'thumb-sp-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~3) });
       else this._writeMem32(addr, this.regs[rd], 'thumb-sp-store', { rd });
     }
 
@@ -2526,7 +2678,9 @@
         r2: this.regs[2] >>> 0,
       };
       try {
-        if (num === 0x02) call.result = this._biosHalt(pc);
+        if (num === 0x00) call.result = this._biosSoftReset();
+        else if (num === 0x01) call.result = this._biosRegisterRamReset();
+        else if (num === 0x02) call.result = this._biosHalt(pc);
         else if (num === 0x04) call.result = this._biosIntrWait();
         else if (num === 0x05) call.result = this._biosVBlankIntrWait();
         else if (num === 0x06) call.result = this._biosDiv(false);
@@ -2534,7 +2688,23 @@
         else if (num === 0x08) call.result = this._biosSqrt();
         else if (num === 0x0b) call.result = this._biosCpuSet();
         else if (num === 0x0c) call.result = this._biosCpuFastSet();
-        else call.result = 'stubbed';
+        else if (num === 0x10) call.result = this._biosBitUnPack();
+        else if (num === 0x11 || num === 0x12) call.result = this._biosLz77UnComp();
+        else if (num === 0x14 || num === 0x15) call.result = this._biosRlUnComp();
+        else if (num === 0x16 || num === 0x17) call.result = this._biosDiffUnFilter(false);
+        else if (num === 0x18) call.result = this._biosDiffUnFilter(true);
+        else if (num === 0x19) call.result = this._biosSoundBias();
+        else if (num === 0x1f) call.result = this._biosMidiKey2Freq();
+        else {
+          call.result = 'stubbed';
+          // A silently-stubbed BIOS call is a whole class of "mysteriously wrong on some
+          // ROMs" bugs (wrong pitches, missing unpacked data). Warn loudly, once per SWI.
+          if (!this._stubbedSwiWarned) this._stubbedSwiWarned = new Set();
+          if (!this._stubbedSwiWarned.has(num & 0xff)) {
+            this._stubbedSwiWarned.add(num & 0xff);
+            console.warn(`[GsfEngine] Unimplemented BIOS call SWI ${tools.hex(num, 2)} (${this._swiName(num)}) at ${tools.hex(pc)} — emulation may be incorrect for this ROM`);
+          }
+        }
       } catch (err) {
         call.result = 'error';
         call.error = err.message;
@@ -2579,38 +2749,65 @@
       return names[num] || `SWI_${tools.hex(num, 2)}`;
     }
 
+    // Halt wakes on ANY enabled IRQ (IE&IF, regardless of IME) the moment it fires.
+    // Advancing in scanline slices instead of whole frames means mid-frame timer IRQs —
+    // which timer-driven PCM/sequencer engines depend on — wake the CPU within ~1232
+    // cycles of firing instead of being coalesced once per frame at the VBlank boundary.
     _biosHalt(pc = this.regs[15] >>> 0) {
       this._recordHaltEvent('before', pc);
-      let frames = 0;
-      while (!this.bus.haltPendingIrq() && frames < 8) {
-        this.bus.advanceFrame('halt');
-        frames++;
+      const MAX_SLICES = GBA_TOTAL_SCANLINES * 8; // 8 frames worth
+      let slices = 0;
+      while (!this.bus.haltPendingIrq() && slices < MAX_SLICES) {
+        this.bus.advanceScanline();
+        slices++;
       }
       if (!this._inIrqDispatch) this._checkAndDispatchIrq();
       this._recordHaltEvent('after', pc);
-      return `halted ${frames} frame${frames === 1 ? '' : 's'}`;
+      return `halted ${slices} scanline${slices === 1 ? '' : 's'}`;
     }
 
     _biosIntrWait() {
-      const discardOld = !!this.regs[0];
-      const mask = this.regs[1] & 0xffff;
-      if (discardOld) this.bus.write16(0x04000202, mask);
-      let frames = 0;
-      while (!this.bus.haltPendingIrq(mask) && frames < 8) {
-        this.bus.advanceFrame('intrwait');
-        if (!this._inIrqDispatch) this._checkAndDispatchIrq();
-        frames++;
-      }
-      return `waited ${frames} frame${frames === 1 ? '' : 's'} for ${tools.hex(mask, 4)}`;
+      return this._intrWaitCore(!!this.regs[0], this.regs[1] & 0xffff, false);
     }
 
     _biosVBlankIntrWait() {
-      this.bus.write16(0x04000200, this.bus.read16(0x04000200) | IRQ_VBLANK);
-      this.bus.write16(0x04000208, 1);
-      this.bus.write16(0x04000202, IRQ_VBLANK);
-      this.bus.advanceFrame('vblankintrwait');
-      if (!this._inIrqDispatch) this._checkAndDispatchIrq();
-      return 'vblank';
+      // VBlankIntrWait is IntrWait(1, 1). Keep the historical IE|=VBLANK safety net for
+      // minimal rips whose init path never runs far enough to set IE itself.
+      return this._intrWaitCore(true, IRQ_VBLANK, true);
+    }
+
+    // Real BIOS IntrWait semantics: force IME=1, halt until an enabled IRQ fires, run the
+    // user ISR, then check the BIOS IRQ flags halfword at 0x03007FF8 — which the ISR is
+    // responsible for setting — against the wait mask, clearing satisfied bits before
+    // returning. Waiting on IF directly (the old behavior) could never be satisfied by a
+    // well-behaved ISR, since those acknowledge IF before returning.
+    _intrWaitCore(discardOld, mask, forceEnableVBlank) {
+      const BIOS_FLAGS = 0x03007ff8;
+      if (forceEnableVBlank) this.bus.write16(0x04000200, this.bus.read16(0x04000200) | IRQ_VBLANK);
+      this.bus.write16(0x04000208, 1); // BIOS IntrWait forcefully sets IME=1
+      if (discardOld) {
+        this.bus.write16(BIOS_FLAGS, this.bus.read16(BIOS_FLAGS) & ~mask);
+        this.bus.write16(0x04000202, mask); // acknowledge stale IF so we wait for a fresh edge
+      }
+      const MAX_SLICES = GBA_TOTAL_SCANLINES * 8;
+      let sawHwIrq = false;
+      for (let slices = 0; slices < MAX_SLICES; slices++) {
+        const flags = this.bus.read16(BIOS_FLAGS);
+        if (flags & mask) {
+          this.bus.write16(BIOS_FLAGS, flags & ~mask);
+          return `intrwait ${tools.hex(mask, 4)} satisfied after ${slices} scanlines`;
+        }
+        // Degenerate handlers (e.g. the GSF idle stub) never mirror IF into 0x03007FF8;
+        // once the requested IRQ has been observed on the wire, fall back to returning
+        // rather than spinning to the cap on every single wait call.
+        if (sawHwIrq && !this.bus.biosIrqFlagsWritten) {
+          return `intrwait ${tools.hex(mask, 4)} if-fallback after ${slices} scanlines`;
+        }
+        this.bus.advanceScanline();
+        if (this.bus.haltPendingIrq(mask)) sawHwIrq = true;
+        if (!this._inIrqDispatch) this._checkAndDispatchIrq();
+      }
+      return `intrwait ${tools.hex(mask, 4)} timeout`;
     }
 
     _checkAndDispatchIrq() {
@@ -2803,6 +3000,175 @@
       this.reason = savedReason;
 
       this._inIrqDispatch = false;
+    }
+
+    _biosSoftReset() {
+      // Read the return-address flag before clearing the BIOS work area that holds it.
+      const flag = this.bus.read8(0x03007ffa);
+      for (let off = 0x7e00; off < 0x8000; off++) this.bus.iwram[off] = 0;
+      this.bankedR13R14[MODE_SUPERVISOR].r13 = 0x03007fe0;
+      this.bankedR13R14[MODE_IRQ].r13 = 0x03007fa0;
+      this.r13_irq = 0x03007fa0;
+      this._switchCpuMode(MODE_SYSTEM);
+      this.cpsr = MODE_SYSTEM; // ARM state, IRQs enabled
+      for (let i = 0; i <= 12; i++) this.regs[i] = 0;
+      this.regs[13] = 0x03007f00;
+      this.regs[14] = 0;
+      this.regs[15] = flag ? 0x02000000 : 0x08000000;
+      this._recordBranch('bios-softreset', 0, this.regs[15]);
+      return `softreset -> ${tools.hex(this.regs[15])}`;
+    }
+
+    _biosRegisterRamReset() {
+      const flags = this.regs[0] & 0xff;
+      if (flags & 0x01) this.bus.ewram.fill(0);
+      if (flags & 0x02) { // IWRAM excluding the topmost 0x200 bytes (stacks/BIOS area)
+        for (let off = 0; off < 0x7e00; off++) this.bus.iwram[off] = 0;
+      }
+      if (flags & 0x04) this.bus.palette.fill(0);
+      if (flags & 0x08) this.bus.vram.fill(0);
+      if (flags & 0x10) this.bus.oam.fill(0);
+      if (flags & 0x40) { // sound registers
+        for (let addr = 0x04000060; addr < 0x040000b0; addr += 2) this.bus.write16(addr, 0);
+      }
+      return `ramreset flags=${tools.hex(flags, 2)}`;
+    }
+
+    // GBA LZ77 (type 0x10 header): u32 header with unpacked size in bits 8-31, then
+    // flag-byte-prefixed groups of 8 blocks; flag bit set = back-reference (length 3-18,
+    // displacement 1-4096), clear = literal byte. The Wram/Vram variants differ only in
+    // write granularity on hardware; our bus accepts byte writes everywhere.
+    _biosLz77UnComp() {
+      let src = this.regs[0] >>> 0;
+      let dst = this.regs[1] >>> 0;
+      const dst0 = dst;
+      let remaining = this.bus.read32(src & ~3) >>> 8;
+      src = (src + 4) >>> 0;
+      if (remaining > 0x400000) throw new Error(`unreasonable LZ77 size ${remaining}`);
+      while (remaining > 0) {
+        let flags = this.bus.read8(src); src = (src + 1) >>> 0;
+        for (let b = 0; b < 8 && remaining > 0; b++, flags = (flags << 1) & 0xff) {
+          if (flags & 0x80) {
+            const b0 = this.bus.read8(src); src = (src + 1) >>> 0;
+            const b1 = this.bus.read8(src); src = (src + 1) >>> 0;
+            let len = (b0 >>> 4) + 3;
+            const disp = (((b0 & 0xf) << 8) | b1) + 1;
+            while (len-- > 0 && remaining > 0) {
+              this._writeMem8(dst, this.bus.read8((dst - disp) >>> 0), 'bios-lz77');
+              dst = (dst + 1) >>> 0;
+              remaining--;
+            }
+          } else {
+            this._writeMem8(dst, this.bus.read8(src), 'bios-lz77');
+            src = (src + 1) >>> 0;
+            dst = (dst + 1) >>> 0;
+            remaining--;
+          }
+        }
+      }
+      return `lz77 ${tools.hex(this.regs[0])}->${tools.hex(dst0)} ${(dst - dst0) >>> 0} bytes`;
+    }
+
+    // GBA run-length (type 0x30 header): flag byte bit7 set = run of (len&0x7f)+3 copies
+    // of the next byte; clear = (len&0x7f)+1 raw bytes.
+    _biosRlUnComp() {
+      let src = this.regs[0] >>> 0;
+      let dst = this.regs[1] >>> 0;
+      const dst0 = dst;
+      let remaining = this.bus.read32(src & ~3) >>> 8;
+      src = (src + 4) >>> 0;
+      if (remaining > 0x400000) throw new Error(`unreasonable RL size ${remaining}`);
+      while (remaining > 0) {
+        const flag = this.bus.read8(src); src = (src + 1) >>> 0;
+        if (flag & 0x80) {
+          let len = (flag & 0x7f) + 3;
+          const value = this.bus.read8(src); src = (src + 1) >>> 0;
+          while (len-- > 0 && remaining > 0) { this._writeMem8(dst, value, 'bios-rl'); dst = (dst + 1) >>> 0; remaining--; }
+        } else {
+          let len = (flag & 0x7f) + 1;
+          while (len-- > 0 && remaining > 0) {
+            this._writeMem8(dst, this.bus.read8(src), 'bios-rl');
+            src = (src + 1) >>> 0; dst = (dst + 1) >>> 0; remaining--;
+          }
+        }
+      }
+      return `rl ${tools.hex(this.regs[0])}->${tools.hex(dst0)} ${(dst - dst0) >>> 0} bytes`;
+    }
+
+    _biosDiffUnFilter(is16bit) {
+      let src = this.regs[0] >>> 0;
+      let dst = this.regs[1] >>> 0;
+      const size = this.bus.read32(src & ~3) >>> 8;
+      src = (src + 4) >>> 0;
+      if (size > 0x400000) throw new Error(`unreasonable Diff size ${size}`);
+      let prev = 0;
+      if (is16bit) {
+        for (let i = 0; i + 2 <= size; i += 2) {
+          prev = (prev + this.bus.read16(src)) & 0xffff;
+          this._writeMem16(dst, prev, 'bios-diff16');
+          src = (src + 2) >>> 0; dst = (dst + 2) >>> 0;
+        }
+      } else {
+        for (let i = 0; i < size; i++) {
+          prev = (prev + this.bus.read8(src)) & 0xff;
+          this._writeMem8(dst, prev, 'bios-diff8');
+          src = (src + 1) >>> 0; dst = (dst + 1) >>> 0;
+        }
+      }
+      return `diff${is16bit ? 16 : 8} ${size} bytes`;
+    }
+
+    _biosBitUnPack() {
+      let src = this.regs[0] >>> 0;
+      let dst = this.regs[1] >>> 0;
+      const info = this.regs[2] >>> 0;
+      const srcLen = this.bus.read16(info);
+      const srcWidth = this.bus.read8(info + 2);
+      const dstWidth = this.bus.read8(info + 3);
+      const dataOffset = this.bus.read32(info + 4) >>> 0;
+      const ofs = dataOffset & 0x7fffffff;
+      const zeroFlag = !!(dataOffset & 0x80000000);
+      if (![1, 2, 4, 8].includes(srcWidth) || ![1, 2, 4, 8, 16, 32].includes(dstWidth)) {
+        throw new Error(`BitUnPack widths ${srcWidth}->${dstWidth} unsupported`);
+      }
+      let outBuf = 0;
+      let outBits = 0;
+      const srcMask = (1 << srcWidth) - 1;
+      for (let i = 0; i < srcLen; i++) {
+        const byte = this.bus.read8((src + i) >>> 0);
+        for (let bit = 0; bit < 8; bit += srcWidth) {
+          let unit = (byte >>> bit) & srcMask;
+          if (unit || zeroFlag) unit = (unit + ofs) >>> 0;
+          outBuf = (outBuf | (unit << outBits)) >>> 0;
+          outBits += dstWidth;
+          if (outBits >= 32) {
+            this._writeMem32(dst, outBuf, 'bios-bitunpack');
+            dst = (dst + 4) >>> 0;
+            outBuf = 0;
+            outBits = 0;
+          }
+        }
+      }
+      return `bitunpack ${srcLen} bytes ${srcWidth}->${dstWidth}`;
+    }
+
+    _biosSoundBias() {
+      this.bus.write16(0x04000088, this.regs[0] ? 0x200 : 0);
+      return `soundbias ${this.regs[0] ? 0x200 : 0}`;
+    }
+
+    // MidiKey2Freq: result = wave->freq / 2^((180 - midiKey - fineAdjust/256) / 12),
+    // where wave->freq is the u32 at WaveData+4 (frequency scaled for midi key 180).
+    // Matches the reference HLE used by mGBA.
+    _biosMidiKey2Freq() {
+      const wa = this.regs[0] >>> 0;
+      const mk = this.regs[1] & 0xff;
+      const fp = this.regs[2] & 0xff;
+      const baseFreq = this.bus.read32((wa + 4) >>> 0) >>> 0;
+      const result = baseFreq / Math.pow(2, (180 - mk - fp / 256) / 12);
+      const pc = (this.regs[15] - (this.cpsr & CPSR_T ? 2 : 4)) >>> 0;
+      this._writeReg(0, result >>> 0, 'bios-midikey2freq', pc);
+      return `midikey2freq(${tools.hex(wa)}, ${mk}, ${fp}) = ${result >>> 0}`;
     }
 
     _biosDiv(swapArgs = false) {

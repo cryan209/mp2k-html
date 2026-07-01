@@ -5374,12 +5374,24 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const mixVolSummary = mixVol.length
         ? ` | mixVol(${mixVol.length}):[${mixVol.map(e => `n${e.n}@vbl${e.vbl}:r4=${e.r4},r10=${e.r10},r11=${e.r11}`).join(' ')}]`
         : '';
+      const mixGate = memPeek?.mixGateTrace || [];
+      // Run-length encode consecutive identical (r0,r4) pairs — this PC is expected to be hit
+      // once per VBL, so 1792 near-identical entries would otherwise dominate the whole dump.
+      const mixGateRuns = [];
+      for (const e of mixGate) {
+        const last = mixGateRuns[mixGateRuns.length - 1];
+        if (last && last.r0 === e.r0 && last.r4 === e.r4) { last.count++; last.vblEnd = e.vbl; }
+        else mixGateRuns.push({ r0: e.r0, r4: e.r4, vblStart: e.vbl, vblEnd: e.vbl, count: 1 });
+      }
+      const mixGateSummary = mixGate.length
+        ? ` | mixGate(${mixGate.length} hits, ${mixGateRuns.length} runs):[${mixGateRuns.map(r => `r0=${r.r0},r4=${r.r4}@vbl${r.vblStart}-${r.vblEnd}(x${r.count})`).join(' ')}]`
+        : '';
       const fdt = memPeek?.fifoDmaTally;
       const fifoDmaTallySummary = fdt
         ? ` | fifoDmaTally:requested=${fdt.requested}/disabled=${fdt.disabled}/wrongTiming=${fdt.wrongTiming}/ran=${fdt.ran}/bufSize=${fdt.bufferSize}/base=[${(fdt.sourceBase || []).join(',')}]/zeroWords=${fdt.zeroWords}/nonZeroWords=${fdt.nonZeroWords}`
         : '';
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${mixVolSummary}${fifoDmaTallySummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${mixVolSummary}${mixGateSummary}${fifoDmaTallySummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

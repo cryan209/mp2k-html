@@ -1214,6 +1214,20 @@
           else { if (dlist.length < 16) dlist.push(drift); else { dlist.splice(8, 1); dlist.push(drift); } }
         }
       }
+      // Whole-render trace of the branch that decides whether to enter the ARM PCM mixer at
+      // all: LDRB r0,[r4+1] / TST r0,#8 / BEQ 0x03001254 (mixer entry) at PC 0x03001128-0x1130.
+      // mixVolTrace showed the mixer runs exactly once (VBL 1) across the whole 30s render, so
+      // this status byte's bit 3 must be set (skipping the branch) for essentially the entire
+      // rest of the render — this traces r0 (status byte) and r4 (track struct ptr) at the TST
+      // itself to see when/why that happens.
+      if (_snapPc === 0x0300112c) {
+        if (!this.bus.mixGateTrace) this.bus.mixGateTrace = [];
+        const t = this.bus.mixGateTrace;
+        if (t.length < 2000) {
+          const r = this.regs;
+          t.push({ vbl: this.bus.vblankCount, r0: tools.hex(r[0] >>> 0), r4: tools.hex(r[4] >>> 0) });
+        }
+      }
       // Sparse, whole-render sample of the mixer's per-track volume registers (r10=left,
       // r11=right, loaded just before 0x03001260) and pitch step (r4), taken at every Nth visit
       // to that PC (not gated to the first fn2 call like mixerLoopTrace). The earlier full trace
@@ -3160,6 +3174,7 @@
             },
             mixerPcmTrace: this.bus.mixerPcmTrace || [],
             mixVolTrace: this.bus.mixVolTrace || [],
+            mixGateTrace: this.bus.mixGateTrace || [],
             seqCalls: this.bus.seqCallSnaps || [],
             dmaDrift: this.bus.dmaDriftLog || [],
             // Find SoundInfo by searching for the fn2 pointer stored in IWRAM

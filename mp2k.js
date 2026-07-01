@@ -5263,10 +5263,17 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const dsTimerB = audio?.timers?.[audio?.sound?.directSoundB?.timer || 0];
       const timerDetail = dsTimerA ? ` tmA:${dsTimerA.ch}/${dsTimerA.reloadHex}/${dsTimerA.counterHex}/${dsTimerA.controlHex}/${dsTimerA.rateHz}Hz` : '';
       const timerDetailB = dsTimerB && dsTimerB !== dsTimerA ? ` tmB:${dsTimerB.ch}/${dsTimerB.reloadHex}/${dsTimerB.counterHex}/${dsTimerB.controlHex}/${dsTimerB.rateHz}Hz` : '';
+      // All 4 raw timer channels, regardless of which one the DirectSound-timer-select
+      // heuristic picked -- lets us catch cases where a game-logic timer (unrelated to
+      // audio) happens to be enabled and non-cascade, and gets mistaken for the real
+      // Direct Sound consumption timer.
+      const allTimersSummary = audio?.timers?.length
+        ? ` allTm:[${audio.timers.map(t => `t${t.ch}:en=${t.enabled?1:0}/casc=${t.cascade?1:0}/reload=${t.reloadHex}/ctrl=${t.controlHex}/${t.rateHz}Hz`).join(' ')}]`
+        : '';
       const reloadLog = audio?.timerReloadLog?.length ? ` reloadLog:[${audio.timerReloadLog.map(e => `${e.addr}=${e.value}@${e.cycles}(pc=${e.pc}/${e.thumb?'T':'A'}:${e.instrHex})`).join(' ')}]` : '';
       const soundDetail = audio ? ` snd:${audio.sound.soundCntHHex}/${audio.sound.soundBiasHex}` : '';
       const audioSummary = audio
-        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${soundDetail}${reloadLog}${fifoDma}${dmaSadLog}${bufferWrites}`
+        ? ` | timers:${audio.activeTimers.length ? audio.activeTimers.join(',') : '-'} dma:${audio.soundDma.length ? audio.soundDma.join(',') : '-'} xfer:${audio.dmaTransfers.length} fifoA:${audio.sound.directSoundA.fifoWrites}/${fifoA} fifoB:${audio.sound.directSoundB.fifoWrites}/${fifoB}${fifoFill}${timerDetail}${timerDetailB}${allTimersSummary}${soundDetail}${reloadLog}${fifoDma}${dmaSadLog}${bufferWrites}`
         : '';
       const irq = diagnostics?.interrupts;
       const irqTrace = irq?.dispatches?.length

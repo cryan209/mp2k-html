@@ -5375,6 +5375,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const codeDumpSummary = codeDump
         ? ` | lit24d0:${codeDump.lit24d0} fn1:[${(codeDump.fn1||[]).filter(e=>!e.endsWith(':0x0000')).join(' ')}] fn2:[${codeDump.fn2.join(' ')}] iwram:[${(codeDump.iwramFn||[]).join(' ')}] iwramDiv1:[${(codeDump.iwramDiv1||[]).join(' ')}] snaps:[${(codeDump.regSnaps||[]).map(s=>`${s.label}@${s.pc}(c=${s.cycles} r0=${s.r0} r1=${s.r1} r5=${s.r5} lr=${s.lr})`).join(' ')}]`
         : '';
+      const dmaReloadCode = audio?.dmaReloadCodeDump;
+      const dmaReloadCodeSummary = dmaReloadCode
+        ? ` | dmaReloadCode:[${(dmaReloadCode.code||[]).join(' ')}]`
+        : '';
       // Seq/fn2 snapshot summary
       const memPeek = diagnostics?.memPeek;
       const fmtSnap = (s) => s ? `n${s.n} r0=${s.r0} r1=${s.r1} r2=${s.r2} r3=${s.r3} r4=${s.r4} r5=${s.r5} m0=[${(s.memR0||[]).join(',')}] m1=[${(s.memR1||[]).join(',')}] m2=[${(s.memR2||[]).join(',')}]${s.memR5 ? ` m5=[${s.memR5.join(',')}]` : ''}` : '';
@@ -5498,7 +5502,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
         ? ` | fifoDmaTally:requested=${fdt.requested}/disabled=${fdt.disabled}/wrongTiming=${fdt.wrongTiming}/ran=${fdt.ran}/bufSize=${fdt.bufferSize}/base=[${(fdt.sourceBase || []).join(',')}]/zeroWords=${fdt.zeroWords}/nonZeroWords=${fdt.nonZeroWords}`
         : '';
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${mixVolSummary}${mixCmpSummary}${spWatchSummary}${spStoreOperandsSummary}${literalAt081dce2cSummary}${literalWatchSummary}${mixGateSummary}${cpSummary}${romMixDumpSummary}${romPrologueDumpSummary}${romSpStoreDumpSummary}${irqPcTraceSummary}${handlerVblSpanSummary}${stackCrashWatchSummary}${dmaStackOverlapsSummary}${fifoDmaTallySummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${dmaReloadCodeSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${mixVolSummary}${mixCmpSummary}${spWatchSummary}${spStoreOperandsSummary}${literalAt081dce2cSummary}${literalWatchSummary}${mixGateSummary}${cpSummary}${romMixDumpSummary}${romPrologueDumpSummary}${romSpStoreDumpSummary}${irqPcTraceSummary}${handlerVblSpanSummary}${stackCrashWatchSummary}${dmaStackOverlapsSummary}${fifoDmaTallySummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

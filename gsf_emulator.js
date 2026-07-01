@@ -3872,6 +3872,20 @@
             lit24d0: readWord(0x081c24d0),
             regSnaps: this.bus.timerRegSnaps || [] };
         })(),
+        // Disassemble the branch that gates the DMA1/DMA2 SAD-reload block (0x081dd78c) --
+        // dmaReloadBranch shows it's taken exactly every 14 VBlanks instead of the 7 the
+        // 1584-byte buffer geometry implies, so we need the raw instructions/condition to
+        // see what counter or flag is actually being tested at the branch site.
+        dmaReloadCodeDump: (() => {
+          const readThumb = addr => {
+            const b0 = this.bus.read8(addr), b1 = this.bus.read8(addr+1);
+            return tools.hex((b1 << 8) | b0, 4);
+          };
+          const code = [];
+          for (let i = 0; i < 0x60; i += 2)
+            code.push(`${tools.hex(0x081dd750+i)}:${readThumb(0x081dd750+i)}`);
+          return { code };
+        })(),
         dma: dmas,
         dmaTransfers: this.bus.dmaTransfers.slice(-16),
         activeTimers: timers.filter(t => t.enabled).map(t => t.ch),

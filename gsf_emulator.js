@@ -1192,6 +1192,11 @@
       this.pcHits = new Map();
       this.recentPcs = [];
       this.branches = [];
+      // Fixed-size ring buffer of the last N executed PCs, updated unconditionally
+      // (even in fastMode, unlike recentPcs/branches) so a pc-out-of-range crash
+      // still has a cheap trail of what ran right before it.
+      this._pcRing = new Int32Array(32).fill(-1);
+      this._pcRingIdx = 0;
       this.regWrites = Array.from({ length: 16 }, (_, reg) => ({
         reg,
         regName: `r${reg}`,
@@ -1424,6 +1429,7 @@
       }
       if (this.cpsr & CPSR_T) {
         const pc = this.regs[15] >>> 0;
+        this._pushPcRing(pc);
         if (!this._canFetch(pc, 2)) return;
         this._tracePc(pc);
         const instr = this.bus.read16(pc);
@@ -1434,6 +1440,7 @@
         return;
       }
       const pc = this.regs[15] >>> 0;
+      this._pushPcRing(pc);
       if (!this._canFetch(pc, 4)) return;
       this._tracePc(pc);
       const instr = this.bus.read32(pc);
@@ -1471,13 +1478,30 @@
       };
     }
 
+    _pushPcRing(pc) {
+      this._pcRing[this._pcRingIdx] = pc | 0;
+      this._pcRingIdx = (this._pcRingIdx + 1) % this._pcRing.length;
+    }
+
+    _pcRingTrail() {
+      // Oldest-to-newest order, skipping unfilled (-1) slots.
+      const out = [];
+      for (let i = 0; i < this._pcRing.length; i++) {
+        const v = this._pcRing[(this._pcRingIdx + i) % this._pcRing.length];
+        if (v !== -1) out.push(tools.hex(v >>> 0));
+      }
+      return out;
+    }
+
     _canFetch(pc, bytes) {
       const r = this.bus.executableRegion(pc);
       if (r && r.off + bytes <= r.data.length) return true;
       const source = this.branches.slice().reverse().find(branch => branch.kind !== 'fetch-fault') || null;
       this.halted = true;
       const sourceText = source ? ` from ${source.kind} ${source.pcHex}->${source.targetHex}` : '';
-      this.reason = `pc-out-of-range fetch ${bytes * 8}-bit at ${tools.hex(pc)}${sourceText}`;
+      const trail = this._pcRingTrail();
+      const trailText = trail.length ? ` trail:[${trail.join(',')}]` : '';
+      this.reason = `pc-out-of-range fetch ${bytes * 8}-bit at ${tools.hex(pc)}${sourceText}${trailText}`;
       if (!this.fastMode) this.branches.push({
         kind: 'fetch-fault',
         pc: pc >>> 0,

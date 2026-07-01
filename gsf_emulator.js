@@ -2681,15 +2681,21 @@
         if (num === 0x00) call.result = this._biosSoftReset();
         else if (num === 0x01) call.result = this._biosRegisterRamReset();
         else if (num === 0x02) call.result = this._biosHalt(pc);
+        // Stop (0x03) powers down more than Halt (only keypad/SIO/cart IRQs wake it),
+        // but for headless GSF playback waking on any enabled IRQ is the right shape.
+        else if (num === 0x03) call.result = this._biosHalt(pc);
         else if (num === 0x04) call.result = this._biosIntrWait();
         else if (num === 0x05) call.result = this._biosVBlankIntrWait();
         else if (num === 0x06) call.result = this._biosDiv(false);
         else if (num === 0x07) call.result = this._biosDiv(true);
         else if (num === 0x08) call.result = this._biosSqrt();
+        else if (num === 0x09) call.result = this._biosArcTan();
+        else if (num === 0x0a) call.result = this._biosArcTan2();
         else if (num === 0x0b) call.result = this._biosCpuSet();
         else if (num === 0x0c) call.result = this._biosCpuFastSet();
         else if (num === 0x10) call.result = this._biosBitUnPack();
         else if (num === 0x11 || num === 0x12) call.result = this._biosLz77UnComp();
+        else if (num === 0x13) call.result = this._biosHuffUnComp();
         else if (num === 0x14 || num === 0x15) call.result = this._biosRlUnComp();
         else if (num === 0x16 || num === 0x17) call.result = this._biosDiffUnFilter(false);
         else if (num === 0x18) call.result = this._biosDiffUnFilter(true);
@@ -3150,6 +3156,82 @@
         }
       }
       return `bitunpack ${srcLen} bytes ${srcWidth}->${dstWidth}`;
+    }
+
+    // GBA Huffman (type 0x20 header): a byte-coded binary tree followed by a bitstream
+    // read MSB-first from 32-bit words. Non-leaf node byte: bits 0-5 = offset (children
+    // live at (nodeAddr & ~1) + offset*2 + 2, node0 then node1), bit 7 = node0-is-data,
+    // bit 6 = node1-is-data. Decoded units (4 or 8 bits) pack LSB-first into 32-bit
+    // output words, which is why the BIOS variant is VRAM-safe.
+    _biosHuffUnComp() {
+      const src = this.regs[0] >>> 0;
+      let dst = this.regs[1] >>> 0;
+      const dst0 = dst;
+      const header = this.bus.read32(src & ~3) >>> 0;
+      const dataBits = header & 0xf;
+      if (dataBits !== 4 && dataBits !== 8) throw new Error(`Huffman data size ${dataBits} unsupported`);
+      let remaining = header >>> 8;
+      if (remaining > 0x400000) throw new Error(`unreasonable Huffman size ${remaining}`);
+      const treeSizeByte = this.bus.read8((src + 4) >>> 0);
+      const rootAddr = (src + 5) >>> 0;
+      let bitsAddr = (src + 4 + (treeSizeByte + 1) * 2) >>> 0;
+      const dataMask = (1 << dataBits) - 1;
+      let nodeAddr = rootAddr;
+      let bitWord = 0;
+      let bitsLeft = 0;
+      let outBuf = 0;
+      let outBits = 0;
+      let guard = remaining * 64 + 1024; // no valid stream needs more bits than this
+      while (remaining > 0) {
+        if (--guard < 0) throw new Error('Huffman stream did not terminate');
+        if (!bitsLeft) {
+          bitWord = this.bus.read32(bitsAddr & ~3) >>> 0;
+          bitsAddr = (bitsAddr + 4) >>> 0;
+          bitsLeft = 32;
+        }
+        const bit = bitWord >>> 31;
+        bitWord = (bitWord << 1) >>> 0;
+        bitsLeft--;
+        const node = this.bus.read8(nodeAddr);
+        const childAddr = (((nodeAddr & ~1) + ((node & 0x3f) * 2) + 2) + bit) >>> 0;
+        const isData = bit ? (node & 0x40) : (node & 0x80);
+        if (isData) {
+          outBuf = (outBuf | ((this.bus.read8(childAddr) & dataMask) << outBits)) >>> 0;
+          outBits += dataBits;
+          if (outBits >= 32) {
+            this._writeMem32(dst, outBuf, 'bios-huffman');
+            dst = (dst + 4) >>> 0;
+            remaining = Math.max(0, remaining - 4);
+            outBuf = 0;
+            outBits = 0;
+          }
+          nodeAddr = rootAddr;
+        } else {
+          nodeAddr = childAddr;
+        }
+      }
+      return `huffman ${tools.hex(src)}->${tools.hex(dst0)} ${(dst - dst0) >>> 0} bytes`;
+    }
+
+    // ArcTan: r0 = tan as 1.1.14 signed fixpoint; returns the angle scaled so that
+    // 0x4000 = +pi/2 (result range roughly 0xC000..0x4000).
+    _biosArcTan() {
+      const x = (this.regs[0] << 16) >> 16;
+      const result = Math.round(Math.atan(x / 16384) * (0x8000 / Math.PI)) & 0xffff;
+      const pc = (this.regs[15] - (this.cpsr & CPSR_T ? 2 : 4)) >>> 0;
+      this._writeReg(0, result, 'bios-arctan', pc);
+      return `arctan(${x}) = ${tools.hex(result, 4)}`;
+    }
+
+    // ArcTan2: r0 = x, r1 = y (16-bit signed); returns the full-circle angle as an
+    // unsigned 16-bit value where 0x8000 = pi.
+    _biosArcTan2() {
+      const x = (this.regs[0] << 16) >> 16;
+      const y = (this.regs[1] << 16) >> 16;
+      const result = Math.round(Math.atan2(y, x) * (0x10000 / (2 * Math.PI))) & 0xffff;
+      const pc = (this.regs[15] - (this.cpsr & CPSR_T ? 2 : 4)) >>> 0;
+      this._writeReg(0, result, 'bios-arctan2', pc);
+      return `arctan2(${x}, ${y}) = ${tools.hex(result, 4)}`;
     }
 
     _biosSoundBias() {

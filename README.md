@@ -33,6 +33,10 @@ window.gs1Debug.gsfReport()
 window.gs1Debug.gsfDiagnostics()
 ```
 
+## Tests
+
+`npm test` runs the emulator smoke tests (`test/smoke.js`) under macOS's bundled JavaScriptCore (`jsc`) — no Node.js required. They cover the memory map, DMA timing modes, timer/FIFO behavior, unaligned loads, and the BIOS HLE calls.
+
 ## Files
 
 - `index.html` - the player UI.

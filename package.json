@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Standalone HTML MP2k music player for GBA ROMs and GSF dumps.",
   "scripts": {
-    "start": "python3 -m http.server 8000"
+    "start": "python3 -m http.server 8000",
+    "test": "/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc test/smoke.js"
   }
 }

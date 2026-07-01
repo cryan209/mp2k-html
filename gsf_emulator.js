@@ -341,11 +341,31 @@
       }
       r.data[r.off] = value;
       this._logIoWrite(addr, loggedValue, 1);
-      // PSG trigger: writing the high byte of SOUND1CNT_X (ch0) or SOUND2CNT_H (ch1) with
-      // bit7 set (= bit15 of the 16-bit register, the Trigger/Initial bit) restarts the
-      // channel — relatch frequency, duty/envelope/volume, length, and (ch0) sweep.
-      if ((addr === 0x04000065 || addr === 0x0400006d) && (value & 0x80)) {
-        this._psgTrigger(addr === 0x04000065 ? 0 : 1);
+      // PSG frequency register (SOUND1CNT_X for ch0, SOUND2CNT_H for ch1): the live frequency
+      // takes effect immediately on every write, not just on Trigger — games commonly rewrite
+      // just the frequency bits (no Trigger bit) to do real-time pitch bends/vibrato without
+      // clicking. If we only relatched frequency at Trigger, those glides would be silently
+      // dropped and the channel would just hold its last triggered pitch. bit7 (=bit15 of the
+      // 16-bit register, Trigger/Initial) additionally restarts duty/envelope/volume/length/sweep.
+      if (addr === 0x04000065 || addr === 0x0400006d) {
+        const ch = addr === 0x04000065 ? 0 : 1;
+        const st = this.psg[ch];
+        const prevFreq = st.freqRaw;
+        const wasEnabled = st.enabled;
+        const prevTriggerCycles = st.triggerCycles;
+        this._psgUpdateFreq(ch);
+        if (value & 0x80) {
+          const stats = this.psgTriggerStats[ch];
+          stats.total++;
+          if (wasEnabled && st.freqRaw === prevFreq) stats.sameFreq++;
+          if (wasEnabled) {
+            const gap = this.cycles - prevTriggerCycles;
+            stats.minGapCycles = Math.min(stats.minGapCycles, gap);
+            stats.sumGapCycles += gap;
+            stats.gapSamples++;
+          }
+          this._psgTrigger(ch);
+        }
       }
       // Log writes to TM0CNT_L/H (0x04000100-0x04000103) for debugging timer misconfiguration
       if (addr >= 0x04000100 && addr <= 0x04000103 && this.timerReloadLog.length < 64) {
@@ -531,25 +551,25 @@
       if (after <= 16 && (before > 16 || before <= 1)) this._requestSoundFifoDma(channel);
     }
 
-    // PSG trigger ("Initial"/restart): relatch frequency, duty/envelope/volume, length, and
-    // (Square1 only) sweep from the channel's control registers. Called when the high byte of
-    // SOUND1CNT_X (ch 0) or SOUND2CNT_H (ch 1) is written with the trigger bit set.
-    _psgTrigger(ch) {
+    // Live PSG frequency/length-enable update: called on EVERY write to SOUND1CNT_X (ch0) or
+    // SOUND2CNT_H (ch1), regardless of the Trigger bit. On real hardware the frequency
+    // register feeds the channel's timer reload continuously — a write without Trigger takes
+    // effect immediately as a pitch bend, it doesn't just get cached for the next note.
+    _psgUpdateFreq(ch) {
       const st = this.psg[ch];
       const freqReg = ch === 0 ? this.read16(0x04000064) : this.read16(0x0400006c);
-      const envReg = ch === 0 ? this.read16(0x04000062) : this.read16(0x04000068);
-      const stats = this.psgTriggerStats[ch];
-      stats.total++;
-      if (st.enabled && (freqReg & 0x7ff) === st.freqRaw) stats.sameFreq++;
-      if (st.enabled) {
-        const gap = this.cycles - st.triggerCycles;
-        stats.minGapCycles = Math.min(stats.minGapCycles, gap);
-        stats.sumGapCycles += gap;
-        stats.gapSamples++;
-      }
       st.freqRaw = freqReg & 0x7ff;
       st.freqCur = st.freqRaw;
       st.lengthEnabled = !!(freqReg & 0x4000);
+    }
+
+    // PSG trigger ("Initial"/restart): relatch duty/envelope/volume, length, and (Square1
+    // only) sweep from the channel's control registers, and reset phase. Called when the high
+    // byte of SOUND1CNT_X (ch 0) or SOUND2CNT_H (ch 1) is written with the trigger bit set —
+    // frequency itself is already current via _psgUpdateFreq, called unconditionally above.
+    _psgTrigger(ch) {
+      const st = this.psg[ch];
+      const envReg = ch === 0 ? this.read16(0x04000062) : this.read16(0x04000068);
       const dutyBits = (envReg >>> 6) & 3;
       st.dutyFraction = [0.125, 0.25, 0.5, 0.75][dutyBits];
       st.volInit = (envReg >>> 12) & 0xf;

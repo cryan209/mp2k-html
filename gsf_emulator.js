@@ -1342,6 +1342,7 @@
 
     requestIrq(mask, reason = 'irq') {
       this._setIrqFlags(mask);
+      if (this.fastMode) return;
       this.irqEvents.push({
         mask: mask & 0xffff,
         maskHex: tools.hex(mask & 0xffff, 4),
@@ -1541,6 +1542,11 @@
     }
 
     step() {
+      // Normal streaming playback spends most of its time inside IRQ mixer handlers,
+      // so keep the hot instruction path free of diagnostics and avoid a function call
+      // for the overwhelmingly common "IRQs are masked or none are pending" case.
+      if (this.fastMode && !this.diagnosticProbes) return this._stepFast();
+
       // Real hardware delivers IRQs asynchronously the instant IE&IF&IME allows it,
       // regardless of what the CPU is doing. _checkAndDispatchIrq was previously only
       // wired into the Halt/IntrWait/VBlankIntrWait BIOS stubs, so a VBlank firing while
@@ -1571,6 +1577,39 @@
       this._tracePc(pc);
       const instr = this.bus.read32(pc);
       this.bus.openBus = instr >>> 0; // prefetch latch for open-bus reads
+      this.regs[15] = (pc + 4) >>> 0;
+      this.instructions++;
+      if (!this._conditionPassed(instr >>> 28)) {
+        this._chargeCycles(pc, false);
+        return;
+      }
+      this._execArm(instr, pc);
+      this._chargeCycles(pc, false);
+    }
+
+    _stepFast() {
+      if (!(this.cpsr & 0x80)
+          && (this._irqDepth || 0) < 4
+          && (this.bus.io[0x208] & 1)
+          && ((this.bus.io[0x200] | (this.bus.io[0x201] << 8))
+              & (this.bus.io[0x202] | (this.bus.io[0x203] << 8)) & 0x3fff)) {
+        this._checkAndDispatchIrq();
+      }
+      if (this.cpsr & CPSR_T) {
+        const pc = this.regs[15] >>> 0;
+        if (!this._canFetch(pc, 2)) return;
+        const instr = this.bus.read16(pc);
+        this.bus.openBus = ((instr << 16) | instr) >>> 0;
+        this.regs[15] = (pc + 2) >>> 0;
+        this.instructions++;
+        this._execThumb(instr, pc);
+        this._chargeCycles(pc, true);
+        return;
+      }
+      const pc = this.regs[15] >>> 0;
+      if (!this._canFetch(pc, 4)) return;
+      const instr = this.bus.read32(pc);
+      this.bus.openBus = instr >>> 0;
       this.regs[15] = (pc + 4) >>> 0;
       this.instructions++;
       if (!this._conditionPassed(instr >>> 28)) {
@@ -2914,6 +2953,7 @@
     }
 
     _recordIrqDispatch(entry) {
+      if (this.fastMode && !this.diagnosticProbes) return;
       this.irqDispatches.push({
         cycles: this.bus.cycles,
         pcHex: tools.hex(this.regs[15]),
@@ -2945,6 +2985,7 @@
     }
 
     _recordIrqCall(kind, pc, target) {
+      if (this.fastMode && !this.diagnosticProbes) return;
       if (!this._inIrqDispatch) return;
       const _callEntry = {
         kind,
@@ -2959,6 +3000,7 @@
     }
 
     _recordHaltEvent(phase, pc) {
+      if (this.fastMode && !this.diagnosticProbes) return;
       const dma = ch => {
         const base = 0x040000b0 + ch * 12;
         return {
@@ -3042,7 +3084,7 @@
       // discards its in-progress register state (via the restore below) while
       // leaving its memory writes in place, corrupting engine state.
       const MAX_HANDLER_STEPS = this.fastMode ? 65536 : 500000;
-      const traceThisDispatch = (pending & IRQ_VBLANK) !== 0;
+      const traceThisDispatch = this.diagnosticProbes && (pending & IRQ_VBLANK) !== 0;
       if (traceThisDispatch) this.bus._beginIrqPcTrace();
       const vblBeforeHandler = this.bus.vblankCount;
       let count = 0;

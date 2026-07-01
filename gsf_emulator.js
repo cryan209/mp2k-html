@@ -2519,6 +2519,7 @@
       const MAX_HANDLER_STEPS = this.fastMode ? (isGsfWrapperIrq ? 65536 : 2048) : 500000;
       const traceThisDispatch = (pending & IRQ_VBLANK) !== 0;
       if (traceThisDispatch) this.bus._beginIrqPcTrace();
+      const vblBeforeHandler = this.bus.vblankCount;
       let count = 0;
       while (count < MAX_HANDLER_STEPS) {
         if (this.regs[15] === SENTINEL || this.halted) break;
@@ -2527,8 +2528,20 @@
         count++;
       }
       if (traceThisDispatch) this.bus._endIrqPcTrace();
+      const result = this.regs[15] === SENTINEL ? 'returned' : this.halted ? 'halted' : 'capped';
+      if (traceThisDispatch) {
+        // How many *additional* real VBlanks fired while this handler was still
+        // running (their IF bit gets coalesced into the one already-pending
+        // VBLANK bit and never gets its own dispatch) -- tests the hypothesis
+        // that the handler's own runtime frequently overruns a frame boundary.
+        const vblSpan = this.bus.vblankCount - vblBeforeHandler;
+        this.bus._handlerVblSpanTotal = (this.bus._handlerVblSpanTotal || 0) + vblSpan;
+        this.bus._handlerVblSpanCount = (this.bus._handlerVblSpanCount || 0) + 1;
+        this.bus._handlerVblSpanMax = Math.max(this.bus._handlerVblSpanMax || 0, vblSpan);
+        this.bus._handlerCappedCount = (this.bus._handlerCappedCount || 0) + (result === 'capped' ? 1 : 0);
+      }
       this._recordIrqDispatch({
-        result: this.regs[15] === SENTINEL ? 'returned' : this.halted ? 'halted' : 'capped',
+        result,
         pending,
         handlerAddr,
         steps: count,
@@ -3295,6 +3308,12 @@
             // (0x081dcdc6) against the last one that didn't, to find the divergence point.
             lastHitIrqPcTrace: this.bus.lastHitIrqPcTrace || [],
             lastMissIrqPcTrace: this.bus.lastMissIrqPcTrace || [],
+            handlerVblSpan: {
+              total: this.bus._handlerVblSpanTotal || 0,
+              count: this.bus._handlerVblSpanCount || 0,
+              max: this.bus._handlerVblSpanMax || 0,
+              capped: this.bus._handlerCappedCount || 0,
+            },
             fifoDmaTally: {
               requested: this.bus.fifoDmaReqTally || 0,
               disabled: this.bus.fifoDmaReqDisabled || 0,

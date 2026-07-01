@@ -5338,7 +5338,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const firstCalls = diagnostics?.interrupts?.firstCalls || [];
       const dmaDrift = memPeek?.dmaDrift || [];
       const dmaDriftSummary = dmaDrift.length
-        ? ` driftDma1[${dmaDrift.map(d => `n${d.n}@vbl${d.vbl}:r5=${d.r5}/sad1=${d.dmaSad1}/drift=${d.driftBytes}`).join(' ')}]`
+        ? ` driftDma1(bufSize=${dmaDrift[0]?.bufSize ?? '?'})[${dmaDrift.map(d => `n${d.n}@vbl${d.vbl}:r5=${d.r5}/sad1=${d.dmaSad1}/drift=${d.driftBytes}`).join(' ')}]`
         : '';
       const seqSnapSummary = (seqSnaps.length || fn2Snaps.length || stepSt)
         ? ` | stepStats:first=${stepSt?.firstActiveVbl}@${stepSt?.count}vbls/${stepSt?.activeVbls}active firstCalls:[${firstCalls.slice(0,8).map(c=>`${c.kind}@${c.pcHex}->${c.targetHex}`).join(' ')}] fn2[${fn2Snaps.map(fmtSnap).join('|')}] seq[${seqSnaps.map(fmtSnap).join('|')}]${dmaDriftSummary}`
@@ -5372,7 +5372,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
         : '';
       const fdt = memPeek?.fifoDmaTally;
       const fifoDmaTallySummary = fdt
-        ? ` | fifoDmaTally:requested=${fdt.requested}/disabled=${fdt.disabled}/wrongTiming=${fdt.wrongTiming}/ran=${fdt.ran}/bufSize=${fdt.bufferSize}/base=[${(fdt.sourceBase || []).join(',')}]`
+        ? ` | fifoDmaTally:requested=${fdt.requested}/disabled=${fdt.disabled}/wrongTiming=${fdt.wrongTiming}/ran=${fdt.ran}/bufSize=${fdt.bufferSize}/base=[${(fdt.sourceBase || []).join(',')}]/zeroWords=${fdt.zeroWords}/nonZeroWords=${fdt.nonZeroWords}`
         : '';
       setStatus(cpu
         ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${fifoDmaTallySummary}`

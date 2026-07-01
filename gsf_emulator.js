@@ -928,6 +928,12 @@
         const word = this.read32(wordAddr);
         words.push(word >>> 0);
         this._writeSoundFifo(dst, word);
+        // Direct, render-wide tally of how often the DMA source word is actually zero at the
+        // moment it's read, regardless of what it held a moment earlier or later — this is the
+        // most direct test of whether the mix buffer is genuinely silent when DMA drains it
+        // (a producer/consumer timing issue) versus DMA reading the wrong memory entirely.
+        if (word === 0) this.fifoDmaZeroWords = (this.fifoDmaZeroWords || 0) + 1;
+        else this.fifoDmaNonZeroWords = (this.fifoDmaNonZeroWords || 0) + 1;
       }
       const entry = {
         ch,
@@ -1191,14 +1197,17 @@
         if (n <= 4) list.push(snap);
         else { if (list.length < 8) list.push(snap); else { list.splice(4, 1); list.push(snap); } }
         // Track how far DMA1's live FIFO read pointer (dmaSourceLatch[1]) has drifted from the
-        // mixer's current write buffer (r5) at this same VBL, mod the 32KB IWRAM mirror. If the
-        // game never re-arms DMA1SAD per-VBL, this should grow without bound instead of staying
-        // pinned near the small per-VBL ring distance.
+        // mixer's current write buffer (r5) at this same VBL. Use the real mix-buffer size
+        // (dsFifoBufferSize, derived from the DMA1SAD/DMA2SAD gap) once known, instead of the
+        // old hardcoded 32KB IWRAM-mirror modulus — that produced a misleading near-max sawtooth
+        // once the DMA source pointer got confined to its actual small buffer window, since a
+        // small backward offset mod 32KB looks like a huge forward one.
         if (isFn2) {
           const writeAddr = r[5] >>> 0;
           const readAddr = this.bus.dmaSourceLatch[1] >>> 0;
-          const driftBytes = (readAddr - writeAddr) & 0x7fff;
-          const drift = { n, vbl: this.bus.vblankCount, r5: tools.hex(writeAddr), dmaSad1: tools.hex(readAddr), driftBytes };
+          const bufSize = this.bus.dsFifoBufferSize || 0x8000;
+          const driftBytes = ((readAddr - writeAddr) % bufSize + bufSize) % bufSize;
+          const drift = { n, vbl: this.bus.vblankCount, r5: tools.hex(writeAddr), dmaSad1: tools.hex(readAddr), driftBytes, bufSize };
           if (!this.bus.dmaDriftLog) this.bus.dmaDriftLog = [];
           const dlist = this.bus.dmaDriftLog;
           if (n <= 8) dlist.push(drift);
@@ -3127,6 +3136,8 @@
               ran: this.bus.fifoDmaRunTally || 0,
               bufferSize: this.bus.dsFifoBufferSize || 0,
               sourceBase: (this.bus.dmaSourceBase || []).map(v => tools.hex(v)),
+              zeroWords: this.bus.fifoDmaZeroWords || 0,
+              nonZeroWords: this.bus.fifoDmaNonZeroWords || 0,
             },
             mixerPcmTrace: this.bus.mixerPcmTrace || [],
             seqCalls: this.bus.seqCallSnaps || [],

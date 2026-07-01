@@ -2512,11 +2512,13 @@
         this.cpsr &= ~CPSR_T;
       }
 
-      // Run handler until it returns to sentinel or halts. The GSF wrapper's
-      // VBlank thunk can run generated mixer code in IWRAM, so give it more
-      // room during fast rendering than generic IRQ trampolines.
-      const isGsfWrapperIrq = handlerAddr >= 0x08ffff80 && handlerAddr < 0x09000000;
-      const MAX_HANDLER_STEPS = this.fastMode ? (isGsfWrapperIrq ? 65536 : 2048) : 500000;
+      // Run handler until it returns to sentinel or halts. A mixer/IRQ handler
+      // can legitimately need tens of thousands of steps (e.g. a full m4a
+      // channel-mixing pass), regardless of where the ROM places it -- capping
+      // this too low forcibly truncates the handler mid-execution, which
+      // discards its in-progress register state (via the restore below) while
+      // leaving its memory writes in place, corrupting engine state.
+      const MAX_HANDLER_STEPS = this.fastMode ? 65536 : 500000;
       const traceThisDispatch = (pending & IRQ_VBLANK) !== 0;
       if (traceThisDispatch) this.bus._beginIrqPcTrace();
       const vblBeforeHandler = this.bus.vblankCount;

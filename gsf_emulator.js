@@ -212,6 +212,7 @@
       this.psgTriggerStats = [0, 1].map(() => ({
         total: 0, sameFreq: 0, minGapCycles: Infinity, sumGapCycles: 0, gapSamples: 0,
       }));
+      this.psgFreqLog = [[], []]; // melodic-contour trace, first 24 + last 24 per channel
       // PSG Wave (ch 2): plays back the 32x4-bit sample table at WAVE_RAM (0x04000090-9F)
       // at the programmed frequency, scaled by a fixed output-level select (no envelope).
       this.psgWave = {
@@ -376,7 +377,8 @@
         const wasEnabled = st.enabled;
         const prevTriggerCycles = st.triggerCycles;
         this._psgUpdateFreq(ch);
-        if (value & 0x80) {
+        const isTrigger = !!(value & 0x80);
+        if (isTrigger) {
           const stats = this.psgTriggerStats[ch];
           stats.total++;
           if (wasEnabled && st.freqRaw === prevFreq) stats.sameFreq++;
@@ -387,6 +389,18 @@
             stats.gapSamples++;
           }
           this._psgTrigger(ch);
+        }
+        // Melodic-contour trace: actual pitch (raw + Hz) at every trigger, so we can eyeball
+        // whether the sequence of notes makes musical sense or is erratic/wrong, independent
+        // of envelope/timing which we've already verified separately. First 24 + last 24 per
+        // channel, kept as a simple rolling window.
+        if (isTrigger || st.freqRaw !== prevFreq) {
+          const freqHz = Math.round(131072 / (2048 - st.freqRaw));
+          const entry = { ch, freqRaw: st.freqRaw, freqHz, trigger: isTrigger, cycles: this.cycles };
+          if (!this.psgFreqLog) this.psgFreqLog = [[], []];
+          const log = this.psgFreqLog[ch];
+          if (log.length < 24) log.push(entry);
+          else { if (log.length < 48) log.push(entry); else { log.splice(24, 1); log.push(entry); } }
         }
       }
       // Wave (SOUND3CNT_X high byte, 0x75): same live-frequency + Trigger split as Square.
@@ -2686,6 +2700,7 @@
       this.bus.psgTriggerStats = [0, 1].map(() => ({
         total: 0, sameFreq: 0, minGapCycles: Infinity, sumGapCycles: 0, gapSamples: 0,
       }));
+      this.bus.psgFreqLog = [[], []];
       this.bus.psgWave = {
         enabled: false, triggerCycles: 0, lastSampleCycles: 0,
         freqRaw: 0, freqCur: 0,
@@ -2908,6 +2923,7 @@
           })(),
           noiseTriggerLog: (this.bus.noiseTriggerLog || []).slice(),
           noiseTriggerCount: this.bus._noiseTriggerCount || 0,
+          psgFreqLog: (this.bus.psgFreqLog || [[], []]).map(log => log.slice()),
           // Raw SOUNDCNT_L so we can confirm whether ch0/ch1's L/R routing bits (8,9,12,13)
           // are actually what's making pcmA vs pcmB differ, rather than guessing.
           soundCntLHex: tools.hex(this.bus.read16(0x04000080), 4),

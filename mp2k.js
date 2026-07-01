@@ -5343,7 +5343,11 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       // ds:X->Y is the same-index Direct-Sound-only (pre-PSG) value at the click — if it barely
       // moves while the mixed from/to swings hard, the discontinuity is being introduced by PSG
       // mixing rather than already present in the DMA-fed Direct Sound stream.
-      const fmtClickEvent = e => `${e.ms}ms/c${e.cycles}:${e.from}->${e.to}(Δ${e.delta}/avg${e.localAvg})${e.dsFrom !== undefined ? ` ds:${e.dsFrom}->${e.dsTo}` : ''}`;
+      // toTrace: exactly which memory write produced the spike byte (addr/writeInfo), the cycle
+      // DMA actually read it (readCycles), and how long it sat in the FIFO before being played
+      // (lagCycles) — a huge/negative/mismatched lag or 'underrun-repeat' both point at a
+      // producer/consumer race rather than the source data itself being wrong.
+      const fmtClickEvent = e => `${e.ms}ms/c${e.cycles}:${e.from}->${e.to}(Δ${e.delta}/avg${e.localAvg})${e.dsFrom !== undefined ? ` ds:${e.dsFrom}->${e.dsTo}` : ''}${e.toTrace ? ` src:${e.toTrace.addr !== null ? '0x' + (e.toTrace.addr >>> 0).toString(16) : '?'}/${e.toTrace.writeInfo}/lag${e.toTrace.lagCycles ?? '?'}` : ''}`;
       const clickSummary = clicksA
         ? ` clicksA(${clicksA.count}):buckets[${clicksA.buckets.join(',')}] first[${clicksA.events.slice(0, 6).map(fmtClickEvent).join(' ')}]${clicksB ? ` clicksB(${clicksB.count}):buckets[${clicksB.buckets.join(',')}] first[${clicksB.events.slice(0, 10).map(fmtClickEvent).join(' ')}]` : ''}`
         : '';

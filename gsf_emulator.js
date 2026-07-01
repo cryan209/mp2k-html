@@ -197,10 +197,17 @@
       this.fastMode = false;
       this.fifoQueueA = [];
       this.fifoQueueB = [];
+      // Parallel to fifoQueueA/B: per-byte provenance (source addr + who last wrote it + the
+      // cycle DMA actually read it), pushed/shifted in lockstep. Lets us trace a specific played
+      // sample back to exactly which memory write produced it and how stale that read was.
+      this.fifoQueueMetaA = [];
+      this.fifoQueueMetaB = [];
       this.fifoSamplesA = []; // signed 8-bit DAC values consumed from FIFO A
       this.fifoSamplesB = []; // signed 8-bit DAC values consumed from FIFO B
       this.dsOnlySamplesA = []; // fifoSamplesA before PSG gets mixed in, for isolating which part is wrong
       this.dsOnlySamplesB = [];
+      this.dmaSrcTraceA = []; // per-sample provenance, parallel to dsOnlySamplesA/B
+      this.dmaSrcTraceB = [];
       this.fifoLastA = 0;
       this.fifoLastB = 0;
       this.fifoFillBytesA = 0;
@@ -658,18 +665,30 @@
 
     _consumeFifoChannel(channel) {
       const queue = channel === 'A' ? this.fifoQueueA : this.fifoQueueB;
+      const metaQueue = channel === 'A' ? this.fifoQueueMetaA : this.fifoQueueMetaB;
       const before = queue.length;
+      const wasEmpty = !queue.length;
       const value = queue.length ? queue.shift() : (channel === 'A' ? this.fifoLastA : this.fifoLastB);
+      const meta = wasEmpty ? null : metaQueue.shift();
       const after = queue.length;
       const mixed = this._mixPsgInto(channel, value);
+      const trace = {
+        addr: meta ? meta.addr : null,
+        writeInfo: meta ? meta.writeInfo : (wasEmpty ? 'underrun-repeat' : '-'),
+        readCycles: meta ? meta.readCycles : null,
+        consumeCycles: this.cycles,
+        lagCycles: meta ? this.cycles - meta.readCycles : null,
+      };
       if (channel === 'A') {
         this.fifoLastA = value;
         this.fifoSamplesA.push(mixed);
         this.dsOnlySamplesA.push(value);
+        this.dmaSrcTraceA.push(trace);
       } else {
         this.fifoLastB = value;
         this.fifoSamplesB.push(mixed);
         this.dsOnlySamplesB.push(value);
+        this.dmaSrcTraceB.push(trace);
       }
       if (after <= 16 && (before > 16 || before <= 1)) this._requestSoundFifoDma(channel);
     }
@@ -993,7 +1012,7 @@
         const wordAddr = (src + i * 4) >>> 0;
         const word = this.read32(wordAddr);
         words.push(word >>> 0);
-        this._writeSoundFifo(dst, word);
+        this._writeSoundFifo(dst, word, wordAddr);
         // Direct, render-wide tally of how often the DMA source word is actually zero at the
         // moment it's read, regardless of what it held a moment earlier or later — this is the
         // most direct test of whether the mix buffer is genuinely silent when DMA drains it
@@ -1043,10 +1062,23 @@
       return (src + bytes) >>> 0;
     }
 
-    _writeSoundFifo(fifoAddr, word) {
+    _writeSoundFifo(fifoAddr, word, sourceAddr) {
       const channel = fifoAddr === 0x040000a0 ? 'A' : fifoAddr === 0x040000a4 ? 'B' : null;
       if (channel) {
-        for (let i = 0; i < 4; i++) this._pushSoundFifoByte(channel, (word >>> (i * 8)) & 0xff);
+        for (let i = 0; i < 4; i++) {
+          let meta = null;
+          if (sourceAddr !== undefined) {
+            const byteAddr = (sourceAddr + i) >>> 0;
+            const canonical = this.canonicalAddr(byteAddr);
+            const write = this.soundBufferWriteMap.get(canonical & ~3);
+            meta = {
+              addr: byteAddr,
+              readCycles: this.cycles,
+              writeInfo: write ? `${write.valueHex}@${write.pcHex}/${write.kind}` : '-',
+            };
+          }
+          this._pushSoundFifoByte(channel, (word >>> (i * 8)) & 0xff, meta);
+        }
         if (channel === 'A') this.fifoFillBytesA += 4;
         else this.fifoFillBytesB += 4;
       }
@@ -1055,19 +1087,23 @@
       }
     }
 
-    _pushSoundFifoByte(channel, value) {
+    _pushSoundFifoByte(channel, value, meta = null) {
       const queue = channel === 'A' ? this.fifoQueueA : channel === 'B' ? this.fifoQueueB : null;
+      const metaQueue = channel === 'A' ? this.fifoQueueMetaA : channel === 'B' ? this.fifoQueueMetaB : null;
       if (!queue || queue.length >= 32) return;
       const byte = value & 0xff;
       queue.push(byte < 128 ? byte : byte - 256);
+      metaQueue.push(meta);
     }
 
     _resetSoundFifo(channel) {
       if (channel === 'A') {
         this.fifoQueueA = [];
+        this.fifoQueueMetaA = [];
         this.fifoLastA = 0;
       } else if (channel === 'B') {
         this.fifoQueueB = [];
+        this.fifoQueueMetaB = [];
         this.fifoLastB = 0;
       }
     }
@@ -3097,7 +3133,10 @@
     // earlier mixing stage (e.g. Direct-Sound-only, before PSG gets added). Attaching its
     // before/after values to each event lets us tell whether a discontinuity already existed
     // at that stage or was introduced later (e.g. by PSG mixing), without a second full scan.
-    _detectClicks(samples, playbackRate, companion = null) {
+    // trace (optional): parallel array of per-sample DMA provenance (see dmaSrcTraceA/B) —
+    // attaches the exact source address, last writer, and read-to-play lag to each event so a
+    // click can be traced back to precisely which memory write produced the offending byte.
+    _detectClicks(samples, playbackRate, companion = null, trace = null) {
       const n = samples.length;
       if (n < 3) return { count: 0, events: [], buckets: [] };
       const WINDOW = 32;
@@ -3124,6 +3163,7 @@
               dsTo: companion && companion.length > i ? companion[i] : undefined,
               delta,
               localAvg: Math.round(localAvg),
+              toTrace: trace && trace.length > i ? trace[i] : undefined,
             });
           }
         }
@@ -3155,10 +3195,14 @@
       this.bus._seqCallCount = 0;
       this.bus.fifoQueueA = [];
       this.bus.fifoQueueB = [];
+      this.bus.fifoQueueMetaA = [];
+      this.bus.fifoQueueMetaB = [];
       this.bus.fifoSamplesA = [];
       this.bus.fifoSamplesB = [];
       this.bus.dsOnlySamplesA = [];
       this.bus.dsOnlySamplesB = [];
+      this.bus.dmaSrcTraceA = [];
+      this.bus.dmaSrcTraceB = [];
       this.bus.fifoLastA = 0;
       this.bus.fifoLastB = 0;
       this.bus.fifoFillBytesA = 0;
@@ -3262,8 +3306,8 @@
         sourceSamples,
         sampleStatsA: this._sampleStats(renderSamplesA),
         sampleStatsB: this._sampleStats(renderSamplesB),
-        clicksA: this._detectClicks(renderSamplesA, playbackRate, this.bus.dsOnlySamplesA),
-        clicksB: this._detectClicks(renderSamplesB, playbackRate, this.bus.dsOnlySamplesB),
+        clicksA: this._detectClicks(renderSamplesA, playbackRate, this.bus.dsOnlySamplesA, this.bus.dmaSrcTraceA),
+        clicksB: this._detectClicks(renderSamplesB, playbackRate, this.bus.dsOnlySamplesB, this.bus.dmaSrcTraceB),
         // Direct Sound BEFORE PSG gets mixed in — isolates whether Direct Sound alone is
         // correct on this track, since everything inspected so far has been the final mix.
         dsOnlyStatsA: this._sampleStats(this.bus.dsOnlySamplesA),

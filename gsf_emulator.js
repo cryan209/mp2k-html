@@ -175,6 +175,10 @@
       // 0x03007FF8. Well-behaved ISRs mirror IF there for IntrWait; degenerate GSF stubs
       // never do, and IntrWait falls back to raw IE&IF semantics for those.
       this.biosIrqFlagsWritten = false;
+      // Whether the ROM has ever written DISPSTAT. Hardware gates the VBlank IRQ on
+      // DISPSTAT bit 3; ROMs that configure it get hardware behavior, ROMs that never
+      // touch it keep the historical always-fire fallback.
+      this.dispstatWritten = false;
       this._vblankFiredThisFrame = false;
       this.vblankCount = 0;
       this.irqEvents = [];
@@ -364,6 +368,8 @@
       // Track whether the ROM's ISR ever mirrors IF into the BIOS IRQ flags halfword at
       // 0x03007FF8 (any IWRAM mirror) — IntrWait HLE keys its wait condition off this.
       if (r.id === 'iwram' && (r.off === 0x7ff8 || r.off === 0x7ff9)) this.biosIrqFlagsWritten = true;
+      // Track whether the ROM ever configures DISPSTAT — see dispstatWritten above.
+      if (addr === 0x04000004 || addr === 0x04000005) this.dispstatWritten = true;
       // Tally writes to the PSG channel registers (Square1/2, Wave, Noise), fastMode-safe.
       // We don't synthesize PSG output at all right now (no oscillators, no mixing into the
       // output buffer) — if a game's active instruments are PSG-typed rather than Direct
@@ -1235,10 +1241,17 @@
 
     _enterVBlank(reason = 'frame') {
       this.vblankCount++;
-      // VCOUNT is now computed dynamically from frameCycles; no need to write it
-      this.write16(0x04000004, this.read16(0x04000004) | 0x0001);
-      this.requestIrq(IRQ_VBLANK, `vblank:${reason}`);
-      // VBlank-timed DMA (start timing 1) fires once per frame at VBlank entry.
+      // VCOUNT and the DISPSTAT status bits are computed dynamically from frameCycles
+      // on read — no register write needed here (and writing DISPSTAT here would spoil
+      // the dispstatWritten "has the ROM configured it" tracking).
+      // DISPSTAT bit 3 gates the VBlank IRQ on hardware. ROMs that never touch DISPSTAT
+      // keep the historical always-fire fallback so degenerate rips stay alive.
+      if ((this.io[4] & 0x08) || !this.dispstatWritten) {
+        this.requestIrq(IRQ_VBLANK, `vblank:${reason}`);
+      } else {
+        this.vblankIrqSuppressed = (this.vblankIrqSuppressed || 0) + 1;
+      }
+      // VBlank-timed DMA (start timing 1) fires once per frame regardless of the IRQ.
       this._runTimedDma(1, 'vblank');
     }
 
@@ -1493,7 +1506,7 @@
       // undelivered until the next such call -- silently dropping/delaying the VBlank
       // ISR (and the sound engine tick it drives) on every frame the CPU didn't happen
       // to halt, which is why playback tempo dragged once real audio was flowing again.
-      if (!this._inIrqDispatch) this._checkAndDispatchIrq();
+      this._checkAndDispatchIrq(); // internally gated on CPSR.I, IME, and nesting depth
       this.bus.debugPc = this.regs[15] >>> 0;
       this.bus.debugThumb = !!(this.cpsr & CPSR_T);
       // Capture registers at key BL call sites and first entry into BL target region
@@ -2767,7 +2780,7 @@
         this.bus.advanceScanline();
         slices++;
       }
-      if (!this._inIrqDispatch) this._checkAndDispatchIrq();
+      this._checkAndDispatchIrq(); // internally gated on CPSR.I, IME, and nesting depth
       this._recordHaltEvent('after', pc);
       return `halted ${slices} scanline${slices === 1 ? '' : 's'}`;
     }
@@ -2811,12 +2824,17 @@
         }
         this.bus.advanceScanline();
         if (this.bus.haltPendingIrq(mask)) sawHwIrq = true;
-        if (!this._inIrqDispatch) this._checkAndDispatchIrq();
+        this._checkAndDispatchIrq(); // internally gated on CPSR.I, IME, and nesting depth
       }
       return `intrwait ${tools.hex(mask, 4)} timeout`;
     }
 
     _checkAndDispatchIrq() {
+      // Hardware IRQ gate: CPSR.I masks IRQs. Handlers enter with I=1; if one clears it
+      // (mp2k's SoundMain does, so a long mix can be preempted by the next VBlank) the
+      // pending IRQ nests exactly like hardware. Depth-capped as a runaway guard.
+      if (this.cpsr & 0x80) return;
+      if ((this._irqDepth || 0) >= 4) return;
       if (!(this.bus.io[0x208] & 1)) return;
       const ie  = this.bus.io[0x200] | (this.bus.io[0x201] << 8);
       const ifl = this.bus.io[0x202] | (this.bus.io[0x203] << 8);
@@ -2923,6 +2941,7 @@
     }
 
     _runIrqHandler(handlerAddr, pending) {
+      this._irqDepth = (this._irqDepth || 0) + 1;
       this._inIrqDispatch = true;
 
       // Save full CPU state
@@ -2941,6 +2960,22 @@
       this.spsr = savedCpsr; // so LDMFD {PC}^ or SUBS PC, LR, #4 restores CPSR correctly
       // CPSR: IRQ mode (0x12), I=1 (disable further IRQs), ARM
       this.cpsr = (savedCpsr & 0xffffff00) | 0x92;
+
+      // Replicate the BIOS IRQ wrapper's stack frame: STMFD sp!,{r0-r3,r12,lr} then
+      // MOV r0,#0x04000000 before jumping through [0x03007FFC]. Handlers commonly use
+      // the r0 = IO-base convention (e.g. LDRH r1,[r0,#0x200] to read IE), and some
+      // inspect the stacked lr; without the frame both saw stale interrupted-context
+      // values. The stacked lr is the interrupted PC + 4, as hardware IRQ entry sets it.
+      const spBeforePush = this.regs[13] >>> 0;
+      const frameBase = (spBeforePush - 24) >>> 0;
+      const frame = [savedRegs[0], savedRegs[1], savedRegs[2], savedRegs[3], savedRegs[12], (savedRegs[15] + 4) >>> 0];
+      for (let i = 0; i < 6; i++) {
+        const slotAddr = (frameBase + i * 4) >>> 0;
+        this.bus.write32(slotAddr, frame[i] >>> 0);
+        this.bus.noteMemoryWrite(slotAddr, frame[i] >>> 0, 4, { kind: 'bios-irq-frame' });
+      }
+      this.regs[13] = frameBase;
+      this.regs[0] = 0x04000000;
 
       // Sentinel: when handler returns here, we stop. 0x204 is in unmapped BIOS space.
       const SENTINEL = 0x00000204;
@@ -2991,11 +3026,18 @@
         reason: this.halted ? this.reason : '',
       });
 
-      // Save updated IRQ stack pointer (handler may have adjusted it). Read from the
-      // bank rather than this.regs[13] directly -- if the handler switched CPSR mode
-      // internally and hasn't switched back by the time it hits the sentinel, the
-      // live regs[13] would belong to whatever mode is currently active, not IRQ.
-      this.r13_irq = (this.cpsr & 0x1f) === MODE_IRQ ? this.regs[13] : this.bankedR13R14[MODE_IRQ].r13;
+      // Save updated IRQ stack pointer. On a clean return the BIOS wrapper would pop
+      // its 6-word frame (LDMFD sp!,{r0-r3,r12,lr}), so add 24 back to whatever the
+      // (balanced) handler left; read from the bank rather than this.regs[13] directly
+      // in case the handler is sitting in a different CPSR mode at the sentinel. On a
+      // capped/halted run, reset to the pre-dispatch value rather than trust a pointer
+      // the handler never got to unwind.
+      if (result === 'returned') {
+        const spAtReturn = (this.cpsr & 0x1f) === MODE_IRQ ? this.regs[13] : this.bankedR13R14[MODE_IRQ].r13;
+        this.r13_irq = (spAtReturn + 24) >>> 0;
+      } else {
+        this.r13_irq = spBeforePush;
+      }
       this.bankedR13R14[MODE_IRQ].r13 = this.r13_irq;
 
       // Restore CPU state to pre-IRQ values
@@ -3005,7 +3047,8 @@
       this.halted = savedHalted;
       this.reason = savedReason;
 
-      this._inIrqDispatch = false;
+      this._irqDepth--;
+      this._inIrqDispatch = this._irqDepth > 0;
     }
 
     _biosSoftReset() {

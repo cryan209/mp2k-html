@@ -256,4 +256,106 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   check(slept > 2000 && slept < 20000, 'Stop waits like Halt and wakes on timer IRQ (slept ' + slept + ')');
 })();
 
+// --- 13. DISPSTAT bit3 gates the VBlank IRQ (with never-written fallback) ---
+(function () {
+  var busA = freshBus();
+  busA.write16(0x04000004, 0x0000); // ROM configures DISPSTAT, VBlank IRQ disabled
+  busA.stepCycles(197200);
+  check((busA.read16(0x04000202) & 1) === 0, 'VBlank IRQ suppressed when DISPSTAT bit3 clear');
+  var busB = freshBus();
+  busB.write16(0x04000004, 0x0008); // VBlank IRQ enabled
+  busB.stepCycles(197200);
+  check((busB.read16(0x04000202) & 1) === 1, 'VBlank IRQ fires when DISPSTAT bit3 set');
+  var busC = freshBus(); // ROM never touches DISPSTAT -> fallback keeps firing
+  busC.stepCycles(197200);
+  check((busC.read16(0x04000202) & 1) === 1, 'VBlank IRQ fallback for DISPSTAT-agnostic ROMs');
+})();
+
+// --- 14. BIOS IRQ wrapper frame: r0 = IO base, stacked lr, IRQ sp restored ---
+(function () {
+  var memory = E.createMemoryImage();
+  var view = new DataView(memory.rom.buffer);
+  // main: r1 = 0x02000000, then spin
+  view.setUint32(0, 0xe3a01402, true); // mov r1, #0x02000000
+  view.setUint32(4, 0xeafffffe, true); // b .
+  // handler at 0x100: store r0 and stacked lr, ack IF, return
+  var h = 0x100;
+  view.setUint32(h + 0x00, 0xe5810000, true); // str r0, [r1]        (r0 should be 0x04000000)
+  view.setUint32(h + 0x04, 0xe59d2014, true); // ldr r2, [sp, #20]   (stacked lr)
+  view.setUint32(h + 0x08, 0xe5812004, true); // str r2, [r1, #4]
+  view.setUint32(h + 0x0c, 0xe2803c02, true); // add r3, r0, #0x200
+  view.setUint32(h + 0x10, 0xe3e02000, true); // mvn r2, #0
+  view.setUint32(h + 0x14, 0xe1c320b2, true); // strh r2, [r3, #2]   (ack all IF)
+  view.setUint32(h + 0x18, 0xe12fff1e, true); // bx lr
+  var bus = new E.GbaMemoryBus(memory);
+  var cpu = new E.Arm7Cpu(bus, 0x08000000);
+  bus.write32(0x03007ffc, 0x08000100);
+  bus.write16(0x04000200, 0x0001); // IE: vblank
+  bus.write16(0x04000208, 1);      // IME
+  cpu.run(40000); // ~25k ROM-ARM instructions crosses VBlank at 197120 cycles
+  check((bus.read32(0x02000000) >>> 0) === 0x04000000, 'handler saw r0 = 0x04000000 (IO base)');
+  check((bus.read32(0x02000004) >>> 0) === 0x08000008, 'stacked lr = interrupted PC + 4 (got 0x' + (bus.read32(0x02000004) >>> 0).toString(16) + ')');
+  check((cpu.r13_irq >>> 0) === 0x03007fa0, 'IRQ sp restored after BIOS frame pop (got 0x' + (cpu.r13_irq >>> 0).toString(16) + ')');
+  check((cpu.regs[1] >>> 0) === 0x02000000, 'interrupted registers restored after handler');
+})();
+
+// --- 15. CPSR.I gates dispatch; handler clearing I allows nested IRQs ---
+(function () {
+  var memory = E.createMemoryImage();
+  var view = new DataView(memory.rom.buffer);
+  view.setUint32(0, 0xeafffffe, true); // main: b .
+  // Handler: first (timer) entry marks 0x02000010, acks timer IF, clears CPSR.I and
+  // busy-waits until a nested (VBlank) entry marks 0x02000014.
+  var h = 0x100;
+  view.setUint32(h + 0x00, 0xe59f1064, true); // ldr r1, [pc, #0x64]  ; =0x02000010 (lit at h+0x6c)
+  view.setUint32(h + 0x04, 0xe5912000, true); // ldr r2, [r1]
+  view.setUint32(h + 0x08, 0xe3520000, true); // cmp r2, #0
+  view.setUint32(h + 0x0c, 0x1a00000b, true); // bne nested (h+0x40)
+  view.setUint32(h + 0x10, 0xe3a02001, true); // mov r2, #1
+  view.setUint32(h + 0x14, 0xe5812000, true); // str r2, [r1]         ; outer-entry flag
+  view.setUint32(h + 0x18, 0xe2803c02, true); // add r3, r0, #0x200
+  view.setUint32(h + 0x1c, 0xe3a02008, true); // mov r2, #8
+  view.setUint32(h + 0x20, 0xe1c320b2, true); // strh r2, [r3, #2]    ; ack timer0 IF
+  view.setUint32(h + 0x24, 0xe10f2000, true); // mrs r2, cpsr
+  view.setUint32(h + 0x28, 0xe3c22080, true); // bic r2, r2, #0x80
+  view.setUint32(h + 0x2c, 0xe121f002, true); // msr cpsr_c, r2       ; clear I -> allow nesting
+  view.setUint32(h + 0x30, 0xe5912004, true); // wait: ldr r2, [r1, #4]
+  view.setUint32(h + 0x34, 0xe3520000, true); // cmp r2, #0
+  view.setUint32(h + 0x38, 0x0afffffc, true); // beq wait
+  view.setUint32(h + 0x3c, 0xe12fff1e, true); // bx lr
+  view.setUint32(h + 0x40, 0xe3a02001, true); // nested: mov r2, #1
+  view.setUint32(h + 0x44, 0xe5812004, true); // str r2, [r1, #4]     ; nested-entry flag
+  view.setUint32(h + 0x48, 0xe2803c02, true); // add r3, r0, #0x200
+  view.setUint32(h + 0x4c, 0xe3a02001, true); // mov r2, #1
+  view.setUint32(h + 0x50, 0xe1c320b2, true); // strh r2, [r3, #2]    ; ack vblank IF
+  view.setUint32(h + 0x54, 0xe12fff1e, true); // bx lr
+  view.setUint32(h + 0x6c, 0x02000010, true); // literal
+  var bus = new E.GbaMemoryBus(memory);
+  var cpu = new E.Arm7Cpu(bus, 0x08000000);
+  bus.write32(0x03007ffc, 0x08000100);
+  bus.write16(0x04000200, 0x0009); // IE: vblank | timer0
+  bus.write16(0x04000208, 1);
+  bus.write16(0x04000100, 0x10000 - 3000); // timer0 fires early in the frame
+  bus.write16(0x04000102, 0x00c0);
+  cpu.run(120000);
+  check(bus.read32(0x02000010) === 1, 'outer (timer) handler entered');
+  check(bus.read32(0x02000014) === 1, 'VBlank IRQ nested into handler after it cleared CPSR.I');
+  check(!cpu.halted, 'CPU healthy after nested dispatch (' + cpu.reason + ')');
+  // CPSR.I set blocks dispatch entirely
+  var memB = E.createMemoryImage();
+  new DataView(memB.rom.buffer).setUint32(0, 0xe1a00000, true); // nop (mov r0, r0)
+  var busB = new E.GbaMemoryBus(memB);
+  var cpuB = new E.Arm7Cpu(busB, 0x08000000);
+  busB.write32(0x03007ffc, 0x08000100);
+  busB.write16(0x04000200, 1);
+  busB.write16(0x04000208, 1);
+  busB.write16(0x04000202, 0); busB.requestIrq(1, 'test');
+  cpuB.cpsr |= 0x80; // I set
+  cpuB.step();
+  check(cpuB.irqDispatches.length === 0, 'CPSR.I=1 blocks IRQ dispatch');
+  cpuB.cpsr &= ~0x80;
+  cpuB.step();
+  check(cpuB.irqDispatches.length > 0, 'clearing CPSR.I allows dispatch');
+})();
+
 print(failures === 0 ? 'ALL PASS' : failures + ' FAILURES');

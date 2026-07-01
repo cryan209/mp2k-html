@@ -3227,6 +3227,12 @@
               c1110: this.bus._cp1110 || 0,
             },
             romAt03001000: (() => { const ws=[]; for(let i=0;i<12;i++) ws.push(tools.hex(this.bus.read16((0x03001000+i*2)>>>0),4)); return ws; })(),
+            // [sp+0x14] (r0 in the CMP r1,r0 gate) drops from 0xDE at VBL 1 to a stuck 0x3C for
+            // every VBL after — dump the prologue between the thumb entry (0x03000f61) and where
+            // our trace starts (0x03000fee) to find whatever writes that stack slot, since it's
+            // not set by an external caller (0x03000fee is mid-function, reached by straight-line
+            // execution from 0x03000f61, not a fresh call).
+            romAt03000f60: (() => { const ws=[]; for(let i=0;i<0x50;i++) ws.push(tools.hex(this.bus.read16((0x03000f60+i*2)>>>0),4)); return ws; })(),
             seqCalls: this.bus.seqCallSnaps || [],
             dmaDrift: this.bus.dmaDriftLog || [],
             // Find SoundInfo by searching for the fn2 pointer stored in IWRAM

@@ -1194,6 +1194,14 @@
     }
 
     step() {
+      // Real hardware delivers IRQs asynchronously the instant IE&IF&IME allows it,
+      // regardless of what the CPU is doing. _checkAndDispatchIrq was previously only
+      // wired into the Halt/IntrWait/VBlankIntrWait BIOS stubs, so a VBlank firing while
+      // the CPU was busy running ordinary code (not blocked in one of those SWIs) sat
+      // undelivered until the next such call -- silently dropping/delaying the VBlank
+      // ISR (and the sound engine tick it drives) on every frame the CPU didn't happen
+      // to halt, which is why playback tempo dragged once real audio was flowing again.
+      if (!this._inIrqDispatch) this._checkAndDispatchIrq();
       this.bus.debugPc = this.regs[15] >>> 0;
       this.bus.debugThumb = !!(this.cpsr & CPSR_T);
       // Capture registers at key BL call sites and first entry into BL target region

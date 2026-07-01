@@ -3250,6 +3250,10 @@
             // not set by an external caller (0x03000fee is mid-function, reached by straight-line
             // execution from 0x03000f61, not a fresh call).
             romAt03000f60: (() => { const ws=[]; for(let i=0;i<0x50;i++) ws.push(tools.hex(this.bus.read16((0x03000f60+i*2)>>>0),4)); return ws; })(),
+            // spWatch shows PC 0x081dcde6 (thumb-sp-store) pins [sp+0x14] at the constant 0x3C
+            // every VBL after the first. Dump the surrounding Thumb code to decode that store and
+            // find where the 0x3C comes from (immediate vs. a register that should vary).
+            romAt081dcdc0: (() => { const ws=[]; for(let i=0;i<0x30;i++) ws.push(tools.hex(this.bus.read16((0x081dcdc0+i*2)>>>0),4)); return ws; })(),
             seqCalls: this.bus.seqCallSnaps || [],
             dmaDrift: this.bus.dmaDriftLog || [],
             // Find SoundInfo by searching for the fn2 pointer stored in IWRAM

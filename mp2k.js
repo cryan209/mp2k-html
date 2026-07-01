@@ -5386,12 +5386,16 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const mixGateSummary = mixGate.length
         ? ` | mixGate(${mixGate.length} hits, ${mixGateRuns.length} runs):[${mixGateRuns.map(r => `r0=${r.r0},r4=${r.r4}@vbl${r.vblStart}-${r.vblEnd}(x${r.count})`).join(' ')}]`
         : '';
+      const cp = memPeek?.mixCheckpoints;
+      const cpSummary = cp
+        ? ` | mixCheckpoints:fee=${cp.fee}/1000=${cp.c1000}/101c=${cp.c101c}/1056=${cp.c1056}/10fc=${cp.c10fc}/1110=${cp.c1110}`
+        : '';
       const fdt = memPeek?.fifoDmaTally;
       const fifoDmaTallySummary = fdt
         ? ` | fifoDmaTally:requested=${fdt.requested}/disabled=${fdt.disabled}/wrongTiming=${fdt.wrongTiming}/ran=${fdt.ran}/bufSize=${fdt.bufferSize}/base=[${(fdt.sourceBase || []).join(',')}]/zeroWords=${fdt.zeroWords}/nonZeroWords=${fdt.nonZeroWords}`
         : '';
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${mixVolSummary}${mixGateSummary}${fifoDmaTallySummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${mixVolSummary}${mixGateSummary}${cpSummary}${fifoDmaTallySummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

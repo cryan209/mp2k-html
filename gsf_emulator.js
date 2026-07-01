@@ -1214,6 +1214,16 @@
           else { if (dlist.length < 16) dlist.push(drift); else { dlist.splice(8, 1); dlist.push(drift); } }
         }
       }
+      // Cheap whole-render counter (no per-entry allocation) for how many times PC hits each of
+      // several checkpoints along the thumb-stub-to-ARM-mixer path, to binary-search where
+      // execution diverges after VBL 1 (mixGateTrace showed 0x300112c is hit only twice, both
+      // during VBL 1, out of 1792 VBLs).
+      if (_snapPc === 0x03000fee) this.bus._cpFee = (this.bus._cpFee || 0) + 1;
+      else if (_snapPc === 0x03001000) this.bus._cp1000 = (this.bus._cp1000 || 0) + 1;
+      else if (_snapPc === 0x0300101c) this.bus._cp101c = (this.bus._cp101c || 0) + 1;
+      else if (_snapPc === 0x03001056) this.bus._cp1056 = (this.bus._cp1056 || 0) + 1;
+      else if (_snapPc === 0x030010fc) this.bus._cp10fc = (this.bus._cp10fc || 0) + 1;
+      else if (_snapPc === 0x03001110) this.bus._cp1110 = (this.bus._cp1110 || 0) + 1;
       // Whole-render trace of the branch that decides whether to enter the ARM PCM mixer at
       // all: LDRB r0,[r4+1] / TST r0,#8 / BEQ 0x03001254 (mixer entry) at PC 0x03001128-0x1130.
       // mixVolTrace showed the mixer runs exactly once (VBL 1) across the whole 30s render, so
@@ -3175,6 +3185,14 @@
             mixerPcmTrace: this.bus.mixerPcmTrace || [],
             mixVolTrace: this.bus.mixVolTrace || [],
             mixGateTrace: this.bus.mixGateTrace || [],
+            mixCheckpoints: {
+              fee: this.bus._cpFee || 0,
+              c1000: this.bus._cp1000 || 0,
+              c101c: this.bus._cp101c || 0,
+              c1056: this.bus._cp1056 || 0,
+              c10fc: this.bus._cp10fc || 0,
+              c1110: this.bus._cp1110 || 0,
+            },
             seqCalls: this.bus.seqCallSnaps || [],
             dmaDrift: this.bus.dmaDriftLog || [],
             // Find SoundInfo by searching for the fn2 pointer stored in IWRAM

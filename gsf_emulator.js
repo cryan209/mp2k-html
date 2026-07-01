@@ -503,6 +503,14 @@
         this.irqVectorWrites.push(entry);
         if (this.irqVectorWrites.length > 32) this.irqVectorWrites.shift();
       }
+      // Watch every write that touches the resolved [sp+0x14] address the mixer-entry gate
+      // reads (see _spWatchAddr above) — this stack slot is stuck at 0x3C after VBL 1 despite
+      // being 0xDE on VBL 1, so something else must be writing it in between.
+      if (this._spWatchAddr && addr <= this._spWatchAddr && this._spWatchAddr < addr + bytes) {
+        if (!this.spWatchLog) this.spWatchLog = [];
+        const log = this.spWatchLog;
+        if (log.length < 300) log.push({ vbl: this.vblankCount, ...entry });
+      }
       const canonicalAddr = this.canonicalAddr(addr);
       if (addr >= 0x03007100 && addr < 0x03007180 && this.mplInitWrites.length < 256) {
         this.mplInitWrites.push({ a: tools.hex(addr), v: tools.hex(value), k: source.kind, pc: source.pc !== undefined ? tools.hex(source.pc) : '?' });
@@ -1235,7 +1243,14 @@
       else if (_snapPc === 0x03001014) this.bus._cp1014 = (this.bus._cp1014 || 0) + 1;
       else if (_snapPc === 0x03001016) this.bus._cp1016 = (this.bus._cp1016 || 0) + 1;
       else if (_snapPc === 0x03001018) this.bus._cp1018 = (this.bus._cp1018 || 0) + 1;
-      // mixCheckpoints proved the REAL gate is CMP r1,r0 / BCC 0x1018 at 0x0300100c-0x100e: only
+      // The gate's r0 comes from LDR r0,[sp,#0x14] at 0x03000ffc. This code runs in the fixed-
+      // stack VBlank IRQ context, so SP should be constant across all 1792 calls — capture the
+      // resolved absolute address once, then watch every write to it for the whole render to
+      // find what's stuck writing 0x3C there after VBL 1.
+      if (_snapPc === 0x03000ffc && !this.bus._spWatchAddr) {
+        this.bus._spWatchAddr = (this.regs[13] + 0x14) >>> 0;
+      }
+      // Whole-render trace of the branch that decides whether to enter the ARM PCM mixer at
       // taken on VBL 1, every other VBL falls through to an unconditional B at 0x1010 that skips
       // the mixer entirely. r0 comes from [sp+0x14] (loaded 0x0ffc), r1 is a track byte + 0xE4
       // (loaded/computed 0x1002-0x100a). Trace both operands directly, whole-render, run-length
@@ -3210,6 +3225,8 @@
             mixVolTrace: this.bus.mixVolTrace || [],
             mixGateTrace: this.bus.mixGateTrace || [],
             mixCmpTrace: this.bus.mixCmpTrace || [],
+            spWatchAddr: this.bus._spWatchAddr ? tools.hex(this.bus._spWatchAddr) : null,
+            spWatchLog: this.bus.spWatchLog || [],
             mixCheckpoints: {
               fee: this.bus._cpFee || 0,
               c1000: this.bus._cp1000 || 0,

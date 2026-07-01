@@ -1024,21 +1024,23 @@
     }
 
     _advanceDmaSource(ch, src, bytes) {
+      // Real GBA DMA hardware just increments/decrements the internal source register per
+      // SourceAddrControl -- it never wraps to a "detected" buffer size on its own. Buffer
+      // looping is entirely the game's responsibility, via periodically rewriting DMAxSAD
+      // (already handled above: the latch reloads from the fresh SAD value on every DMA
+      // re-enable). An earlier heuristic here artificially confined the running pointer to
+      // a guessed window (distance between DMA1/DMA2's first SAD values, assumed to be two
+      // back-to-back mp2k mix buffers) -- that assumption doesn't hold for every engine (e.g.
+      // a modified/non-standard mp2k layout), and when the guessed size is wrong it sends the
+      // "live" pointer to unintended addresses almost all the time, producing near-silent,
+      // sporadically-glitchy audio instead of a hard failure. Removed in favor of matching
+      // real hardware exactly.
       const base = IO_DMA_START + ch * 12;
       const control = this.read16(base + 10);
       const sourceControl = (control >>> 7) & 3;
-      let next;
-      if (sourceControl === 1) next = (src - bytes) >>> 0;
-      else if (sourceControl === 2) next = src >>> 0;
-      else next = (src + bytes) >>> 0;
-      // Confine the running source pointer to this channel's own mix-output buffer window
-      // (see dsFifoBufferSize above) instead of letting it drift through the rest of IWRAM.
-      const size = this.dsFifoBufferSize;
-      const bufBase = this.dmaSourceBase[ch];
-      if (size && bufBase) {
-        next = (bufBase + (((next - bufBase) % size) + size) % size) >>> 0;
-      }
-      return next;
+      if (sourceControl === 1) return (src - bytes) >>> 0;
+      if (sourceControl === 2) return src >>> 0;
+      return (src + bytes) >>> 0;
     }
 
     _writeSoundFifo(fifoAddr, word) {

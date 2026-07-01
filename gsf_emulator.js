@@ -2611,6 +2611,7 @@
         sum += sample;
         sumSq += sample * sample;
       }
+      const midStart = Math.max(0, Math.floor(samples.length / 2) - 12);
       return {
         count: samples.length,
         min,
@@ -2620,6 +2621,10 @@
         nonZero,
         clipped,
         firstNonZero,
+        // 24 consecutive samples from the middle of the render (not the intro, which may be
+        // silence/lead-in) — lets us eyeball whether the waveform looks like structured audio
+        // (smooth runs, plausible periodicity) or literal noise (no discernible pattern).
+        mid: samples.slice(midStart, midStart + 24),
         head: samples.slice(0, 16),
       };
     }

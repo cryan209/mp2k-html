@@ -3006,6 +3006,30 @@
             })(),
             iwramStub: peek(0x03000520, 8),
             iwramDriver: peek(0x03006000, 8),
+            // Every fn2CallSnap's m5 (memory at the mixer's r5 buffer-slot pointer) has shown
+            // all-zero on this track, in every diagnostic all session — even before any PSG
+            // work started. That's consistent with the real ROM mixer NEVER successfully
+            // writing real PCM into its own output buffer, contradicting the HLE trace showing
+            // multiple continuous "pcm" voices (T2/T6/T7) that should produce plenty of nonzero
+            // content. Scan soundBufferWriteMap (tracks the LAST write per aligned word,
+            // fastMode-safe) across the whole observed mixer-buffer ring (~7 slots of 0xE0
+            // bytes each, seen cycling through r5) to see if ANY write in that whole region was
+            // ever nonzero across the full render, not just at our snapshot instants.
+            mixerBufferScan: (() => {
+              const base = 0x03006300, span = 0x700; // covers the observed r5 ring + margin
+              let tracked = 0, nonZero = 0;
+              const nonZeroSamples = [];
+              for (let a = base; a < base + span; a += 4) {
+                const w = this.bus.soundBufferWriteMap.get(a);
+                if (!w) continue;
+                tracked++;
+                if (w.value !== 0) {
+                  nonZero++;
+                  if (nonZeroSamples.length < 8) nonZeroSamples.push({ a: tools.hex(a), v: tools.hex(w.value), pc: tools.hex(w.pc), k: w.kind });
+                }
+              }
+              return { base: tools.hex(base), span, tracked, nonZero, nonZeroSamples };
+            })(),
             fn2Calls: this.bus.fn2CallSnaps || [],
             seqCalls: this.bus.seqCallSnaps || [],
             dmaDrift: this.bus.dmaDriftLog || [],

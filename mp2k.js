@@ -5351,6 +5351,8 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const mpl7200Summary = mpl7200?.words ? ` | mpl@0x03007200:[${mpl7200.words.join(',')}]` : '';
       const mplKW = memPeek?.mplKeyWrites;
       const mplKWSummary = mplKW?.length ? ` | mplWr:[${mplKW.map(w=>`${w.a}=${w.v}@${w.pc}/${w.k}`).join(' ')}]` : '';
+      const mixScan = memPeek?.mixerBufferScan;
+      const mixScanSummary = mixScan ? ` | mixBuf(${mixScan.base}+${mixScan.span}):tracked=${mixScan.tracked}/nonZero=${mixScan.nonZero}${mixScan.nonZeroSamples.length ? ` [${mixScan.nonZeroSamples.map(s=>`${s.a}=${s.v}@${s.pc}/${s.k}`).join(' ')}]` : ''}` : '';
       const mplIW = memPeek?.mplInitWrites;
       // Show all writes to the two suspect addresses (song ptr fields), plus first 8 entries for context
       const mplIWAll = mplIW || [];
@@ -5361,7 +5363,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const romAt2 = memPeek?.romAt081ddc00;
       const romSummary = (romAt?.words ? ` | rom@081de180:[${romAt.words.join(',')}]` : '') + (romAt2?.words ? ` rom@081ddc00:[${romAt2.words.join(',')}]` : '');
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

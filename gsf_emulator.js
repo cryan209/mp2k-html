@@ -1346,6 +1346,22 @@
         pcHex: tools.hex(pc),
         ...detail,
       });
+      // Capture the actual packed-PCM words the mixer stores at its two STR sites
+      // (left channel at 0x030012cc, right channel at 0x030012c8) for the first fn2
+      // invocation, decoded into 4 signed 8-bit samples each, so the real output
+      // waveform shape can be inspected directly instead of inferred from register
+      // snapshots taken 20 instructions apart.
+      if (this.bus._fn2CallCount === 1 && (pc === 0x030012c8 || pc === 0x030012cc)) {
+        if (!this.bus.mixerPcmTrace) this.bus.mixerPcmTrace = [];
+        const t = this.bus.mixerPcmTrace;
+        if (t.length < 256) {
+          const s8 = (b) => (b & 0x80) ? (b - 0x100) : b;
+          t.push({
+            pc: tools.hex(pc), ch: pc === 0x030012cc ? 'L' : 'R', addr: tools.hex(addr & ~3),
+            bytes: [s8(value & 0xff), s8((value >>> 8) & 0xff), s8((value >>> 16) & 0xff), s8((value >>> 24) & 0xff)],
+          });
+        }
+      }
     }
 
     _writeMem8(addr, value, kind, detail = {}) {
@@ -3071,6 +3087,7 @@
             })(),
             fn2Calls: this.bus.fn2CallSnaps || [],
             mixerLoopTrace: this.bus.mixerLoopTrace || [],
+            mixerPcmTrace: this.bus.mixerPcmTrace || [],
             seqCalls: this.bus.seqCallSnaps || [],
             dmaDrift: this.bus.dmaDriftLog || [],
             // Find SoundInfo by searching for the fn2 pointer stored in IWRAM

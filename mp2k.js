@@ -5396,8 +5396,13 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
         ? ` | literalWatch(${literalWatchAddr}, ${literalWatchLog.length} writes):[${literalWatchLog.map(w => `vbl${w.vbl}:${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`
         : '';
       const stackCrashWatchLog = memPeek?.stackCrashWatchLog || [];
-      const stackCrashWatchSummary = stackCrashWatchLog.length
-        ? ` | stackCrashWatch(0x03007e80-0x03007f00, ${stackCrashWatchLog.length} writes):[${stackCrashWatchLog.map(w => `vbl${w.vbl}:${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}`).join(' ')}]`
+      const stackCrashReadLog = memPeek?.stackCrashReadLog || [];
+      const stackCrashMerged = [
+        ...stackCrashWatchLog.map(w => ({ seq: w.seq || 0, text: `W:${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}` })),
+        ...stackCrashReadLog.map(w => ({ seq: w.seq || 0, text: `R:${w.addrHex}=${w.valueHex}@${w.pcHex}/${w.kind}` })),
+      ].sort((a, b) => a.seq - b.seq);
+      const stackCrashWatchSummary = stackCrashMerged.length
+        ? ` | stackCrashWatch(0x03007e80-0x03007f00, ${stackCrashWatchLog.length}W/${stackCrashReadLog.length}R):[${stackCrashMerged.map(w => w.text).join(' ')}]`
         : '';
       const dmaStackOverlaps = memPeek?.dmaStackOverlaps || [];
       const dmaStackOverlapsSummary = dmaStackOverlaps.length

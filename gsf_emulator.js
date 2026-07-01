@@ -487,6 +487,28 @@
       this.write8((addr + 3) >>> 0, value >>> 24);
     }
 
+    // Golden Sun crash investigation: track every POP-driven read from the
+    // suspect stack window too, not just writes -- an intervening pop that
+    // consumes a slot without ever writing to it is invisible to the write-only
+    // watch and could explain why the last logged write doesn't match what's
+    // actually read at crash time.
+    _noteStackCrashRead(addr, value, pc, kind) {
+      addr >>>= 0;
+      if (addr >= 0x03007f00 || addr + 4 <= 0x03007e80) return;
+      if (!this.stackCrashReadLog) this.stackCrashReadLog = [];
+      if (this.stackCrashReadLog.length < 400) {
+        this._stackCrashSeq = (this._stackCrashSeq || 0) + 1;
+        this.stackCrashReadLog.push({
+          seq: this._stackCrashSeq,
+          vbl: this.vblankCount,
+          addrHex: tools.hex(addr),
+          valueHex: tools.hex(value >>> 0),
+          pcHex: tools.hex(pc),
+          kind,
+        });
+      }
+    }
+
     noteMemoryWrite(addr, value, bytes, source = {}) {
       addr >>>= 0;
       value >>>= 0;
@@ -528,7 +550,8 @@
       if (addr < 0x03007f00 && addr + bytes > 0x03007e80) {
         if (!this.stackCrashWatchLog) this.stackCrashWatchLog = [];
         if (this.stackCrashWatchLog.length < 400) {
-          this.stackCrashWatchLog.push({ vbl: this.vblankCount, ...entry });
+          this._stackCrashSeq = (this._stackCrashSeq || 0) + 1;
+          this.stackCrashWatchLog.push({ seq: this._stackCrashSeq, vbl: this.vblankCount, ...entry });
         }
       }
       const canonicalAddr = this.canonicalAddr(addr);
@@ -2272,6 +2295,7 @@
           if (!(list & (1 << r))) continue;
           const addr = this.regs[13] & ~3;
           const value = this.bus.read32(addr);
+          this.bus._noteStackCrashRead(addr, value, (this.regs[15] - 2) >>> 0, `pop-r${r}`);
           this._writeReg(r, value, 'thumb-pop', (this.regs[15] - 2) >>> 0, {
             addrHex: tools.hex(addr),
             readValueHex: tools.hex(value),
@@ -2284,6 +2308,7 @@
         if (extra) {
           const addr = this.regs[13] & ~3;
           const target = this.bus.read32(addr);
+          this.bus._noteStackCrashRead(addr, target, (this.regs[15] - 2) >>> 0, 'pop-pc');
           this._recordBranch('thumb-pop-pc', (this.regs[15] - 2) >>> 0, target, {
             addrHex: tools.hex(addr),
             readValueHex: tools.hex(target),
@@ -3399,6 +3424,7 @@
             literalWatchAddr: this.bus._literalWatchAddr ? tools.hex(this.bus._literalWatchAddr) : null,
             literalWatchLog: this.bus.literalWatchLog || [],
             stackCrashWatchLog: this.bus.stackCrashWatchLog || [],
+            stackCrashReadLog: this.bus.stackCrashReadLog || [],
             dmaStackOverlaps: this.bus.dmaStackOverlaps || [],
             mixCheckpoints: {
               fee: this.bus._cpFee || 0,

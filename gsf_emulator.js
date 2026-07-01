@@ -814,29 +814,38 @@
     }
 
     // Mix the active PSG channels (gated by SOUNDCNT_L's per-channel L/R enable bits) into a
-    // Direct Sound FIFO sample. 'A' maps to the right output, 'B' to left (matching the
-    // existing FIFO_A→right/FIFO_B→left convention used at final mixdown).
+    // Direct Sound FIFO sample, matching GBATEK's documented hardware mixing ratios: a single
+    // FIFO spans the FULL internal range (±200h=512) at 100% DMA volume, while each of the 4
+    // PSG channels individually spans ONE QUARTER of that (±80h=128) at max volume/master vol.
+    // Our previous scale (dsValue used as-is at its native ±128 byte range, PSG capped around
+    // ±60/channel) didn't match those ratios — PSG was proportionally louder relative to Direct
+    // Sound than real hardware, and the combined signal never used its real ±511-ish headroom.
+    // 'A' maps to the right output, 'B' to left (matching the existing FIFO_A→right/
+    // FIFO_B→left convention used at final mixdown).
     _mixPsgInto(channel, dsValue) {
       const soundCntL = this.read16(0x04000080);
+      const soundCntH = this.read16(0x04000082);
       const isRight = channel === 'A';
-      const masterVol = isRight ? (soundCntL & 7) : ((soundCntL >>> 4) & 7);
-      let mix = 0;
+      const masterVol = isRight ? (soundCntL & 7) : ((soundCntL >>> 4) & 7); // 0-7
+
+      // SOUNDCNT_H bit2 (DMA Sound A) / bit3 (DMA Sound B): 0=50%, 1=100% volume.
+      const dmaFull = !!(soundCntH & (channel === 'A' ? 0x04 : 0x08));
+      const dsScaled = dsValue * 4 * (dmaFull ? 1 : 0.5);
+
+      let psgMix = 0;
       for (let ch = 0; ch < 2; ch++) {
         const enableBit = isRight ? (8 + ch) : (12 + ch);
-        if (!(soundCntL & (1 << enableBit))) continue;
-        mix += this._psgAdvance(ch, this.cycles);
+        if (soundCntL & (1 << enableBit)) psgMix += this._psgAdvance(ch, this.cycles);
       }
       // Wave = ch2 (bit10 right / bit14 left), Noise = ch3 (bit11 right / bit15 left).
-      if (soundCntL & (1 << (isRight ? 10 : 14))) mix += this._waveAdvance(this.cycles);
-      if (soundCntL & (1 << (isRight ? 11 : 15))) mix += this._noiseAdvance(this.cycles);
-      // Two Square channels at full volume (15 each) can sum to ±30 before this scale; at the
-      // old ×6 factor that's ±180, which combined with dsValue (already up to ±128) clips hard
-      // and constantly whenever both channels play loud together — audible as buzz/crunch.
-      // ×4 caps that two-channel worst case at ±120, leaving headroom for dsValue. Wave's raw
-      // range (~±7, before its own 0-100% level scale) and Noise (±15, like Square) share the
-      // same scale — roughly proportionate to their real relative loudness.
-      const scaled = mix * 4 * ((masterVol + 1) / 8);
-      return Math.max(-128, Math.min(127, Math.round(dsValue + scaled)));
+      if (soundCntL & (1 << (isRight ? 10 : 14))) psgMix += this._waveAdvance(this.cycles);
+      if (soundCntL & (1 << (isRight ? 11 : 15))) psgMix += this._noiseAdvance(this.cycles);
+      const psgScaled = psgMix * (128 / 15) * (masterVol / 7);
+
+      // Real hardware adds a BIAS then clips the unsigned result to 0..3FFh; with the default
+      // bias (200h) that's an effective signed range of roughly ±511 before bias. GBATEK notes
+      // bias has no audible effect otherwise, so we skip modeling it and just clip symmetrically.
+      return Math.round(Math.max(-511, Math.min(511, dsScaled + psgScaled)));
     }
 
     _requestSoundFifoDma(channel) {
@@ -2597,8 +2606,8 @@
 
     _sampleStats(samples) {
       if (!samples.length) return { count: 0, min: 0, max: 0, mean: 0, rms: 0, head: [] };
-      let min = 127;
-      let max = -128;
+      let min = Infinity;
+      let max = -Infinity;
       let sum = 0;
       let sumSq = 0;
       let nonZero = 0;
@@ -2611,7 +2620,8 @@
           nonZero++;
           if (firstNonZero.length < 8) firstNonZero.push(sample);
         }
-        if (sample <= -128 || sample >= 127) clipped++;
+        // Mixed samples now span the hardware-accurate ±511 range (see _mixPsgInto), not ±128.
+        if (sample <= -511 || sample >= 511) clipped++;
         sum += sample;
         sumSq += sample * sample;
       }
@@ -2786,10 +2796,12 @@
           const sampA = renderSamplesA;
           const sampB = renderSamplesB;
           const step = sourceSamples / outputSamples;
+          // Mixed samples now span the hardware-accurate ±511 range (see _mixPsgInto's
+          // comment), not the old ad-hoc ±128 — normalize by 512 to reach Web Audio's -1..1.
           for (let i = 0; i < outputSamples; i++) {
             const sourcePos = i * step;
-            right[i] = this._sampleAt(sampA, sourcePos) / 128;
-            left[i]  = this._sampleAt(sampB, sourcePos) / 128;
+            right[i] = this._sampleAt(sampA, sourcePos) / 512;
+            left[i]  = this._sampleAt(sampB, sourcePos) / 512;
           }
           if (this._audioSrc) { try { this._audioSrc.stop(); } catch (_) {} }
           if (this._audioCtx) { this._audioCtx.close(); }

@@ -1172,6 +1172,25 @@
           else { if (dlist.length < 16) dlist.push(drift); else { dlist.splice(8, 1); dlist.push(drift); } }
         }
       }
+      // Full instruction trace of the actual ARM mixing loop (thumb stub at 0x03000f60
+      // hands off to ARM code around 0x03000fee, which runs until the thumb tail at
+      // 0x03001316 per irqCalls) for the FIRST fn2 invocation only, so we can see exactly
+      // which instruction stops producing nonzero PCM instead of guessing from summaries.
+      if (this.bus._fn2CallCount === 1 && _snapPc >= 0x03000fee && _snapPc <= 0x03001318) {
+        if (!this.bus.mixerLoopTrace) this.bus.mixerLoopTrace = [];
+        const trace = this.bus.mixerLoopTrace;
+        if (trace.length < 600) {
+          const thumb = !!(this.cpsr & CPSR_T);
+          const instrWord = thumb ? this.bus.read16(_snapPc) : this.bus.read32(_snapPc);
+          const r = this.regs;
+          trace.push({
+            pc: tools.hex(_snapPc), t: thumb ? 1 : 0, i: tools.hex(instrWord, thumb ? 4 : 8),
+            r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0), r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
+            r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0), r6: tools.hex(r[6]>>>0), r7: tools.hex(r[7]>>>0),
+            r12: tools.hex(r[12]>>>0), lr: tools.hex(r[14]>>>0), c: (this.cpsr & CPSR_C) ? 1 : 0,
+          });
+        }
+      }
       if ((_isCallSite || _isDivFn || _isIwramFn) && this.bus.timerRegSnaps.length < 16) {
         // Deduplicate: skip if same region already captured
         const _label = _isCallSite ? 'site' : _isDivFn ? 'div' : 'iwram';
@@ -3050,6 +3069,7 @@
               return { base: tools.hex(base), span, tracked, nonZero, nonZeroSamples };
             })(),
             fn2Calls: this.bus.fn2CallSnaps || [],
+            mixerLoopTrace: this.bus.mixerLoopTrace || [],
             seqCalls: this.bus.seqCallSnaps || [],
             dmaDrift: this.bus.dmaDriftLog || [],
             // Find SoundInfo by searching for the fn2 pointer stored in IWRAM

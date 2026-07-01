@@ -5248,10 +5248,12 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
         ? ` dmaSrc:[${dmaShown.map(d => `d${d.ch}@${d.srcHex}${d.canonicalSrcHex && d.canonicalSrcHex !== d.srcHex ? `(${d.canonicalSrcHex})` : ''}->${d.dstHex}/nz${d.nonZeroWords || 0}:${d.words.join('/')}${d.writers?.length ? `<${d.writers.join('/')}>` : ''}`).join(' ')}]`
         : '';
       const dmaSadEntries = diagnostics?.fifo?.dmaSadLog || [];
-      // First 6 + last 6 SAD/CNTH writes: shows whether the game actually re-points DMA1/2's
-      // sound FIFO source each frame (vs our latch only updating once and going stale).
-      const dmaSadShown = dmaSadEntries.length > 12
-        ? [...dmaSadEntries.slice(0, 6), ...dmaSadEntries.slice(-6)]
+      // First 6 + a wider late-render slice of SAD/CNTH writes: shows whether the game actually
+      // re-points DMA1/2's sound FIFO source each frame (vs our latch only updating once and
+      // going stale), and gives enough coverage late in the render to cross-reference against
+      // click timestamps/cycles found anywhere in the render, not just near the start.
+      const dmaSadShown = dmaSadEntries.length > 46
+        ? [...dmaSadEntries.slice(0, 6), ...dmaSadEntries.slice(-40)]
         : dmaSadEntries;
       const dmaSadLog = dmaSadEntries.length
         ? ` dmaSad(${dmaSadEntries.length}):[${dmaSadShown.map(d => `d${d.ch}.${d.field}=${d.value}${d.reArmed ? '!' : ''}@${d.pc}/c${d.cycles}`).join(' ')}]`
@@ -5338,8 +5340,12 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       // slices) show whether clicks are spread evenly or concentrated/growing over the render.
       const clicksA = render?.clicksA;
       const clicksB = render?.clicksB;
+      // ds:X->Y is the same-index Direct-Sound-only (pre-PSG) value at the click — if it barely
+      // moves while the mixed from/to swings hard, the discontinuity is being introduced by PSG
+      // mixing rather than already present in the DMA-fed Direct Sound stream.
+      const fmtClickEvent = e => `${e.ms}ms/c${e.cycles}:${e.from}->${e.to}(Δ${e.delta}/avg${e.localAvg})${e.dsFrom !== undefined ? ` ds:${e.dsFrom}->${e.dsTo}` : ''}`;
       const clickSummary = clicksA
-        ? ` clicksA(${clicksA.count}):buckets[${clicksA.buckets.join(',')}] first[${clicksA.events.slice(0, 6).map(e => `${e.ms}ms:${e.from}->${e.to}(Δ${e.delta}/avg${e.localAvg})`).join(' ')}]${clicksB ? ` clicksB(${clicksB.count}):buckets[${clicksB.buckets.join(',')}] first[${clicksB.events.slice(0, 6).map(e => `${e.ms}ms:${e.from}->${e.to}(Δ${e.delta}/avg${e.localAvg})`).join(' ')}]` : ''}`
+        ? ` clicksA(${clicksA.count}):buckets[${clicksA.buckets.join(',')}] first[${clicksA.events.slice(0, 6).map(fmtClickEvent).join(' ')}]${clicksB ? ` clicksB(${clicksB.count}):buckets[${clicksB.buckets.join(',')}] first[${clicksB.events.slice(0, 10).map(fmtClickEvent).join(' ')}]` : ''}`
         : '';
       const renderSummary = render ? ` | render:${(render.renderedMs / 1000).toFixed(1)}s/${render.stopReason} fifo:${render.fifoFillRate || render.sourceRate || 0}Hz play:${render.outputRate || render.sampleRate}Hz bias:${render.biasOutputRate || '?'}Hz dac:${render.dacBits || '?'}b${render.timerSourceRate ? ` timer:${render.timerSourceRate}` : ''} inst:${render.instructions}${sampleStats}${dsOnlyStats}${clickSummary}` : '';
       const codeDump = audio?.timerCodeDump;

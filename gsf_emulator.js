@@ -452,7 +452,7 @@
         // actually re-pointing the sound FIFO DMA source each frame, independent of fastMode.
         const ch = Math.floor(dmaOff / 12);
         const field = dmaOff % 12;
-        if ((ch === 1 || ch === 2) && (field === 3 || field === 11) && this.dmaSadLog.length < 256) {
+        if ((ch === 1 || ch === 2) && (field === 3 || field === 11) && this.dmaSadLog.length < 16000) {
           const base = IO_DMA_START + ch * 12;
           this.dmaSadLog.push({
             ch,
@@ -3093,7 +3093,11 @@
     // buckets hits into 10 equal time slices across the render so we can see whether clicks are
     // spread evenly, clustered at specific moments, or increase over the render (which would
     // support a growing-drift explanation rather than one-off events).
-    _detectClicks(samples, playbackRate) {
+    // companion (optional): a parallel same-length, same-index sample array captured at an
+    // earlier mixing stage (e.g. Direct-Sound-only, before PSG gets added). Attaching its
+    // before/after values to each event lets us tell whether a discontinuity already existed
+    // at that stage or was introduced later (e.g. by PSG mixing), without a second full scan.
+    _detectClicks(samples, playbackRate, companion = null) {
       const n = samples.length;
       if (n < 3) return { count: 0, events: [], buckets: [] };
       const WINDOW = 32;
@@ -3113,8 +3117,11 @@
             events.push({
               index: i,
               ms: Math.round((i / playbackRate) * 1000),
+              cycles: Math.round((i / playbackRate) * GBA_CPU_HZ),
               from: samples[i - 1],
               to: samples[i],
+              dsFrom: companion && companion.length > i - 1 ? companion[i - 1] : undefined,
+              dsTo: companion && companion.length > i ? companion[i] : undefined,
               delta,
               localAvg: Math.round(localAvg),
             });
@@ -3255,8 +3262,8 @@
         sourceSamples,
         sampleStatsA: this._sampleStats(renderSamplesA),
         sampleStatsB: this._sampleStats(renderSamplesB),
-        clicksA: this._detectClicks(renderSamplesA, playbackRate),
-        clicksB: this._detectClicks(renderSamplesB, playbackRate),
+        clicksA: this._detectClicks(renderSamplesA, playbackRate, this.bus.dsOnlySamplesA),
+        clicksB: this._detectClicks(renderSamplesB, playbackRate, this.bus.dsOnlySamplesB),
         // Direct Sound BEFORE PSG gets mixed in — isolates whether Direct Sound alone is
         // correct on this track, since everything inspected so far has been the final mix.
         dsOnlyStatsA: this._sampleStats(this.bus.dsOnlySamplesA),

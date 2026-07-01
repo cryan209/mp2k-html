@@ -1442,7 +1442,17 @@
       let value = this._reg(rm);
       let carry = !!(this.cpsr & CPSR_C);
       if (amount === 0) {
-        if (shiftType === 3 && !byReg) {
+        // Immediate-encoded shift amount of 0 has special meanings per ARM ARM:
+        // LSL #0 is a true no-op, but LSR #0 / ASR #0 encode shift-by-32, and
+        // ROR #0 encodes RRX. Register-specified shifts (byReg) have no such
+        // special-casing: amount 0 is always a genuine no-op there.
+        if (!byReg && shiftType === 1) {
+          carry = !!(value & 0x80000000);
+          value = 0;
+        } else if (!byReg && shiftType === 2) {
+          carry = !!(value & 0x80000000);
+          value = carry ? 0xffffffff : 0;
+        } else if (!byReg && shiftType === 3) {
           carry = !!(value & 1);
           value = ((this.cpsr & CPSR_C ? 0x80000000 : 0) | (value >>> 1)) >>> 0;
         }

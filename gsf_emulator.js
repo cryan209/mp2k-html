@@ -1235,6 +1235,19 @@
       else if (_snapPc === 0x03001014) this.bus._cp1014 = (this.bus._cp1014 || 0) + 1;
       else if (_snapPc === 0x03001016) this.bus._cp1016 = (this.bus._cp1016 || 0) + 1;
       else if (_snapPc === 0x03001018) this.bus._cp1018 = (this.bus._cp1018 || 0) + 1;
+      // mixCheckpoints proved the REAL gate is CMP r1,r0 / BCC 0x1018 at 0x0300100c-0x100e: only
+      // taken on VBL 1, every other VBL falls through to an unconditional B at 0x1010 that skips
+      // the mixer entirely. r0 comes from [sp+0x14] (loaded 0x0ffc), r1 is a track byte + 0xE4
+      // (loaded/computed 0x1002-0x100a). Trace both operands directly, whole-render, run-length
+      // encoded, to see which one stops satisfying r1 < r0 after VBL 1.
+      if (_snapPc === 0x0300100c) {
+        if (!this.bus.mixCmpTrace) this.bus.mixCmpTrace = [];
+        const t = this.bus.mixCmpTrace;
+        if (t.length < 2000) {
+          const r = this.regs;
+          t.push({ vbl: this.bus.vblankCount, r0: tools.hex(r[0] >>> 0), r1: tools.hex(r[1] >>> 0) });
+        }
+      }
       // Whole-render trace of the branch that decides whether to enter the ARM PCM mixer at
       // all: LDRB r0,[r4+1] / TST r0,#8 / BEQ 0x03001254 (mixer entry) at PC 0x03001128-0x1130.
       // mixVolTrace showed the mixer runs exactly once (VBL 1) across the whole 30s render, so
@@ -3196,6 +3209,7 @@
             mixerPcmTrace: this.bus.mixerPcmTrace || [],
             mixVolTrace: this.bus.mixVolTrace || [],
             mixGateTrace: this.bus.mixGateTrace || [],
+            mixCmpTrace: this.bus.mixCmpTrace || [],
             mixCheckpoints: {
               fee: this.bus._cpFee || 0,
               c1000: this.bus._cp1000 || 0,

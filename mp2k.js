@@ -5424,12 +5424,17 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const romPrologueDumpSummary = romPrologueDump ? ` | rom@03000f60:[${romPrologueDump.join(',')}]` : '';
       const romSpStoreDump = memPeek?.romAt081dcdc0;
       const romSpStoreDumpSummary = romSpStoreDump ? ` | rom@081dcdc0:[${romSpStoreDump.join(',')}]` : '';
+      const lastHitIrqPcTrace = memPeek?.lastHitIrqPcTrace || [];
+      const lastMissIrqPcTrace = memPeek?.lastMissIrqPcTrace || [];
+      const irqPcTraceSummary = (lastHitIrqPcTrace.length || lastMissIrqPcTrace.length)
+        ? ` | irqPcHit(${lastHitIrqPcTrace.length}):[${lastHitIrqPcTrace.join(',')}] irqPcMiss(${lastMissIrqPcTrace.length}):[${lastMissIrqPcTrace.join(',')}]`
+        : '';
       const fdt = memPeek?.fifoDmaTally;
       const fifoDmaTallySummary = fdt
         ? ` | fifoDmaTally:requested=${fdt.requested}/disabled=${fdt.disabled}/wrongTiming=${fdt.wrongTiming}/ran=${fdt.ran}/bufSize=${fdt.bufferSize}/base=[${(fdt.sourceBase || []).join(',')}]/zeroWords=${fdt.zeroWords}/nonZeroWords=${fdt.nonZeroWords}`
         : '';
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${mixVolSummary}${mixCmpSummary}${spWatchSummary}${spStoreOperandsSummary}${literalAt081dce2cSummary}${literalWatchSummary}${mixGateSummary}${cpSummary}${romMixDumpSummary}${romPrologueDumpSummary}${romSpStoreDumpSummary}${fifoDmaTallySummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${mixVolSummary}${mixCmpSummary}${spWatchSummary}${spStoreOperandsSummary}${literalAt081dce2cSummary}${literalWatchSummary}${mixGateSummary}${cpSummary}${romMixDumpSummary}${romPrologueDumpSummary}${romSpStoreDumpSummary}${irqPcTraceSummary}${fifoDmaTallySummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

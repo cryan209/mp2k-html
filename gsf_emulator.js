@@ -1057,6 +1057,29 @@
       this.requestIrq(IRQ_VBLANK, `vblank:${reason}`);
     }
 
+    // Watch every VBlank IRQ dispatch to see whether execution actually reaches the
+    // sound-engine wrapper (0x081dcdc6, the fn2/SoundMainBatch caller) -- fn2CallCount only
+    // reaches ~57% of vblankCount even after fixing IRQ delivery timing, so something
+    // upstream of that wrapper is still gating whether it's ever called this frame.
+    _beginIrqPcTrace() {
+      this._irqPcTrace = [];
+      this._irqPcTraceHitWrapper = false;
+    }
+    _recordIrqPcTraceStep(pc) {
+      if (!this._irqPcTrace) return;
+      if (this._irqPcTrace.length < 80) this._irqPcTrace.push(tools.hex(pc));
+      if (pc === 0x081dcdc6) this._irqPcTraceHitWrapper = true;
+    }
+    _endIrqPcTrace() {
+      if (!this._irqPcTrace) return;
+      if (this._irqPcTraceHitWrapper) {
+        this.lastHitIrqPcTrace = this._irqPcTrace;
+      } else {
+        this.lastMissIrqPcTrace = this._irqPcTrace;
+      }
+      this._irqPcTrace = null;
+    }
+
     requestIrq(mask, reason = 'irq') {
       this._setIrqFlags(mask);
       this.irqEvents.push({
@@ -2494,12 +2517,16 @@
       // room during fast rendering than generic IRQ trampolines.
       const isGsfWrapperIrq = handlerAddr >= 0x08ffff80 && handlerAddr < 0x09000000;
       const MAX_HANDLER_STEPS = this.fastMode ? (isGsfWrapperIrq ? 65536 : 2048) : 500000;
+      const traceThisDispatch = (pending & IRQ_VBLANK) !== 0;
+      if (traceThisDispatch) this.bus._beginIrqPcTrace();
       let count = 0;
       while (count < MAX_HANDLER_STEPS) {
         if (this.regs[15] === SENTINEL || this.halted) break;
+        if (traceThisDispatch) this.bus._recordIrqPcTraceStep(this.regs[15] >>> 0);
         this.step();
         count++;
       }
+      if (traceThisDispatch) this.bus._endIrqPcTrace();
       this._recordIrqDispatch({
         result: this.regs[15] === SENTINEL ? 'returned' : this.halted ? 'halted' : 'capped',
         pending,
@@ -3263,6 +3290,11 @@
             })(),
             fn2Calls: this.bus.fn2CallSnaps || [],
             mixerLoopTrace: this.bus.mixerLoopTrace || [],
+            // fn2CallCount only reaches ~57% of vblankCount even with prompt IRQ delivery --
+            // compare the last VBlank IRQ dispatch that reached the sound-engine wrapper
+            // (0x081dcdc6) against the last one that didn't, to find the divergence point.
+            lastHitIrqPcTrace: this.bus.lastHitIrqPcTrace || [],
+            lastMissIrqPcTrace: this.bus.lastMissIrqPcTrace || [],
             fifoDmaTally: {
               requested: this.bus.fifoDmaReqTally || 0,
               disabled: this.bus.fifoDmaReqDisabled || 0,

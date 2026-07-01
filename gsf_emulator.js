@@ -511,6 +511,14 @@
         const log = this.spWatchLog;
         if (log.length < 300) log.push({ vbl: this.vblankCount, ...entry });
       }
+      // Same idea for the r2 operand feeding that stack slot: it's 0xa2 on VBL 1 but reads back
+      // 0x00000000 forever after via LDRB [literal-pool-pointer]. Watch every write to that
+      // resolved address to find what zeroes it.
+      if (this._literalWatchAddr && addr <= this._literalWatchAddr && this._literalWatchAddr < addr + bytes) {
+        if (!this.literalWatchLog) this.literalWatchLog = [];
+        const log = this.literalWatchLog;
+        if (log.length < 300) log.push({ vbl: this.vblankCount, ...entry });
+      }
       const canonicalAddr = this.canonicalAddr(addr);
       if (addr >= 0x03007100 && addr < 0x03007180 && this.mplInitWrites.length < 256) {
         this.mplInitWrites.push({ a: tools.hex(addr), v: tools.hex(value), k: source.kind, pc: source.pc !== undefined ? tools.hex(source.pc) : '?' });
@@ -1249,6 +1257,9 @@
       // find what's stuck writing 0x3C there after VBL 1.
       if (_snapPc === 0x03000ffc && !this.bus._spWatchAddr) {
         this.bus._spWatchAddr = (this.regs[13] + 0x14) >>> 0;
+      }
+      if (!this.bus._literalWatchAddr) {
+        this.bus._literalWatchAddr = this.bus.read32(0x081dce2c) >>> 0;
       }
       // The write site is STR r1,[sp,#0x14] at 0x081dcde6, where r1 = r1(=[r0+12], a byte off a
       // struct pointer in r0) + r2 (a byte read via a ROM literal pointer). Capture the operands
@@ -3244,6 +3255,8 @@
             spWatchAddr: this.bus._spWatchAddr ? tools.hex(this.bus._spWatchAddr) : null,
             spWatchLog: this.bus.spWatchLog || [],
             spStoreOperands: this.bus.spStoreOperands || [],
+            literalWatchAddr: this.bus._literalWatchAddr ? tools.hex(this.bus._literalWatchAddr) : null,
+            literalWatchLog: this.bus.literalWatchLog || [],
             mixCheckpoints: {
               fee: this.bus._cpFee || 0,
               c1000: this.bus._cp1000 || 0,
@@ -3271,6 +3284,13 @@
             // every VBL after the first. Dump the surrounding Thumb code to decode that store and
             // find where the 0x3C comes from (immediate vs. a register that should vary).
             romAt081dcdc0: (() => { const ws=[]; for(let i=0;i<0x30;i++) ws.push(tools.hex(this.bus.read16((0x081dcdc0+i*2)>>>0),4)); return ws; })(),
+            // r2 (the operand that goes 0xa2 on VBL 1 -> stuck 0x00000000 forever after) is
+            // LDRB r2,[r2,#0] where the base is a ROM literal pool pointer at 0x081dce2c. Dump the
+            // literal itself (the RAM/IO address being read) plus its live current byte value.
+            literalAt081dce2c: (() => {
+              const ptr = this.bus.read32(0x081dce2c);
+              return { ptr: tools.hex(ptr), byteAtPtr: tools.hex(this.bus.read8(ptr >>> 0)) };
+            })(),
             seqCalls: this.bus.seqCallSnaps || [],
             dmaDrift: this.bus.dmaDriftLog || [],
             // Find SoundInfo by searching for the fn2 pointer stored in IWRAM

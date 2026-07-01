@@ -180,6 +180,8 @@
       this.fifoQueueB = [];
       this.fifoSamplesA = []; // signed 8-bit DAC values consumed from FIFO A
       this.fifoSamplesB = []; // signed 8-bit DAC values consumed from FIFO B
+      this.dsOnlySamplesA = []; // fifoSamplesA before PSG gets mixed in, for isolating which part is wrong
+      this.dsOnlySamplesB = [];
       this.fifoLastA = 0;
       this.fifoLastB = 0;
       this.fifoFillBytesA = 0;
@@ -572,9 +574,11 @@
       if (channel === 'A') {
         this.fifoLastA = value;
         this.fifoSamplesA.push(mixed);
+        this.dsOnlySamplesA.push(value);
       } else {
         this.fifoLastB = value;
         this.fifoSamplesB.push(mixed);
+        this.dsOnlySamplesB.push(value);
       }
       if (after <= 16 && (before > 16 || before <= 1)) this._requestSoundFifoDma(channel);
     }
@@ -2652,6 +2656,8 @@
       this.bus.fifoQueueB = [];
       this.bus.fifoSamplesA = [];
       this.bus.fifoSamplesB = [];
+      this.bus.dsOnlySamplesA = [];
+      this.bus.dsOnlySamplesB = [];
       this.bus.fifoLastA = 0;
       this.bus.fifoLastB = 0;
       this.bus.fifoFillBytesA = 0;
@@ -2754,6 +2760,10 @@
         sourceSamples,
         sampleStatsA: this._sampleStats(renderSamplesA),
         sampleStatsB: this._sampleStats(renderSamplesB),
+        // Direct Sound BEFORE PSG gets mixed in — isolates whether Direct Sound alone is
+        // correct on this track, since everything inspected so far has been the final mix.
+        dsOnlyStatsA: this._sampleStats(this.bus.dsOnlySamplesA),
+        dsOnlyStatsB: this._sampleStats(this.bus.dsOnlySamplesB),
         renderedMs: Math.round(renderedSeconds * 1000),
         instructions: instructionsAtRenderEnd - instructionsAtStart,
         stopReason: renderStopReason,

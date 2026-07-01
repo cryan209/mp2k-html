@@ -5318,7 +5318,10 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const statA = render?.sampleStatsA;
       const statB = render?.sampleStatsB;
       const sampleStats = statA ? ` pcmA:${statA.min}..${statA.max}/r${statA.rms}/nz${statA.nonZero}/clip${statA.clipped}/[${statA.head.slice(0, 6).join(',')}]/first[${statA.firstNonZero.slice(0, 6).join(',')}]/mid[${(statA.mid||[]).join(',')}]${statB ? ` pcmB:${statB.min}..${statB.max}/r${statB.rms}/nz${statB.nonZero}/clip${statB.clipped}/[${statB.head.slice(0, 6).join(',')}]/first[${statB.firstNonZero.slice(0, 6).join(',')}]/mid[${(statB.mid||[]).join(',')}]` : ''}` : '';
-      const renderSummary = render ? ` | render:${(render.renderedMs / 1000).toFixed(1)}s/${render.stopReason} fifo:${render.fifoFillRate || render.sourceRate || 0}Hz play:${render.outputRate || render.sampleRate}Hz bias:${render.biasOutputRate || '?'}Hz dac:${render.dacBits || '?'}b${render.timerSourceRate ? ` timer:${render.timerSourceRate}` : ''} inst:${render.instructions}${sampleStats}` : '';
+      const dsA = render?.dsOnlyStatsA;
+      const dsB = render?.dsOnlyStatsB;
+      const dsOnlyStats = dsA ? ` dsOnlyA:${dsA.min}..${dsA.max}/r${dsA.rms}/nz${dsA.nonZero}/mid[${(dsA.mid||[]).join(',')}]${dsB ? ` dsOnlyB:${dsB.min}..${dsB.max}/r${dsB.rms}/nz${dsB.nonZero}/mid[${(dsB.mid||[]).join(',')}]` : ''}` : '';
+      const renderSummary = render ? ` | render:${(render.renderedMs / 1000).toFixed(1)}s/${render.stopReason} fifo:${render.fifoFillRate || render.sourceRate || 0}Hz play:${render.outputRate || render.sampleRate}Hz bias:${render.biasOutputRate || '?'}Hz dac:${render.dacBits || '?'}b${render.timerSourceRate ? ` timer:${render.timerSourceRate}` : ''} inst:${render.instructions}${sampleStats}${dsOnlyStats}` : '';
       const codeDump = audio?.timerCodeDump;
       const codeDumpSummary = codeDump
         ? ` | lit24d0:${codeDump.lit24d0} fn1:[${(codeDump.fn1||[]).filter(e=>!e.endsWith(':0x0000')).join(' ')}] fn2:[${codeDump.fn2.join(' ')}] iwram:[${(codeDump.iwramFn||[]).join(' ')}] iwramDiv1:[${(codeDump.iwramDiv1||[]).join(' ')}] snaps:[${(codeDump.regSnaps||[]).map(s=>`${s.label}@${s.pc}(c=${s.cycles} r0=${s.r0} r1=${s.r1} r5=${s.r5} lr=${s.lr})`).join(' ')}]`

@@ -3026,6 +3026,14 @@
             // bytes each, seen cycling through r5) to see if ANY write in that whole region was
             // ever nonzero across the full render, not just at our snapshot instants.
             mixerBufferScan: (() => {
+              // soundBufferWriteMap keys its entries by word-aligned address regardless of
+              // write granularity, so byte/halfword stores (STRB is how an 8-bit PCM mixer
+              // writes samples one at a time) clobber each other: only the *last* byte-lane
+              // written to a word survives in the map, and its raw entry.value is just that
+              // one byte (0-255), not the word's real content. Checking entry.value here was
+              // therefore checking one arbitrary byte lane per word, not the actual mixed
+              // sample data — read the live word out of memory instead, and use the map only
+              // to know whether the word was ever touched at all.
               const base = 0x03006300, span = 0x700; // covers the observed r5 ring + margin
               let tracked = 0, nonZero = 0;
               const nonZeroSamples = [];
@@ -3033,9 +3041,10 @@
                 const w = this.bus.soundBufferWriteMap.get(a);
                 if (!w) continue;
                 tracked++;
-                if (w.value !== 0) {
+                const live = this.bus.read32(a) >>> 0;
+                if (live !== 0) {
                   nonZero++;
-                  if (nonZeroSamples.length < 8) nonZeroSamples.push({ a: tools.hex(a), v: tools.hex(w.value), pc: tools.hex(w.pc), k: w.kind });
+                  if (nonZeroSamples.length < 8) nonZeroSamples.push({ a: tools.hex(a), v: tools.hex(live), pc: tools.hex(w.pc), k: w.kind });
                 }
               }
               return { base: tools.hex(base), span, tracked, nonZero, nonZeroSamples };

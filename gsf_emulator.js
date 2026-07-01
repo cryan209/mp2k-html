@@ -1498,6 +1498,7 @@
         [MODE_FIQ]: 0, [MODE_IRQ]: 0, [MODE_SUPERVISOR]: 0, [MODE_ABORT]: 0, [MODE_UNDEFINED]: 0,
       };
       this._inIrqDispatch = false; // re-entrancy guard
+      this.diagnosticProbes = false;
       this.unsupported = new Map();
       this.psrWrites = [];
       this.swiCalls = [];
@@ -1550,201 +1551,7 @@
       this._checkAndDispatchIrq(); // internally gated on CPSR.I, IME, and nesting depth
       this.bus.debugPc = this.regs[15] >>> 0;
       this.bus.debugThumb = !!(this.cpsr & CPSR_T);
-      // Capture registers at key BL call sites and first entry into BL target region
-      const _snapPc = this.bus.debugPc;
-      const _isCallSite = (_snapPc === 0x081c248a || _snapPc === 0x081c121a);
-      // Also capture first execution inside suspected division fn region (0x08001800-0x080019ff)
-      const _isDivFn = _snapPc >= 0x08001800 && _snapPc <= 0x080019ff;
-      // And capture first execution inside IWRAM div fn (0x03000400-0x030005ff)
-      const _isIwramFn = _snapPc >= 0x03000400 && _snapPc <= 0x030005ff;
-      // Capture state at fn2 call site and seq call site (BX at 0x081dee48 → seq)
-      if ((_snapPc === 0x081dce1c || _snapPc === 0x081dee48) && this._inIrqDispatch) {
-        const r = this.regs;
-        const isFn2 = (_snapPc === 0x081dce1c);
-        const cnt = isFn2 ? 'fn2' : 'seq';
-        const cntKey = `_${cnt}CallCount`;
-        const n = this.bus[cntKey] = (this.bus[cntKey] || 0) + 1;
-        const memPeek = (a) => { if (a < 0x02000000 || a > 0x09000000) return []; const ws = []; for (let i=0;i<8;i++) ws.push(tools.hex(this.bus.read32((a+i*4)>>>0))); return ws; };
-        const snap = {
-          n, r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0),
-          r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
-          r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0),
-          memR0: memPeek(r[0]>>>0),
-          memR1: memPeek(r[1]>>>0),
-          memR2: memPeek(r[2]>>>0),
-          // r5 is the mixer's buffer-slot pointer (the one DMA1 trails by one slot, per
-          // dmaDriftLog). Dumping it shows whether the slot DMA is about to consume actually
-          // holds real PCM content or near-zero bytes, i.e. whether this is a content bug
-          // (mixer math) rather than a DMA addressing bug.
-          memR5: memPeek(r[5]>>>0),
-        };
-        const listKey = isFn2 ? 'fn2CallSnaps' : 'seqCallSnaps';
-        if (!this.bus[listKey]) this.bus[listKey] = [];
-        const list = this.bus[listKey];
-        if (n <= 4) list.push(snap);
-        else { if (list.length < 8) list.push(snap); else { list.splice(4, 1); list.push(snap); } }
-        // Track how far DMA1's live FIFO read pointer (dmaSourceLatch[1]) has drifted from the
-        // mixer's current write buffer (r5) at this same VBL. Use the real mix-buffer size
-        // (dsFifoBufferSize, derived from the DMA1SAD/DMA2SAD gap) once known, instead of the
-        // old hardcoded 32KB IWRAM-mirror modulus — that produced a misleading near-max sawtooth
-        // once the DMA source pointer got confined to its actual small buffer window, since a
-        // small backward offset mod 32KB looks like a huge forward one.
-        if (isFn2) {
-          const writeAddr = r[5] >>> 0;
-          const readAddr = this.bus.dmaSourceLatch[1] >>> 0;
-          const bufSize = this.bus.dsFifoBufferSize || 0x8000;
-          const driftBytes = ((readAddr - writeAddr) % bufSize + bufSize) % bufSize;
-          const drift = { n, vbl: this.bus.vblankCount, r5: tools.hex(writeAddr), dmaSad1: tools.hex(readAddr), driftBytes, bufSize };
-          if (!this.bus.dmaDriftLog) this.bus.dmaDriftLog = [];
-          const dlist = this.bus.dmaDriftLog;
-          if (n <= 8) dlist.push(drift);
-          else { if (dlist.length < 16) dlist.push(drift); else { dlist.splice(8, 1); dlist.push(drift); } }
-        }
-      }
-      // Cheap whole-render counter (no per-entry allocation) for how many times PC hits each of
-      // several checkpoints along the thumb-stub-to-ARM-mixer path, to binary-search where
-      // execution diverges after VBL 1 (mixGateTrace showed 0x300112c is hit only twice, both
-      // during VBL 1, out of 1792 VBLs).
-      if (_snapPc === 0x03000fee) this.bus._cpFee = (this.bus._cpFee || 0) + 1;
-      else if (_snapPc === 0x03001000) this.bus._cp1000 = (this.bus._cp1000 || 0) + 1;
-      else if (_snapPc === 0x0300101c) this.bus._cp101c = (this.bus._cp101c || 0) + 1;
-      else if (_snapPc === 0x03001056) this.bus._cp1056 = (this.bus._cp1056 || 0) + 1;
-      else if (_snapPc === 0x030010fc) this.bus._cp10fc = (this.bus._cp10fc || 0) + 1;
-      else if (_snapPc === 0x03001110) this.bus._cp1110 = (this.bus._cp1110 || 0) + 1;
-      // Finer-grained checkpoints across the untaken branch at 0x1000 (BEQ 0x1018) — VBL 1 always
-      // took that branch, so 0x1002-0x1016 were never captured by mixLoopTrace. If later VBLs
-      // fall through instead of branching, this pinpoints exactly where they end up.
-      else if (_snapPc === 0x03001002) this.bus._cp1002 = (this.bus._cp1002 || 0) + 1;
-      else if (_snapPc === 0x03001008) this.bus._cp1008 = (this.bus._cp1008 || 0) + 1;
-      else if (_snapPc === 0x0300100c) this.bus._cp100c = (this.bus._cp100c || 0) + 1;
-      else if (_snapPc === 0x03001010) this.bus._cp1010 = (this.bus._cp1010 || 0) + 1;
-      else if (_snapPc === 0x03001012) this.bus._cp1012 = (this.bus._cp1012 || 0) + 1;
-      else if (_snapPc === 0x03001014) this.bus._cp1014 = (this.bus._cp1014 || 0) + 1;
-      else if (_snapPc === 0x03001016) this.bus._cp1016 = (this.bus._cp1016 || 0) + 1;
-      else if (_snapPc === 0x03001018) this.bus._cp1018 = (this.bus._cp1018 || 0) + 1;
-      // The gate's r0 comes from LDR r0,[sp,#0x14] at 0x03000ffc. This code runs in the fixed-
-      // stack VBlank IRQ context, so SP should be constant across all 1792 calls — capture the
-      // resolved absolute address once, then watch every write to it for the whole render to
-      // find what's stuck writing 0x3C there after VBL 1.
-      if (_snapPc === 0x03000ffc && !this.bus._spWatchAddr) {
-        this.bus._spWatchAddr = (this.regs[13] + 0x14) >>> 0;
-      }
-      if (!this.bus._literalWatchAddr) {
-        this.bus._literalWatchAddr = this.bus.read32(0x081dce2c) >>> 0;
-      }
-      // The write site is STR r1,[sp,#0x14] at 0x081dcde6, where r1 = r1(=[r0+12], a byte off a
-      // struct pointer in r0) + r2 (a byte read via a ROM literal pointer). Capture the operands
-      // directly instead of re-deriving them statically, to see which one freezes after VBL 1.
-      if (_snapPc === 0x081dcde6) {
-        if (!this.bus.spStoreOperands) this.bus.spStoreOperands = [];
-        const log = this.bus.spStoreOperands;
-        if (log.length < 60) {
-          log.push({
-            vbl: this.bus.vblankCount,
-            r0: tools.hex(this.regs[0]),
-            r1: tools.hex(this.regs[1]),
-            r2: tools.hex(this.regs[2]),
-            r0plus12: tools.hex(this.bus.read8((this.regs[0] + 12) >>> 0)),
-          });
-        }
-      }
-      // Whole-render trace of the branch that decides whether to enter the ARM PCM mixer at
-      // taken on VBL 1, every other VBL falls through to an unconditional B at 0x1010 that skips
-      // the mixer entirely. r0 comes from [sp+0x14] (loaded 0x0ffc), r1 is a track byte + 0xE4
-      // (loaded/computed 0x1002-0x100a). Trace both operands directly, whole-render, run-length
-      // encoded, to see which one stops satisfying r1 < r0 after VBL 1.
-      if (_snapPc === 0x0300100c) {
-        if (!this.bus.mixCmpTrace) this.bus.mixCmpTrace = [];
-        const t = this.bus.mixCmpTrace;
-        if (t.length < 2000) {
-          const r = this.regs;
-          t.push({ vbl: this.bus.vblankCount, r0: tools.hex(r[0] >>> 0), r1: tools.hex(r[1] >>> 0) });
-        }
-      }
-      // Whole-render trace of the branch that decides whether to enter the ARM PCM mixer at
-      // all: LDRB r0,[r4+1] / TST r0,#8 / BEQ 0x03001254 (mixer entry) at PC 0x03001128-0x1130.
-      // mixVolTrace showed the mixer runs exactly once (VBL 1) across the whole 30s render, so
-      // this status byte's bit 3 must be set (skipping the branch) for essentially the entire
-      // rest of the render — this traces r0 (status byte) and r4 (track struct ptr) at the TST
-      // itself to see when/why that happens.
-      if (_snapPc === 0x0300112c) {
-        if (!this.bus.mixGateTrace) this.bus.mixGateTrace = [];
-        const t = this.bus.mixGateTrace;
-        if (t.length < 2000) {
-          const r = this.regs;
-          t.push({ vbl: this.bus.vblankCount, r0: tools.hex(r[0] >>> 0), r4: tools.hex(r[4] >>> 0) });
-        }
-      }
-      // Sparse, whole-render sample of the mixer's per-track volume registers (r10=left,
-      // r11=right, loaded just before 0x03001260) and pitch step (r4), taken at every Nth visit
-      // to that PC (not gated to the first fn2 call like mixerLoopTrace). The earlier full trace
-      // only ever looked at VBL 1; this checks whether volume/step collapses to near-zero later
-      // in the render, which would explain DMA reading correctly-positioned but silent data.
-      if (_snapPc === 0x03001260) {
-        const nHit = (this.bus._mixVolHitCount = (this.bus._mixVolHitCount || 0) + 1);
-        if (nHit % 211 === 1) {
-          if (!this.bus.mixVolTrace) this.bus.mixVolTrace = [];
-          const t = this.bus.mixVolTrace;
-          if (t.length < 200) {
-            const r = this.regs;
-            t.push({
-              n: nHit, vbl: this.bus.vblankCount,
-              r4: tools.hex(r[4] >>> 0), r10: tools.hex(r[10] >>> 0), r11: tools.hex(r[11] >>> 0),
-            });
-          }
-        }
-      }
-      // Full instruction trace of the actual ARM mixing loop (thumb stub at 0x03000f60
-      // hands off to ARM code around 0x03000fee, which runs until the thumb tail at
-      // 0x03001316 per irqCalls) for the FIRST fn2 invocation only, so we can see exactly
-      // which instruction stops producing nonzero PCM instead of guessing from summaries.
-      if (this.bus._fn2CallCount === 1 && _snapPc >= 0x03000fee && _snapPc <= 0x03001318) {
-        if (!this.bus.mixerLoopTrace) this.bus.mixerLoopTrace = [];
-        const trace = this.bus.mixerLoopTrace;
-        if (trace.length < 600) {
-          const thumb = !!(this.cpsr & CPSR_T);
-          const instrWord = thumb ? this.bus.read16(_snapPc) : this.bus.read32(_snapPc);
-          const r = this.regs;
-          trace.push({
-            pc: tools.hex(_snapPc), t: thumb ? 1 : 0, i: tools.hex(instrWord, thumb ? 4 : 8),
-            r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0), r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
-            r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0), r6: tools.hex(r[6]>>>0), r7: tools.hex(r[7]>>>0),
-            r8: tools.hex(r[8]>>>0), r9: tools.hex(r[9]>>>0), r10: tools.hex(r[10]>>>0), r11: tools.hex(r[11]>>>0),
-            r12: tools.hex(r[12]>>>0), r14: tools.hex(r[14]>>>0), c: (this.cpsr & CPSR_C) ? 1 : 0,
-          });
-        }
-      }
-      if ((_isCallSite || _isDivFn || _isIwramFn) && this.bus.timerRegSnaps.length < 16) {
-        // Deduplicate: skip if same region already captured
-        const _label = _isCallSite ? 'site' : _isDivFn ? 'div' : 'iwram';
-        if (!this.bus.timerRegSnaps.some(s => s.label === _label)) {
-          const r = this.regs;
-          this.bus.timerRegSnaps.push({
-            label: _label,
-            pc: tools.hex(_snapPc),
-            cycles: this.bus.cycles,
-            r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0),
-            r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
-            r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0),
-            r6: tools.hex(r[6]>>>0), r7: tools.hex(r[7]>>>0),
-            lr: tools.hex(r[14]>>>0),
-          });
-        }
-        // Always push call-site snaps (up to 4)
-        if (_isCallSite && this.bus.timerRegSnaps.filter(s=>s.label==='site').length < 4) {
-          const r = this.regs;
-          this.bus.timerRegSnaps.push({
-            label: 'site',
-            pc: tools.hex(_snapPc),
-            cycles: this.bus.cycles,
-            r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0),
-            r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
-            r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0),
-            r6: tools.hex(r[6]>>>0), r7: tools.hex(r[7]>>>0),
-            lr: tools.hex(r[14]>>>0),
-          });
-        }
-      }
+      if (this.diagnosticProbes) this._runDiagnosticProbes();
       if (this.cpsr & CPSR_T) {
         const pc = this.regs[15] >>> 0;
         this._pushPcRing(pc);
@@ -1772,6 +1579,157 @@
       }
       this._execArm(instr, pc);
       this._chargeCycles(pc, false);
+    }
+
+    _runDiagnosticProbes() {
+      const _snapPc = this.bus.debugPc;
+      const _isCallSite = (_snapPc === 0x081c248a || _snapPc === 0x081c121a);
+      const _isDivFn = _snapPc >= 0x08001800 && _snapPc <= 0x080019ff;
+      const _isIwramFn = _snapPc >= 0x03000400 && _snapPc <= 0x030005ff;
+
+      if ((_snapPc === 0x081dce1c || _snapPc === 0x081dee48) && this._inIrqDispatch) {
+        const r = this.regs;
+        const isFn2 = (_snapPc === 0x081dce1c);
+        const cnt = isFn2 ? 'fn2' : 'seq';
+        const cntKey = `_${cnt}CallCount`;
+        const n = this.bus[cntKey] = (this.bus[cntKey] || 0) + 1;
+        const memPeek = (a) => { if (a < 0x02000000 || a > 0x09000000) return []; const ws = []; for (let i=0;i<8;i++) ws.push(tools.hex(this.bus.read32((a+i*4)>>>0))); return ws; };
+        const snap = {
+          n, r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0),
+          r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
+          r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0),
+          memR0: memPeek(r[0]>>>0),
+          memR1: memPeek(r[1]>>>0),
+          memR2: memPeek(r[2]>>>0),
+          memR5: memPeek(r[5]>>>0),
+        };
+        const listKey = isFn2 ? 'fn2CallSnaps' : 'seqCallSnaps';
+        if (!this.bus[listKey]) this.bus[listKey] = [];
+        const list = this.bus[listKey];
+        if (n <= 4) list.push(snap);
+        else { if (list.length < 8) list.push(snap); else { list.splice(4, 1); list.push(snap); } }
+        if (isFn2) {
+          const writeAddr = r[5] >>> 0;
+          const readAddr = this.bus.dmaSourceLatch[1] >>> 0;
+          const bufSize = this.bus.dsFifoBufferSize || 0x8000;
+          const driftBytes = ((readAddr - writeAddr) % bufSize + bufSize) % bufSize;
+          const drift = { n, vbl: this.bus.vblankCount, r5: tools.hex(writeAddr), dmaSad1: tools.hex(readAddr), driftBytes, bufSize };
+          if (!this.bus.dmaDriftLog) this.bus.dmaDriftLog = [];
+          const dlist = this.bus.dmaDriftLog;
+          if (n <= 8) dlist.push(drift);
+          else { if (dlist.length < 16) dlist.push(drift); else { dlist.splice(8, 1); dlist.push(drift); } }
+        }
+      }
+
+      if (_snapPc === 0x03000fee) this.bus._cpFee = (this.bus._cpFee || 0) + 1;
+      else if (_snapPc === 0x03001000) this.bus._cp1000 = (this.bus._cp1000 || 0) + 1;
+      else if (_snapPc === 0x0300101c) this.bus._cp101c = (this.bus._cp101c || 0) + 1;
+      else if (_snapPc === 0x03001056) this.bus._cp1056 = (this.bus._cp1056 || 0) + 1;
+      else if (_snapPc === 0x030010fc) this.bus._cp10fc = (this.bus._cp10fc || 0) + 1;
+      else if (_snapPc === 0x03001110) this.bus._cp1110 = (this.bus._cp1110 || 0) + 1;
+      else if (_snapPc === 0x03001002) this.bus._cp1002 = (this.bus._cp1002 || 0) + 1;
+      else if (_snapPc === 0x03001008) this.bus._cp1008 = (this.bus._cp1008 || 0) + 1;
+      else if (_snapPc === 0x0300100c) this.bus._cp100c = (this.bus._cp100c || 0) + 1;
+      else if (_snapPc === 0x03001010) this.bus._cp1010 = (this.bus._cp1010 || 0) + 1;
+      else if (_snapPc === 0x03001012) this.bus._cp1012 = (this.bus._cp1012 || 0) + 1;
+      else if (_snapPc === 0x03001014) this.bus._cp1014 = (this.bus._cp1014 || 0) + 1;
+      else if (_snapPc === 0x03001016) this.bus._cp1016 = (this.bus._cp1016 || 0) + 1;
+      else if (_snapPc === 0x03001018) this.bus._cp1018 = (this.bus._cp1018 || 0) + 1;
+
+      if (_snapPc === 0x03000ffc && !this.bus._spWatchAddr) {
+        this.bus._spWatchAddr = (this.regs[13] + 0x14) >>> 0;
+      }
+      if (!this.bus._literalWatchAddr) {
+        this.bus._literalWatchAddr = this.bus.read32(0x081dce2c) >>> 0;
+      }
+      if (_snapPc === 0x081dcde6) {
+        if (!this.bus.spStoreOperands) this.bus.spStoreOperands = [];
+        const log = this.bus.spStoreOperands;
+        if (log.length < 60) {
+          log.push({
+            vbl: this.bus.vblankCount,
+            r0: tools.hex(this.regs[0]),
+            r1: tools.hex(this.regs[1]),
+            r2: tools.hex(this.regs[2]),
+            r0plus12: tools.hex(this.bus.read8((this.regs[0] + 12) >>> 0)),
+          });
+        }
+      }
+      if (_snapPc === 0x0300100c) {
+        if (!this.bus.mixCmpTrace) this.bus.mixCmpTrace = [];
+        const t = this.bus.mixCmpTrace;
+        if (t.length < 2000) {
+          const r = this.regs;
+          t.push({ vbl: this.bus.vblankCount, r0: tools.hex(r[0] >>> 0), r1: tools.hex(r[1] >>> 0) });
+        }
+      }
+      if (_snapPc === 0x0300112c) {
+        if (!this.bus.mixGateTrace) this.bus.mixGateTrace = [];
+        const t = this.bus.mixGateTrace;
+        if (t.length < 2000) {
+          const r = this.regs;
+          t.push({ vbl: this.bus.vblankCount, r0: tools.hex(r[0] >>> 0), r4: tools.hex(r[4] >>> 0) });
+        }
+      }
+      if (_snapPc === 0x03001260) {
+        const nHit = (this.bus._mixVolHitCount = (this.bus._mixVolHitCount || 0) + 1);
+        if (nHit % 211 === 1) {
+          if (!this.bus.mixVolTrace) this.bus.mixVolTrace = [];
+          const t = this.bus.mixVolTrace;
+          if (t.length < 200) {
+            const r = this.regs;
+            t.push({
+              n: nHit, vbl: this.bus.vblankCount,
+              r4: tools.hex(r[4] >>> 0), r10: tools.hex(r[10] >>> 0), r11: tools.hex(r[11] >>> 0),
+            });
+          }
+        }
+      }
+      if (this.bus._fn2CallCount === 1 && _snapPc >= 0x03000fee && _snapPc <= 0x03001318) {
+        if (!this.bus.mixerLoopTrace) this.bus.mixerLoopTrace = [];
+        const trace = this.bus.mixerLoopTrace;
+        if (trace.length < 600) {
+          const thumb = !!(this.cpsr & CPSR_T);
+          const instrWord = thumb ? this.bus.read16(_snapPc) : this.bus.read32(_snapPc);
+          const r = this.regs;
+          trace.push({
+            pc: tools.hex(_snapPc), t: thumb ? 1 : 0, i: tools.hex(instrWord, thumb ? 4 : 8),
+            r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0), r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
+            r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0), r6: tools.hex(r[6]>>>0), r7: tools.hex(r[7]>>>0),
+            r8: tools.hex(r[8]>>>0), r9: tools.hex(r[9]>>>0), r10: tools.hex(r[10]>>>0), r11: tools.hex(r[11]>>>0),
+            r12: tools.hex(r[12]>>>0), r14: tools.hex(r[14]>>>0), c: (this.cpsr & CPSR_C) ? 1 : 0,
+          });
+        }
+      }
+      if ((_isCallSite || _isDivFn || _isIwramFn) && this.bus.timerRegSnaps.length < 16) {
+        const _label = _isCallSite ? 'site' : _isDivFn ? 'div' : 'iwram';
+        if (!this.bus.timerRegSnaps.some(s => s.label === _label)) {
+          const r = this.regs;
+          this.bus.timerRegSnaps.push({
+            label: _label,
+            pc: tools.hex(_snapPc),
+            cycles: this.bus.cycles,
+            r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0),
+            r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
+            r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0),
+            r6: tools.hex(r[6]>>>0), r7: tools.hex(r[7]>>>0),
+            lr: tools.hex(r[14]>>>0),
+          });
+        }
+        if (_isCallSite && this.bus.timerRegSnaps.filter(s=>s.label==='site').length < 4) {
+          const r = this.regs;
+          this.bus.timerRegSnaps.push({
+            label: 'site',
+            pc: tools.hex(_snapPc),
+            cycles: this.bus.cycles,
+            r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0),
+            r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
+            r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0),
+            r6: tools.hex(r[6]>>>0), r7: tools.hex(r[7]>>>0),
+            lr: tools.hex(r[14]>>>0),
+          });
+        }
+      }
     }
 
     // Region-aware per-instruction cycle cost, plus draining any bus-stall cycles owed
@@ -3817,6 +3775,7 @@
       // Enable fast mode — skip all diagnostic tracking
       this.bus.fastMode = true;
       this.cpu.fastMode = true;
+      this.cpu.diagnosticProbes = debug;
       this.bus.timerReloadLog = [];
       this.bus.timerRegSnaps = [];
       this.bus.fn2CallSnaps = [];
@@ -3918,12 +3877,14 @@
       if (debug) {
         this.bus.fastMode = false;
         this.cpu.fastMode = false;
+        this.cpu.diagnosticProbes = true;
         this.cpu.pcHits = new Map();
         this.cpu.recentPcs = [];
         this.cpu.branches = [];
         this.runDiagnostics(0);
         this.bus.fastMode = true;
         this.cpu.fastMode = true;
+        this.cpu.diagnosticProbes = debug;
       }
 
       if (!this.diagnostics.fifo) this.diagnostics.fifo = {};
@@ -3992,6 +3953,7 @@
       const bus = this.bus;
       const CHUNK_SAMPLES = Math.max(256, Math.round(playbackRate * 0.15));
       const TARGET_AHEAD_SEC = 0.6;
+      const MIN_AHEAD_SEC = 0.28;
 
       const producedTotal = () => stream.trimOffset + Math.max(bus.fifoSamplesA.length, bus.fifoSamplesB.length);
       const reachedEnd = () => engine.cpu.halted || (bus.cycles - cyclesAtStart) / GBA_CPU_HZ >= maxSeconds;
@@ -4057,7 +4019,12 @@
         }
         trimConsumed();
         const ahead = stream.nextTime - ctx.currentTime;
-        stream.timer = setTimeout(tick, ahead > TARGET_AHEAD_SEC ? 50 : 0);
+        const delayMs = ahead > TARGET_AHEAD_SEC
+          ? 50
+          : ahead > MIN_AHEAD_SEC
+            ? Math.min(35, Math.max(4, Math.round((ahead - MIN_AHEAD_SEC) * 500)))
+            : 0;
+        stream.timer = setTimeout(tick, delayMs);
       };
       stream.timer = setTimeout(tick, 0);
 
@@ -4091,7 +4058,16 @@
       if (!this.cpu) this._initCpu();
       const startInstructions = this.cpu.instructions;
       const startEvents = this.bus.events.length;
+      const prevDiagnosticProbes = this.cpu.diagnosticProbes;
+      const prevCpuFastMode = this.cpu.fastMode;
+      const prevBusFastMode = this.bus.fastMode;
+      this.cpu.fastMode = false;
+      this.bus.fastMode = false;
+      this.cpu.diagnosticProbes = true;
       const cpu = this.cpu.run(maxInstructions);
+      this.cpu.diagnosticProbes = prevDiagnosticProbes;
+      this.cpu.fastMode = prevCpuFastMode;
+      this.bus.fastMode = prevBusFastMode;
       const ranInstructions = cpu.instructions - startInstructions;
       const events = this.bus.events;
       const lastBranch = cpu.branches?.slice(-1)[0] || null;

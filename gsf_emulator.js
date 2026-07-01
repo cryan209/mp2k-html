@@ -2866,6 +2866,11 @@
             const st = this.bus.psgWave;
             return { enabled: st.enabled, freq: st.freqCur, outputLevel: st.outputLevel, forceVolume: st.forceVolume };
           })(),
+          // Raw WAVE_RAM bytes (16 bytes = 32 packed 4-bit samples). We don't track the bank-
+          // select bit (SOUND3CNT_L bit6) separately, so if this game ping-pongs between banks
+          // this could be garbage/stale data rather than the real waveform — check by eye.
+          waveRamHex: Array.from({ length: 16 }, (_, i) => tools.hex(this.bus.read8((0x04000090 + i) >>> 0), 2)),
+          soundCnt3LHex: tools.hex(this.bus.read8(0x04000070), 2),
           psgNoiseState: (() => {
             const st = this.bus.psgNoise;
             return { enabled: st.enabled, volume: st.volume, divRatio: st.divRatio, shiftFreq: st.shiftFreq, widthMode: st.widthMode };

@@ -210,6 +210,24 @@
       this.psgTriggerStats = [0, 1].map(() => ({
         total: 0, sameFreq: 0, minGapCycles: Infinity, sumGapCycles: 0, gapSamples: 0,
       }));
+      // PSG Wave (ch 2): plays back the 32x4-bit sample table at WAVE_RAM (0x04000090-9F)
+      // at the programmed frequency, scaled by a fixed output-level select (no envelope).
+      this.psgWave = {
+        enabled: false, triggerCycles: 0, lastSampleCycles: 0,
+        freqRaw: 0, freqCur: 0,
+        lengthEnabled: false, lengthCyclesTotal: Infinity,
+        outputLevel: 0, forceVolume: false,
+        phase: 0,
+      };
+      // PSG Noise (ch 3): pseudorandom LFSR bitstream, envelope like the Square channels but
+      // no frequency/duty — pitch is a clock divider+shift pair, width is 15-bit or 7-bit.
+      this.psgNoise = {
+        enabled: false, triggerCycles: 0, lastSampleCycles: 0,
+        volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
+        lengthEnabled: false, lengthCyclesTotal: Infinity,
+        divRatio: 0, widthMode: 0, shiftFreq: 0,
+        lfsr: 0x7fff, phaseCycles: 0,
+      };
     }
 
     region(addr) {
@@ -367,6 +385,14 @@
           this._psgTrigger(ch);
         }
       }
+      // Wave (SOUND3CNT_X high byte, 0x75): same live-frequency + Trigger split as Square.
+      if (addr === 0x04000075) {
+        this._waveUpdateFreq();
+        if (value & 0x80) this._waveTrigger();
+      }
+      // Noise (SOUND4CNT_H high byte, 0x7d): no frequency field to live-update — pitch is set
+      // by the clock divider/shift in the low byte, only Trigger restarts the LFSR/envelope.
+      if (addr === 0x0400007d && (value & 0x80)) this._noiseTrigger();
       // Log writes to TM0CNT_L/H (0x04000100-0x04000103) for debugging timer misconfiguration
       if (addr >= 0x04000100 && addr <= 0x04000103 && this.timerReloadLog.length < 64) {
         const pc = this.debugPc || 0;
@@ -592,6 +618,109 @@
       st.enabled = true;
     }
 
+    _waveUpdateFreq() {
+      const st = this.psgWave;
+      const freqReg = this.read16(0x04000074);
+      st.freqRaw = freqReg & 0x7ff;
+      st.freqCur = st.freqRaw;
+      st.lengthEnabled = !!(freqReg & 0x4000);
+    }
+
+    _waveTrigger() {
+      const st = this.psgWave;
+      const cntL = this.read8(0x04000070);
+      const cntH = this.read16(0x04000072);
+      // NR30 bit7: DAC power. If off, the channel produces no output regardless of Trigger.
+      const dacOn = !!(cntL & 0x80);
+      const levelBits = (cntH >>> 13) & 3;
+      st.outputLevel = [0, 1, 0.5, 0.25][levelBits];
+      st.forceVolume = !!(cntH & 0x8000);
+      const lengthData = cntH & 0xff;
+      st.lengthCyclesTotal = st.lengthEnabled ? (256 - lengthData) * (GBA_CPU_HZ / 256) : Infinity;
+      st.phase = 0;
+      st.triggerCycles = this.cycles;
+      st.lastSampleCycles = this.cycles;
+      st.enabled = dacOn;
+    }
+
+    // Wave RAM is 32 packed 4-bit samples (16 bytes) at 0x04000090-0x0400009F, MSB-first per
+    // byte. We don't track the bank-select bit (SOUND3CNT_L bit6) separately — games that
+    // ping-pong between the two banks while playing are rare enough to accept as a gap.
+    _waveSample(index) {
+      const byte = this.read8((0x04000090 + (index >>> 1)) >>> 0);
+      const nibble = (index & 1) === 0 ? (byte >>> 4) & 0xf : byte & 0xf;
+      return nibble - 8; // center to roughly -8..7
+    }
+
+    _waveAdvance(nowCycles) {
+      const st = this.psgWave;
+      if (!st.enabled) return 0;
+      const elapsed = nowCycles - st.triggerCycles;
+      if (st.lengthEnabled && elapsed >= st.lengthCyclesTotal) { st.enabled = false; return 0; }
+      const freqHz = 131072 / (2048 - st.freqCur);
+      const dt = (nowCycles - st.lastSampleCycles) / GBA_CPU_HZ;
+      st.lastSampleCycles = nowCycles;
+      // One full pass through all 32 samples = one waveform period.
+      st.phase = ((st.phase + freqHz * dt) % 32 + 32) % 32;
+      const raw = this._waveSample(Math.floor(st.phase));
+      const level = st.forceVolume ? 0.75 : st.outputLevel;
+      return raw * level;
+    }
+
+    _noiseTrigger() {
+      const st = this.psgNoise;
+      const envReg = this.read16(0x04000078);
+      const freqReg = this.read16(0x0400007c);
+      st.volInit = (envReg >>> 12) & 0xf;
+      st.volume = st.volInit;
+      st.envDir = (envReg >>> 11) & 1;
+      st.envStep = (envReg >>> 8) & 7;
+      st.envStepsApplied = 0;
+      st.lengthEnabled = !!(freqReg & 0x4000);
+      const lengthData = envReg & 0x3f;
+      st.lengthCyclesTotal = st.lengthEnabled ? (64 - lengthData) * (GBA_CPU_HZ / 256) : Infinity;
+      st.divRatio = freqReg & 7;
+      st.widthMode = (freqReg >>> 3) & 1; // 0=15-bit, 1=7-bit
+      st.shiftFreq = (freqReg >>> 4) & 0xf;
+      st.lfsr = 0x7fff;
+      st.phaseCycles = 0;
+      st.triggerCycles = this.cycles;
+      st.lastSampleCycles = this.cycles;
+      st.enabled = true;
+    }
+
+    _noiseAdvance(nowCycles) {
+      const st = this.psgNoise;
+      if (!st.enabled) return 0;
+      const elapsed = nowCycles - st.triggerCycles;
+      if (st.lengthEnabled && elapsed >= st.lengthCyclesTotal) { st.enabled = false; return 0; }
+      if (st.envStep > 0) {
+        const period = st.envStep * (GBA_CPU_HZ / 64);
+        const stepsNow = Math.floor(elapsed / period);
+        if (stepsNow > st.envStepsApplied) {
+          st.envStepsApplied = stepsNow;
+          st.volume = Math.max(0, Math.min(15, st.volInit + (st.envDir ? stepsNow : -stepsNow)));
+        }
+      }
+      // freq = 524288 / r / 2^(s+1) Hz, r=0 treated as 0.5. Shift period in GBA cycles.
+      const r = st.divRatio || 0.5;
+      const shiftHz = 524288 / r / Math.pow(2, st.shiftFreq + 1);
+      const shiftPeriodCycles = GBA_CPU_HZ / shiftHz;
+      const dCycles = nowCycles - st.lastSampleCycles;
+      st.lastSampleCycles = nowCycles;
+      st.phaseCycles += dCycles;
+      // Shift periods can be sub-cycle at max settings; cap iterations defensively so a huge
+      // dt (e.g. after a long halt) can't spin here for an unbounded amount of work.
+      let shifts = Math.min(4096, Math.floor(st.phaseCycles / Math.max(1, shiftPeriodCycles)));
+      st.phaseCycles -= shifts * shiftPeriodCycles;
+      while (shifts-- > 0) {
+        const xor = (st.lfsr & 1) ^ ((st.lfsr >>> 1) & 1);
+        st.lfsr = (st.lfsr >>> 1) | (xor << 14);
+        if (st.widthMode) st.lfsr = (st.lfsr & ~(1 << 6)) | (xor << 6);
+      }
+      return (st.lfsr & 1) === 0 ? st.volume : -st.volume;
+    }
+
     // Advance envelope/length/(ch0)sweep timing to `nowCycles` and return this channel's
     // current waveform sample. Idempotent w.r.t. nowCycles, so it's safe to call once per
     // stereo output channel even if both land on the same cycle.
@@ -657,10 +786,15 @@
         if (!(soundCntL & (1 << enableBit))) continue;
         mix += this._psgAdvance(ch, this.cycles);
       }
-      // Two channels at full volume (15 each) can sum to ±30 before this scale; at the old
-      // ×6 factor that's ±180, which combined with dsValue (already up to ±128) clips hard
+      // Wave = ch2 (bit10 right / bit14 left), Noise = ch3 (bit11 right / bit15 left).
+      if (soundCntL & (1 << (isRight ? 10 : 14))) mix += this._waveAdvance(this.cycles);
+      if (soundCntL & (1 << (isRight ? 11 : 15))) mix += this._noiseAdvance(this.cycles);
+      // Two Square channels at full volume (15 each) can sum to ±30 before this scale; at the
+      // old ×6 factor that's ±180, which combined with dsValue (already up to ±128) clips hard
       // and constantly whenever both channels play loud together — audible as buzz/crunch.
-      // ×4 caps the two-channel worst case at ±120, leaving headroom for dsValue.
+      // ×4 caps that two-channel worst case at ±120, leaving headroom for dsValue. Wave's raw
+      // range (~±7, before its own 0-100% level scale) and Noise (±15, like Square) share the
+      // same scale — roughly proportionate to their real relative loudness.
       const scaled = mix * 4 * ((masterVol + 1) / 8);
       return Math.max(-128, Math.min(127, Math.round(dsValue + scaled)));
     }
@@ -2495,6 +2629,20 @@
       this.bus.psgTriggerStats = [0, 1].map(() => ({
         total: 0, sameFreq: 0, minGapCycles: Infinity, sumGapCycles: 0, gapSamples: 0,
       }));
+      this.bus.psgWave = {
+        enabled: false, triggerCycles: 0, lastSampleCycles: 0,
+        freqRaw: 0, freqCur: 0,
+        lengthEnabled: false, lengthCyclesTotal: Infinity,
+        outputLevel: 0, forceVolume: false,
+        phase: 0,
+      };
+      this.bus.psgNoise = {
+        enabled: false, triggerCycles: 0, lastSampleCycles: 0,
+        volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
+        lengthEnabled: false, lengthCyclesTotal: Infinity,
+        divRatio: 0, widthMode: 0, shiftFreq: 0,
+        lfsr: 0x7fff, phaseCycles: 0,
+      };
 
       // Run in chunks until we have enough FIFO samples (avoids blocking the event loop)
       // Safety cap: bail after 500M instructions if no samples arrive (e.g. timer never enabled)
@@ -2680,6 +2828,14 @@
             ch, enabled: st.enabled, volume: st.volume, freq: st.freqCur,
             dutyFraction: st.dutyFraction, lengthEnabled: st.lengthEnabled,
           })),
+          psgWaveState: (() => {
+            const st = this.bus.psgWave;
+            return { enabled: st.enabled, freq: st.freqCur, outputLevel: st.outputLevel, forceVolume: st.forceVolume };
+          })(),
+          psgNoiseState: (() => {
+            const st = this.bus.psgNoise;
+            return { enabled: st.enabled, volume: st.volume, divRatio: st.divRatio, shiftFreq: st.shiftFreq, widthMode: st.widthMode };
+          })(),
           // Raw SOUNDCNT_L so we can confirm whether ch0/ch1's L/R routing bits (8,9,12,13)
           // are actually what's making pcmA vs pcmB differ, rather than guessing.
           soundCntLHex: tools.hex(this.bus.read16(0x04000080), 4),

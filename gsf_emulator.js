@@ -549,6 +549,7 @@
         valueHex: tools.hex(value, bytes * 2),
         bytes,
         region: r.id,
+        cycles: this.cycles,
         ...source,
       };
       if (addr >= 0x03007ff8 && addr <= 0x03007ffc) {
@@ -693,6 +694,12 @@
         readCycles: meta ? meta.readCycles : null,
         consumeCycles: this.cycles,
         lagCycles: meta ? this.cycles - meta.readCycles : null,
+        // How many cycles before this byte was *read* (DMA-to-FIFO) it was last *written*
+        // by the CPU -- null means never written (uninitialized), and a value near the
+        // 14-VBlank refill-cycle length (~3.93M cycles) means DMA is consuming data left
+        // over from the previous pass rather than this pass's fresh write.
+        writeCycles: meta ? meta.writeCycles : null,
+        staleCycles: (meta && meta.writeCycles != null) ? meta.readCycles - meta.writeCycles : null,
       };
       if (channel === 'A') {
         this.fifoLastA = value;
@@ -1090,6 +1097,11 @@
               addr: byteAddr,
               readCycles: this.cycles,
               writeInfo: write ? `${write.valueHex}@${write.pcHex}/${write.kind}` : '-',
+              // Cycle timestamp of the write that produced this byte, so we can tell whether
+              // DMA is reading data the CPU just wrote this pass vs. stale content left over
+              // from N frames ago (or never written at all, if `write` is undefined) -- this
+              // is how we distinguish "CPU hasn't caught up yet" from a genuine addressing bug.
+              writeCycles: write ? write.cycles : null,
             };
           }
           this._pushSoundFifoByte(channel, (word >>> (i * 8)) & 0xff, meta);

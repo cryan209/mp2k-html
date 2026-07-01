@@ -3799,13 +3799,19 @@
       return { count: buckets.reduce((a, b) => a + b, 0), events, buckets };
     }
 
-    async play(renderSeconds = 10, entryIndex = this.activeEntryIndex || 0) {
+    // Real-time streaming playback: emulate in short wall-clock slices and schedule the
+    // freshly produced Direct Sound samples as small AudioBuffers on a rolling timeline,
+    // instead of rendering the whole track offline and only then playing one big looping
+    // buffer. Audio starts after a short warmup (enough samples to derive the source
+    // rate); renderSeconds > 0 caps the stream length, <= 0 streams until stop().
+    async play(renderSeconds = 0, entryIndex = this.activeEntryIndex || 0) {
       if (entryIndex !== this.activeEntryIndex) this.selectEntry(entryIndex);
       if (!this.cpu) this._initCpu();
+      this.stop(); // tear down any previous stream before rewinding state
 
       const FALLBACK_SAMPLE_RATE = 13379;
-      const targetCycles = Math.max(1, Math.round(GBA_CPU_HZ * renderSeconds));
-      const CHUNK = 64; // max CPU steps per setTimeout slice
+      const maxSeconds = renderSeconds > 0 ? renderSeconds : Infinity;
+      const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
       // Enable fast mode — skip all diagnostic tracking
       this.bus.fastMode = true;
@@ -3866,59 +3872,59 @@
       this.bus.noiseTriggerLog = [];
       this.bus._noiseTriggerCount = 0;
 
-      // Run in chunks until we have enough FIFO samples (avoids blocking the event loop)
-      // Safety cap: bail after 500M instructions if no samples arrive (e.g. timer never enabled)
-      const MAX_INSTRUCTIONS = 500_000_000;
+      // --- Warmup: emulate (sliced, page stays responsive) until Direct Sound samples
+      // flow, so the source sample rate can be derived before audio starts.
       const instructionsAtStart = this.cpu.instructions;
       const cyclesAtStart = this.bus.cycles;
-      let renderStopReason = 'unknown';
-      let cyclesAtRenderEnd = cyclesAtStart;
-      let instructionsAtRenderEnd = instructionsAtStart;
+      const WARMUP_TARGET_SAMPLES = 2048; // ~150ms at typical mp2k rates
+      const WARMUP_MAX_CYCLES = GBA_CPU_HZ * 5;
+      const warmupWallStart = now();
       await new Promise(resolve => {
-        const tick = () => {
-          for (let i = 0; i < CHUNK; i++) {
-            this.cpu.step();
-            const ranTotal = this.cpu.instructions - instructionsAtStart;
-            const renderedCycles = this.bus.cycles - cyclesAtStart;
-            if (renderedCycles >= targetCycles || this.cpu.halted || ranTotal >= MAX_INSTRUCTIONS) {
-              renderStopReason = renderedCycles >= targetCycles ? 'target' : this.cpu.halted ? 'halted' : 'cap';
-              cyclesAtRenderEnd = this.bus.cycles;
-              instructionsAtRenderEnd = this.cpu.instructions;
-              resolve();
-              return;
-            }
+        const slice = () => {
+          const deadline = now() + 12;
+          let done = false;
+          while (now() < deadline) {
+            for (let i = 0; i < 256; i++) this.cpu.step();
+            const produced = Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length);
+            if (this.cpu.halted || produced >= WARMUP_TARGET_SAMPLES
+                || this.bus.cycles - cyclesAtStart >= WARMUP_MAX_CYCLES) { done = true; break; }
           }
-          setTimeout(tick, 0);
+          if (done) resolve();
+          else setTimeout(slice, 0);
         };
-        setTimeout(tick, 0);
+        setTimeout(slice, 0);
       });
+      const warmupWallMs = Math.max(1, now() - warmupWallStart);
 
-      const renderSamplesA = this.bus.fifoSamplesA.slice();
-      const renderSamplesB = this.bus.fifoSamplesB.slice();
-      const renderFillBytesA = this.bus.fifoFillBytesA;
-      const renderFillBytesB = this.bus.fifoFillBytesB;
-      const renderQueueA = this.bus.fifoQueueA.length;
-      const renderQueueB = this.bus.fifoQueueB.length;
-      const renderDmaLog = this.bus.fifoDmaLog.slice();
       const sourceRate = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE);
       const biasOutput = this._soundBiasOutput();
-      const renderedCycles = cyclesAtRenderEnd - cyclesAtStart;
-      const renderedSeconds = renderedCycles / GBA_CPU_HZ;
-      const sourceSamples = Math.max(renderSamplesA.length, renderSamplesB.length);
-      const observedSourceRate = renderedSeconds > 0 ? Math.round(sourceSamples / renderedSeconds) : sourceRate;
+      const warmCycles = this.bus.cycles - cyclesAtStart;
+      const warmSeconds = warmCycles / GBA_CPU_HZ;
+      const sourceSamples = Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length);
+      const observedSourceRate = (warmSeconds > 0.05 && sourceSamples > 256)
+        ? Math.round(sourceSamples / warmSeconds) : sourceRate;
       const playbackRate = Math.max(3000, Math.min(96000, observedSourceRate || sourceRate || FALLBACK_SAMPLE_RATE));
-      const outputSamples = Math.max(1, Math.round(renderedSeconds * playbackRate));
+      // Emulated seconds per wall second over the warmup; below ~1.0 the stream cannot
+      // keep up with real time and will underrun (audible gaps).
+      const realtimeFactor = Math.round((warmSeconds / (warmupWallMs / 1000)) * 100) / 100;
+      if (realtimeFactor < 1.1 && !this.cpu.halted) {
+        console.warn(`[GsfEngine] Emulation runs at ${realtimeFactor}x real time — streaming may underrun`);
+      }
 
-      // Restore diagnostic mode and capture a small snapshot of current state
+      // Diagnostics snapshot at the warmup point; the stream keeps running after
+      // play() resolves. fastMode toggles off briefly so cpu.run(0) yields a snapshot.
       this.bus.fastMode = false;
       this.cpu.fastMode = false;
       this.cpu.pcHits = new Map();
       this.cpu.recentPcs = [];
       this.cpu.branches = [];
       this.runDiagnostics(0);
+      this.bus.fastMode = true;
+      this.cpu.fastMode = true;
 
       this.diagnostics.render = {
-        requestedSeconds: renderSeconds,
+        mode: 'stream',
+        requestedSeconds: renderSeconds > 0 ? renderSeconds : null,
         sampleRate: playbackRate,
         sourceRate: observedSourceRate,
         fifoFillRate: observedSourceRate,
@@ -3927,65 +3933,140 @@
         biasOutputRate: biasOutput.outputRate,
         dacBits: biasOutput.dacBits,
         soundBiasHex: biasOutput.biasHex,
-        targetCycles,
-        renderedCycles,
-        renderedSamples: outputSamples,
+        renderedCycles: warmCycles,
+        renderedSamples: sourceSamples,
         sourceSamples,
-        sampleStatsA: this._sampleStats(renderSamplesA),
-        sampleStatsB: this._sampleStats(renderSamplesB),
-        clicksA: this._detectClicks(renderSamplesA, playbackRate, this.bus.dsOnlySamplesA, this.bus.dmaSrcTraceA),
-        clicksB: this._detectClicks(renderSamplesB, playbackRate, this.bus.dsOnlySamplesB, this.bus.dmaSrcTraceB),
+        realtimeFactor,
+        sampleStatsA: this._sampleStats(this.bus.fifoSamplesA),
+        sampleStatsB: this._sampleStats(this.bus.fifoSamplesB),
+        clicksA: this._detectClicks(this.bus.fifoSamplesA, playbackRate, this.bus.dsOnlySamplesA, this.bus.dmaSrcTraceA),
+        clicksB: this._detectClicks(this.bus.fifoSamplesB, playbackRate, this.bus.dsOnlySamplesB, this.bus.dmaSrcTraceB),
         // Direct Sound BEFORE PSG gets mixed in — isolates whether Direct Sound alone is
         // correct on this track, since everything inspected so far has been the final mix.
         dsOnlyStatsA: this._sampleStats(this.bus.dsOnlySamplesA),
         dsOnlyStatsB: this._sampleStats(this.bus.dsOnlySamplesB),
-        renderedMs: Math.round(renderedSeconds * 1000),
-        instructions: instructionsAtRenderEnd - instructionsAtStart,
-        stopReason: renderStopReason,
+        renderedMs: Math.round(warmSeconds * 1000),
+        instructions: this.cpu.instructions - instructionsAtStart,
+        stopReason: this.cpu.halted ? 'halted' : 'streaming',
       };
-      this.diagnostics.fifo.renderSamplesA = renderSamplesA.length;
-      this.diagnostics.fifo.renderSamplesB = renderSamplesB.length;
-      this.diagnostics.fifo.fillBytesA = renderFillBytesA;
-      this.diagnostics.fifo.fillBytesB = renderFillBytesB;
-      this.diagnostics.fifo.queueA = renderQueueA;
-      this.diagnostics.fifo.queueB = renderQueueB;
-      this.diagnostics.fifo.dmaLog = renderDmaLog;
-      if (sourceSamples > 0) {
-        try {
-          const audioCtx = new AudioContext({ sampleRate: playbackRate });
-          await audioCtx.resume();
-          const buffer = audioCtx.createBuffer(2, outputSamples, playbackRate);
-          // SOUNDCNT_H 0xa90e: Sound A → right, Sound B → left
-          const left  = buffer.getChannelData(0);
-          const right = buffer.getChannelData(1);
-          const sampA = renderSamplesA;
-          const sampB = renderSamplesB;
-          const step = sourceSamples / outputSamples;
-          // Mixed samples now span the hardware-accurate ±511 range (see _mixPsgInto's
-          // comment), not the old ad-hoc ±128 — normalize by 512 to reach Web Audio's -1..1.
-          for (let i = 0; i < outputSamples; i++) {
-            const sourcePos = i * step;
-            right[i] = this._sampleAt(sampA, sourcePos) / 512;
-            left[i]  = this._sampleAt(sampB, sourcePos) / 512;
-          }
-          if (this._audioSrc) { try { this._audioSrc.stop(); } catch (_) {} }
-          if (this._audioCtx) { this._audioCtx.close(); }
-          const src = audioCtx.createBufferSource();
-          src.buffer = buffer;
-          src.loop = true;
-          src.connect(audioCtx.destination);
-          src.start();
-          this._audioCtx = audioCtx;
-          this._audioSrc = src;
-        } catch (err) {
-          console.warn('[GsfEngine] Audio playback failed:', err);
-        }
+      this.diagnostics.fifo.renderSamplesA = this.bus.fifoSamplesA.length;
+      this.diagnostics.fifo.renderSamplesB = this.bus.fifoSamplesB.length;
+      this.diagnostics.fifo.fillBytesA = this.bus.fifoFillBytesA;
+      this.diagnostics.fifo.fillBytesB = this.bus.fifoFillBytesB;
+      this.diagnostics.fifo.queueA = this.bus.fifoQueueA.length;
+      this.diagnostics.fifo.queueB = this.bus.fifoQueueB.length;
+      this.diagnostics.fifo.dmaLog = this.bus.fifoDmaLog.slice();
+
+      if (this.cpu.halted && sourceSamples === 0) return this.diagnostics;
+      if (typeof AudioContext === 'undefined') return this.diagnostics;
+
+      // --- Audio graph + streaming pump ---
+      let ctx;
+      try {
+        ctx = new AudioContext({ sampleRate: playbackRate });
+        await ctx.resume();
+      } catch (err) {
+        console.warn('[GsfEngine] Audio init failed:', err);
+        return this.diagnostics;
       }
+
+      const stream = {
+        ctx,
+        rate: playbackRate,
+        stopped: false,
+        ended: false,
+        timer: null,
+        nextTime: ctx.currentTime + 0.15, // priming latency before the first chunk plays
+        consumed: 0,    // total samples scheduled to the audio graph
+        trimOffset: 0,  // samples spliced off the front of the live arrays
+        underruns: 0,
+      };
+      this._stream = stream;
+
+      const engine = this;
+      const bus = this.bus;
+      const CHUNK_SAMPLES = Math.max(256, Math.round(playbackRate * 0.15));
+      const TARGET_AHEAD_SEC = 0.6;
+
+      const producedTotal = () => stream.trimOffset + Math.max(bus.fifoSamplesA.length, bus.fifoSamplesB.length);
+      const reachedEnd = () => engine.cpu.halted || (bus.cycles - cyclesAtStart) / GBA_CPU_HZ >= maxSeconds;
+      const sampleFrom = (arr, idx) => arr.length ? (arr[Math.min(idx, arr.length - 1)] || 0) : 0;
+
+      const scheduleChunk = (n) => {
+        const startIdx = stream.consumed - stream.trimOffset;
+        const buffer = ctx.createBuffer(2, n, stream.rate);
+        // SOUNDCNT_H convention used throughout: Sound A → right, Sound B → left.
+        const left = buffer.getChannelData(0);
+        const right = buffer.getChannelData(1);
+        for (let i = 0; i < n; i++) {
+          // Mixed samples span the hardware ±511 range; normalize by 512 for Web Audio.
+          right[i] = sampleFrom(bus.fifoSamplesA, startIdx + i) / 512;
+          left[i] = sampleFrom(bus.fifoSamplesB, startIdx + i) / 512;
+        }
+        if (stream.nextTime < ctx.currentTime + 0.02) {
+          if (stream.consumed > 0) stream.underruns++;
+          stream.nextTime = ctx.currentTime + 0.05;
+        }
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+        src.connect(ctx.destination);
+        src.start(stream.nextTime);
+        stream.nextTime += n / stream.rate;
+        stream.consumed += n;
+      };
+
+      // Endless streams must not grow the sample arrays forever: splice off the played
+      // prefix (all six per-sample arrays advance in lockstep), keeping a small tail
+      // for the clamp-to-last-sample reads of a stalled channel.
+      const trimConsumed = () => {
+        const startIdx = stream.consumed - stream.trimOffset;
+        if (startIdx <= 65536) return;
+        let cut = startIdx - 4096;
+        if (bus.fifoSamplesA.length) cut = Math.min(cut, bus.fifoSamplesA.length - 1);
+        if (bus.fifoSamplesB.length) cut = Math.min(cut, bus.fifoSamplesB.length - 1);
+        if (cut <= 0) return;
+        for (const arr of [bus.fifoSamplesA, bus.fifoSamplesB, bus.dsOnlySamplesA, bus.dsOnlySamplesB, bus.dmaSrcTraceA, bus.dmaSrcTraceB]) {
+          if (arr.length) arr.splice(0, Math.min(cut, arr.length));
+        }
+        stream.trimOffset += cut;
+      };
+
+      const tick = () => {
+        if (stream.stopped) return;
+        // Emulate until a chunk's worth of new samples exists, bounded by a wall-clock
+        // slice so the UI thread stays responsive.
+        const deadline = now() + 12;
+        while (!reachedEnd() && producedTotal() - stream.consumed < CHUNK_SAMPLES && now() < deadline) {
+          for (let i = 0; i < 512; i++) engine.cpu.step();
+        }
+        while (producedTotal() - stream.consumed >= CHUNK_SAMPLES) scheduleChunk(CHUNK_SAMPLES);
+        if (reachedEnd()) {
+          const tail = producedTotal() - stream.consumed;
+          if (tail > 0) scheduleChunk(tail);
+          stream.ended = true;
+          if (engine.cpu.halted) console.warn('[GsfEngine] Stream ended: CPU halted:', engine.cpu.reason);
+          // Let the final scheduled buffer play out, then release the audio context.
+          const remainMs = Math.max(0, (stream.nextTime - ctx.currentTime) * 1000) + 200;
+          stream.timer = setTimeout(() => { if (engine._stream === stream) engine.stop(); }, remainMs);
+          return;
+        }
+        trimConsumed();
+        const ahead = stream.nextTime - ctx.currentTime;
+        stream.timer = setTimeout(tick, ahead > TARGET_AHEAD_SEC ? 50 : 0);
+      };
+      stream.timer = setTimeout(tick, 0);
 
       return this.diagnostics;
     }
 
     stop() {
+      if (this._stream) {
+        const s = this._stream;
+        this._stream = null;
+        s.stopped = true;
+        if (s.timer) clearTimeout(s.timer);
+        try { s.ctx.close(); } catch (_) { /* already closed */ }
+      }
       if (this._audioSrc) { try { this._audioSrc.stop(); } catch (_) {} this._audioSrc = null; }
       if (this._audioCtx) { this._audioCtx.close(); this._audioCtx = null; }
     }

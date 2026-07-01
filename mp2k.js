@@ -5235,7 +5235,9 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const entryIndex = mappedIndex >= 0 ? mappedIndex : (sel?.selectedIndex >= 0 ? sel.selectedIndex : 0);
       const chosenEntry = standardGsfEngine?.entries?.[entryIndex];
       console.log(`[gsf-lle entry-select] selectedSong=${selectedSong?.name || selectedSong?.idx} gsfPatchKey=${mappedKey || '(none)'} mappedIndex=${mappedIndex} sel.selectedIndex=${sel?.selectedIndex} -> entryIndex=${entryIndex} chosenEntry.key=${chosenEntry?.key || '(none)'} chosenEntry.patch.loadAddr=${chosenEntry?.patch ? '0x' + chosenEntry.patch.loadAddr.toString(16) : '?'}+${chosenEntry?.patch?.size ?? '?'}`);
-      const diagnostics = await standardGsfEngine?.play(30, entryIndex);
+      // play(0) = real-time streaming with no length cap; audio starts right after the
+      // warmup window and the returned diagnostics reflect that warmup snapshot.
+      const diagnostics = await standardGsfEngine?.play(0, entryIndex);
       const cpu = diagnostics?.cpu;
       const audio = diagnostics?.audio;
       const run = diagnostics?.run;
@@ -5517,6 +5519,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
 
 document.getElementById('btnStop').addEventListener('click', () => {
   player.stop();
+  standardGsfEngine?.stop(); // also halt any live GSF LLE stream
   setStatus('Stopped');
 });
 

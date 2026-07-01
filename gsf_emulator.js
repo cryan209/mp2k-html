@@ -226,7 +226,7 @@
         volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
         lengthEnabled: false, lengthCyclesTotal: Infinity,
         divRatio: 0, widthMode: 0, shiftFreq: 0,
-        lfsr: 0x7fff, phaseCycles: 0,
+        lfsr: 0x4000, out: false, phaseCycles: 0,
       };
       this.noiseTriggerLog = []; // first 8 + last 8 Noise trigger snapshots (gap/div/shift/width)
       this._noiseTriggerCount = 0;
@@ -693,13 +693,14 @@
       st.divRatio = freqReg & 7;
       st.widthMode = (freqReg >>> 3) & 1; // 0=15-bit, 1=7-bit
       st.shiftFreq = (freqReg >>> 4) & 0xf;
-      st.lfsr = 0x7fff;
+      st.lfsr = st.widthMode ? 0x40 : 0x4000; // per GBATEK: X=40h (7bit) or X=4000h (15bit)
+      st.out = false;
       st.phaseCycles = 0;
       st.triggerCycles = this.cycles;
       st.lastSampleCycles = this.cycles;
       st.enabled = true;
-      // Trigger log: unlike Square's phase, Noise's LFSR IS reset to the same seed (0x7fff) on
-      // every trigger per real hardware. If this channel is retriggered very frequently (like
+      // Trigger log: unlike Square's phase, Noise's LFSR IS reset to the same seed on every
+      // trigger per real hardware. If this channel is retriggered very frequently (like
       // Sappy's sustain-via-retrigger pattern seen on Square), the LFSR would keep replaying
       // the same short pseudo-random sequence from scratch each time instead of running freely
       // — turning broadband noise into an audible repeating buzz/tone. Log gap + settings per
@@ -736,12 +737,20 @@
       // dt (e.g. after a long halt) can't spin here for an unbounded amount of work.
       let shifts = Math.min(4096, Math.floor(st.phaseCycles / Math.max(1, shiftPeriodCycles)));
       st.phaseCycles -= shifts * shiftPeriodCycles;
+      // Per GBATEK: X = X SHR 1; IF the bit shifted out (carry) THEN Out=HIGH, X ^= 60h(7bit)/
+      // 6000h(15bit) ELSE Out=LOW. Output is the carry of the *last* shift, not a bit read back
+      // out of X afterward — persist it across calls in case zero shifts happen this sample.
       while (shifts-- > 0) {
-        const xor = (st.lfsr & 1) ^ ((st.lfsr >>> 1) & 1);
-        st.lfsr = (st.lfsr >>> 1) | (xor << 14);
-        if (st.widthMode) st.lfsr = (st.lfsr & ~(1 << 6)) | (xor << 6);
+        const carry = st.lfsr & 1;
+        st.lfsr = st.lfsr >>> 1;
+        if (carry) {
+          st.lfsr ^= st.widthMode ? 0x60 : 0x6000;
+          st.out = true;
+        } else {
+          st.out = false;
+        }
       }
-      return (st.lfsr & 1) === 0 ? st.volume : -st.volume;
+      return st.out ? st.volume : -st.volume;
     }
 
     // Advance envelope/length/(ch0)sweep timing to `nowCycles` and return this channel's
@@ -2664,7 +2673,7 @@
         volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
         lengthEnabled: false, lengthCyclesTotal: Infinity,
         divRatio: 0, widthMode: 0, shiftFreq: 0,
-        lfsr: 0x7fff, phaseCycles: 0,
+        lfsr: 0x4000, out: false, phaseCycles: 0,
       };
       this.bus.noiseTriggerLog = [];
       this.bus._noiseTriggerCount = 0;

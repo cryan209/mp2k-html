@@ -612,7 +612,14 @@
         st.sweepPeriod = (sweepReg >>> 4) & 7;
         st.sweepStepsApplied = 0;
       }
-      st.phase = 0;
+      // Real hardware does NOT reset a pulse channel's duty-cycle position on Trigger if the
+      // channel is already playing — only the frequency-timer reload, envelope, and volume
+      // reset (this is the opposite of Wave, whose position genuinely resets to 0, and Noise,
+      // whose LFSR genuinely resets to all-1s — both handled separately, correctly, below).
+      // Sappy-derived engines commonly re-poke Trigger every few frames on an already-sounding
+      // note just to keep it from decaying, without meaning to restart the wave; unconditionally
+      // resetting phase here produced an audible click/warble on every one of those re-pokes.
+      if (!st.enabled) st.phase = 0;
       st.triggerCycles = this.cycles;
       st.lastSampleCycles = this.cycles;
       st.enabled = true;

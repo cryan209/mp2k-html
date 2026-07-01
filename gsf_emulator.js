@@ -1250,6 +1250,22 @@
       if (_snapPc === 0x03000ffc && !this.bus._spWatchAddr) {
         this.bus._spWatchAddr = (this.regs[13] + 0x14) >>> 0;
       }
+      // The write site is STR r1,[sp,#0x14] at 0x081dcde6, where r1 = r1(=[r0+12], a byte off a
+      // struct pointer in r0) + r2 (a byte read via a ROM literal pointer). Capture the operands
+      // directly instead of re-deriving them statically, to see which one freezes after VBL 1.
+      if (_snapPc === 0x081dcde6) {
+        if (!this.bus.spStoreOperands) this.bus.spStoreOperands = [];
+        const log = this.bus.spStoreOperands;
+        if (log.length < 60) {
+          log.push({
+            vbl: this.bus.vblankCount,
+            r0: tools.hex(this.regs[0]),
+            r1: tools.hex(this.regs[1]),
+            r2: tools.hex(this.regs[2]),
+            r0plus12: tools.hex(this.bus.read8((this.regs[0] + 12) >>> 0)),
+          });
+        }
+      }
       // Whole-render trace of the branch that decides whether to enter the ARM PCM mixer at
       // taken on VBL 1, every other VBL falls through to an unconditional B at 0x1010 that skips
       // the mixer entirely. r0 comes from [sp+0x14] (loaded 0x0ffc), r1 is a track byte + 0xE4
@@ -3227,6 +3243,7 @@
             mixCmpTrace: this.bus.mixCmpTrace || [],
             spWatchAddr: this.bus._spWatchAddr ? tools.hex(this.bus._spWatchAddr) : null,
             spWatchLog: this.bus.spWatchLog || [],
+            spStoreOperands: this.bus.spStoreOperands || [],
             mixCheckpoints: {
               fee: this.bus._cpFee || 0,
               c1000: this.bus._cp1000 || 0,

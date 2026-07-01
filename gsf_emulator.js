@@ -1214,6 +1214,25 @@
           else { if (dlist.length < 16) dlist.push(drift); else { dlist.splice(8, 1); dlist.push(drift); } }
         }
       }
+      // Sparse, whole-render sample of the mixer's per-track volume registers (r10=left,
+      // r11=right, loaded just before 0x03001260) and pitch step (r4), taken at every Nth visit
+      // to that PC (not gated to the first fn2 call like mixerLoopTrace). The earlier full trace
+      // only ever looked at VBL 1; this checks whether volume/step collapses to near-zero later
+      // in the render, which would explain DMA reading correctly-positioned but silent data.
+      if (_snapPc === 0x03001260) {
+        const nHit = (this.bus._mixVolHitCount = (this.bus._mixVolHitCount || 0) + 1);
+        if (nHit % 211 === 1) {
+          if (!this.bus.mixVolTrace) this.bus.mixVolTrace = [];
+          const t = this.bus.mixVolTrace;
+          if (t.length < 200) {
+            const r = this.regs;
+            t.push({
+              n: nHit, vbl: this.bus.vblankCount,
+              r4: tools.hex(r[4] >>> 0), r10: tools.hex(r[10] >>> 0), r11: tools.hex(r[11] >>> 0),
+            });
+          }
+        }
+      }
       // Full instruction trace of the actual ARM mixing loop (thumb stub at 0x03000f60
       // hands off to ARM code around 0x03000fee, which runs until the thumb tail at
       // 0x03001316 per irqCalls) for the FIRST fn2 invocation only, so we can see exactly
@@ -3140,6 +3159,7 @@
               nonZeroWords: this.bus.fifoDmaNonZeroWords || 0,
             },
             mixerPcmTrace: this.bus.mixerPcmTrace || [],
+            mixVolTrace: this.bus.mixVolTrace || [],
             seqCalls: this.bus.seqCallSnaps || [],
             dmaDrift: this.bus.dmaDriftLog || [],
             // Find SoundInfo by searching for the fn2 pointer stored in IWRAM

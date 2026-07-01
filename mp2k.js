@@ -5370,12 +5370,16 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const mixPcmSummary = mixPcm.length
         ? ` | mixPcm(${mixPcm.length}):[${mixPcm.map(e => `${e.ch}@${e.addr}=${e.bytes.join(',')}`).join(' ')}]`
         : '';
+      const mixVol = memPeek?.mixVolTrace || [];
+      const mixVolSummary = mixVol.length
+        ? ` | mixVol(${mixVol.length}):[${mixVol.map(e => `n${e.n}@vbl${e.vbl}:r4=${e.r4},r10=${e.r10},r11=${e.r11}`).join(' ')}]`
+        : '';
       const fdt = memPeek?.fifoDmaTally;
       const fifoDmaTallySummary = fdt
         ? ` | fifoDmaTally:requested=${fdt.requested}/disabled=${fdt.disabled}/wrongTiming=${fdt.wrongTiming}/ran=${fdt.ran}/bufSize=${fdt.bufferSize}/base=[${(fdt.sourceBase || []).join(',')}]/zeroWords=${fdt.zeroWords}/nonZeroWords=${fdt.nonZeroWords}`
         : '';
       setStatus(cpu
-        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${fifoDmaTallySummary}`
+        ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}${mixPcmSummary}${mixVolSummary}${fifoDmaTallySummary}`
         : 'GSF CPU diagnostics unavailable.');
     } catch (err) {
       setStatus(err.message);

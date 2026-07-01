@@ -4023,6 +4023,10 @@ class GS1Player {
     return this.audioEng;
   }
 
+  isDebugEnabled() {
+    return !!this.debugOpen;
+  }
+
   async loadROM(arrayBuffer, loadedInfo = null) {
     this.rom = new ROM(arrayBuffer);
     this.loadedInfo = {
@@ -4091,7 +4095,7 @@ class GS1Player {
 
     this.seq = new Sequencer(this.rom, song, this.voiceGroup, this.audioEng);
     this.seq.onTrackUpdate = (i, t) => this._updateCell(i, t);
-    this.seq.onDebug = ev => this._debugEvent(ev);
+    this.seq.onDebug = this.isDebugEnabled() ? ev => this._debugEvent(ev) : null;
 
     // Build track cells UI
     this._buildTrackUI(song.tracks.length);
@@ -4298,6 +4302,7 @@ class GS1Player {
   }
 
   _debugEvent(ev) {
+    if (!this.isDebugEnabled()) return;
     const full = {
       time: new Date().toLocaleTimeString(),
       tick: this.seq ? this.seq.tickCount : (ev.tick || 0),
@@ -4326,11 +4331,12 @@ class GS1Player {
   }
 
   setDebug(open) {
-    this.debugOpen = open;
+    this.debugOpen = !!open;
+    if (this.seq) this.seq.onDebug = this.debugOpen ? ev => this._debugEvent(ev) : null;
     const panel = document.getElementById('debugPanel');
     const btn = document.getElementById('btnDebug');
-    panel.classList.toggle('open', open);
-    btn.classList.toggle('active', open);
+    panel.classList.toggle('open', this.debugOpen);
+    btn.classList.toggle('active', this.debugOpen);
     this.updateDebugPanel(true);
   }
 
@@ -4684,7 +4690,7 @@ class GS1Player {
   }
 
   updateDebugPanel(force = false) {
-    if (!this.debugOpen && !force) return;
+    if (!this.isDebugEnabled()) return;
     const now = performance.now();
     if (!force && now - this.debugLastRender < 120) return;
     this.debugLastRender = now;
@@ -5226,6 +5232,7 @@ function populateSongList(songs) {
 document.getElementById('btnPlay').addEventListener('click', async () => {
   if (document.getElementById('engineSelect')?.value === 'gsf-lle') {
     try {
+      const debugEnabled = player.isDebugEnabled();
       const sel = document.getElementById('songSelect');
       const selectedSong = player.songs.find(s => String(s.idx) === sel?.value) || player.songs[sel?.selectedIndex || 0];
       const mappedKey = selectedSong?.gsfPatch?.key;
@@ -5234,10 +5241,17 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
         : -1;
       const entryIndex = mappedIndex >= 0 ? mappedIndex : (sel?.selectedIndex >= 0 ? sel.selectedIndex : 0);
       const chosenEntry = standardGsfEngine?.entries?.[entryIndex];
-      console.log(`[gsf-lle entry-select] selectedSong=${selectedSong?.name || selectedSong?.idx} gsfPatchKey=${mappedKey || '(none)'} mappedIndex=${mappedIndex} sel.selectedIndex=${sel?.selectedIndex} -> entryIndex=${entryIndex} chosenEntry.key=${chosenEntry?.key || '(none)'} chosenEntry.patch.loadAddr=${chosenEntry?.patch ? '0x' + chosenEntry.patch.loadAddr.toString(16) : '?'}+${chosenEntry?.patch?.size ?? '?'}`);
+      if (debugEnabled) {
+        console.log(`[gsf-lle entry-select] selectedSong=${selectedSong?.name || selectedSong?.idx} gsfPatchKey=${mappedKey || '(none)'} mappedIndex=${mappedIndex} sel.selectedIndex=${sel?.selectedIndex} -> entryIndex=${entryIndex} chosenEntry.key=${chosenEntry?.key || '(none)'} chosenEntry.patch.loadAddr=${chosenEntry?.patch ? '0x' + chosenEntry.patch.loadAddr.toString(16) : '?'}+${chosenEntry?.patch?.size ?? '?'}`);
+      }
       // play(0) = real-time streaming with no length cap; audio starts right after the
-      // warmup window and the returned diagnostics reflect that warmup snapshot.
-      const diagnostics = await standardGsfEngine?.play(0, entryIndex);
+      // warmup window. The heavy diagnostics snapshot is only collected in debug mode.
+      const diagnostics = await standardGsfEngine?.play(0, entryIndex, { debug: debugEnabled });
+      if (!debugEnabled) {
+        setStatus(`GSF LLE streaming${chosenEntry?.key ? `: ${chosenEntry.key}` : ''}`);
+        updateInfoText();
+        return;
+      }
       const cpu = diagnostics?.cpu;
       const audio = diagnostics?.audio;
       const run = diagnostics?.run;

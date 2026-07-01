@@ -3804,10 +3804,11 @@
     // instead of rendering the whole track offline and only then playing one big looping
     // buffer. Audio starts after a short warmup (enough samples to derive the source
     // rate); renderSeconds > 0 caps the stream length, <= 0 streams until stop().
-    async play(renderSeconds = 0, entryIndex = this.activeEntryIndex || 0) {
+    async play(renderSeconds = 0, entryIndex = this.activeEntryIndex || 0, options = {}) {
       if (entryIndex !== this.activeEntryIndex) this.selectEntry(entryIndex);
       if (!this.cpu) this._initCpu();
       this.stop(); // tear down any previous stream before rewinding state
+      const debug = !!options.debug;
 
       const FALLBACK_SAMPLE_RATE = 13379;
       const maxSeconds = renderSeconds > 0 ? renderSeconds : Infinity;
@@ -3912,16 +3913,20 @@
       }
 
       // Diagnostics snapshot at the warmup point; the stream keeps running after
-      // play() resolves. fastMode toggles off briefly so cpu.run(0) yields a snapshot.
-      this.bus.fastMode = false;
-      this.cpu.fastMode = false;
-      this.cpu.pcHits = new Map();
-      this.cpu.recentPcs = [];
-      this.cpu.branches = [];
-      this.runDiagnostics(0);
-      this.bus.fastMode = true;
-      this.cpu.fastMode = true;
+      // play() resolves. Keep it opt-in because it briefly disables fast mode and
+      // builds a large diagnostic object for the main-page debug dump.
+      if (debug) {
+        this.bus.fastMode = false;
+        this.cpu.fastMode = false;
+        this.cpu.pcHits = new Map();
+        this.cpu.recentPcs = [];
+        this.cpu.branches = [];
+        this.runDiagnostics(0);
+        this.bus.fastMode = true;
+        this.cpu.fastMode = true;
+      }
 
+      if (!this.diagnostics.fifo) this.diagnostics.fifo = {};
       this.diagnostics.render = {
         mode: 'stream',
         requestedSeconds: renderSeconds > 0 ? renderSeconds : null,

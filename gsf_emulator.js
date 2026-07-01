@@ -1187,7 +1187,8 @@
             pc: tools.hex(_snapPc), t: thumb ? 1 : 0, i: tools.hex(instrWord, thumb ? 4 : 8),
             r0: tools.hex(r[0]>>>0), r1: tools.hex(r[1]>>>0), r2: tools.hex(r[2]>>>0), r3: tools.hex(r[3]>>>0),
             r4: tools.hex(r[4]>>>0), r5: tools.hex(r[5]>>>0), r6: tools.hex(r[6]>>>0), r7: tools.hex(r[7]>>>0),
-            r12: tools.hex(r[12]>>>0), lr: tools.hex(r[14]>>>0), c: (this.cpsr & CPSR_C) ? 1 : 0,
+            r8: tools.hex(r[8]>>>0), r9: tools.hex(r[9]>>>0), r10: tools.hex(r[10]>>>0), r11: tools.hex(r[11]>>>0),
+            r12: tools.hex(r[12]>>>0), r14: tools.hex(r[14]>>>0), c: (this.cpsr & CPSR_C) ? 1 : 0,
           });
         }
       }

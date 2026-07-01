@@ -5364,7 +5364,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const romSummary = (romAt?.words ? ` | rom@081de180:[${romAt.words.join(',')}]` : '') + (romAt2?.words ? ` rom@081ddc00:[${romAt2.words.join(',')}]` : '');
       const mixTrace = memPeek?.mixerLoopTrace || [];
       const mixTraceSummary = mixTrace.length
-        ? ` | mixLoop(${mixTrace.length}):[${mixTrace.map(e => `${e.pc}:${e.i}`).join(',')}] regs:[${mixTrace.filter((_, i) => i % 40 === 0 || i === mixTrace.length - 1).map(e => `@${e.pc} r0=${e.r0} r1=${e.r1} r2=${e.r2} r3=${e.r3} r4=${e.r4} r5=${e.r5} r6=${e.r6} r7=${e.r7} r12=${e.r12} lr=${e.lr} c=${e.c}`).join(' | ')}]`
+        ? ` | mixLoop(${mixTrace.length}):[${mixTrace.map(e => `${e.pc}:${e.i}`).join(',')}] regs:[${mixTrace.filter((_, i) => i % 20 === 0 || i === mixTrace.length - 1).map(e => `@${e.pc} r0=${e.r0} r1=${e.r1} r2=${e.r2} r3=${e.r3} r4=${e.r4} r5=${e.r5} r6=${e.r6} r7=${e.r7} r8=${e.r8} r9=${e.r9} r10=${e.r10} r11=${e.r11} r12=${e.r12} r14=${e.r14} c=${e.c}`).join(' | ')}]`
         : '';
       setStatus(cpu
         ? `GSF CPU diagnostics: ${cpu.instructions} instructions, ${diagnostics.io.totalWrites} IO writes, ${cpu.reason || 'running'}${mplIWSummary}${romSummary}${audioSummary}${irqSummary}${biosSummary}${psgSummary}${psgState}${psgTriggerStats}${psgWaveNoise}${noiseTrigLog}${psgFreqLog}${waveRamDump}${renderSummary}${pcSummary}${codeDumpSummary}${seqSnapSummary}${sndInfoSummary}${mplSummary}${mpl7200Summary}${mplKWSummary}${mixScanSummary}${mixTraceSummary}`

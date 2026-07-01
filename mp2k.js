@@ -5340,8 +5340,9 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const dmaDriftSummary = dmaDrift.length
         ? ` driftDma1(bufSize=${dmaDrift[0]?.bufSize ?? '?'})[${dmaDrift.map(d => `n${d.n}@vbl${d.vbl}:r5=${d.r5}/sad1=${d.dmaSad1}/drift=${d.driftBytes}`).join(' ')}]`
         : '';
+      const stepAvg = (stepSt && stepSt.count) ? (stepSt.total / stepSt.count).toFixed(0) : '?';
       const seqSnapSummary = (seqSnaps.length || fn2Snaps.length || stepSt)
-        ? ` | stepStats:first=${stepSt?.firstActiveVbl}@${stepSt?.count}vbls/${stepSt?.activeVbls}active firstCalls:[${firstCalls.slice(0,8).map(c=>`${c.kind}@${c.pcHex}->${c.targetHex}`).join(' ')}] fn2[${fn2Snaps.map(fmtSnap).join('|')}] seq[${seqSnaps.map(fmtSnap).join('|')}]${dmaDriftSummary}`
+        ? ` | stepStats:first=${stepSt?.firstActiveVbl}@${stepSt?.count}vbls/${stepSt?.activeVbls}active avgSteps=${stepAvg}/minSteps=${stepSt?.min}/maxSteps=${stepSt?.max}/totalSteps=${stepSt?.total} firstCalls:[${firstCalls.slice(0,8).map(c=>`${c.kind}@${c.pcHex}->${c.targetHex}`).join(' ')}] fn2[${fn2Snaps.map(fmtSnap).join('|')}] seq[${seqSnaps.map(fmtSnap).join('|')}]${dmaDriftSummary}`
         : '';
       const sndInfo = memPeek?.soundInfoSearch?.[0];
       const sndInfoSummary = sndInfo ? ` | sndInfo@${sndInfo.base}:[${sndInfo.words.join(',')}]` : '';

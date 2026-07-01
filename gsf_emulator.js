@@ -547,6 +547,21 @@
       return (this.io[base + 0x100] | (this.io[base + 0x101] << 8)) & 0xffff;
     }
 
+    // Approximate real GBA memory-region wait states instead of a flat cost per
+    // instruction. Charging every instruction the same 4 cycles (regardless of
+    // whether it fetches from 1-cycle IWRAM or multi-wait-state ROM/EWRAM) made
+    // IWRAM-resident code (e.g. the relocated PCM mixer loop at 0x03000fee) look
+    // ~4x more expensive than real hardware, so the VBlank IRQ handler routinely
+    // overran into the next frame's VBlank window before returning -- see
+    // handlerVblSpan diagnostics (avg ~0.76 extra VBlanks consumed per dispatch).
+    _fetchCycles(pc, isThumb) {
+      const region = pc >>> 24;
+      if (region === 0x00 || (region >= 0x03 && region <= 0x03)) return 1; // BIOS / IWRAM
+      if (region === 0x02) return isThumb ? 3 : 6; // EWRAM (16-bit bus, ~2N/2S)
+      if (region >= 0x08 && region <= 0x0d) return isThumb ? 2 : 4; // GamePak ROM (16-bit bus, default WS mostly-sequential)
+      return 4;
+    }
+
     stepCycles(cycles) {
       cycles = Math.max(1, cycles | 0);
       this.cycles += cycles;
@@ -1430,7 +1445,7 @@
         this.regs[15] = (pc + 2) >>> 0;
         this.instructions++;
         this._execThumb(instr, pc);
-        this.bus.stepCycles(4);
+        this.bus.stepCycles(this.bus._fetchCycles(pc, true));
         return;
       }
       const pc = this.regs[15] >>> 0;
@@ -1440,11 +1455,11 @@
       this.regs[15] = (pc + 4) >>> 0;
       this.instructions++;
       if (!this._conditionPassed(instr >>> 28)) {
-        this.bus.stepCycles(4);
+        this.bus.stepCycles(this.bus._fetchCycles(pc, false));
         return;
       }
       this._execArm(instr, pc);
-      this.bus.stepCycles(4);
+      this.bus.stepCycles(this.bus._fetchCycles(pc, false));
     }
 
     snapshot() {

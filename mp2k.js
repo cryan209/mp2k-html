@@ -5333,7 +5333,15 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       const dsA = render?.dsOnlyStatsA;
       const dsB = render?.dsOnlyStatsB;
       const dsOnlyStats = dsA ? ` dsOnlyA:${dsA.min}..${dsA.max}/r${dsA.rms}/nz${dsA.nonZero}/mid[${(dsA.mid||[]).join(',')}]${dsB ? ` dsOnlyB:${dsB.min}..${dsB.max}/r${dsB.rms}/nz${dsB.nonZero}/mid[${(dsB.mid||[]).join(',')}]` : ''}` : '';
-      const renderSummary = render ? ` | render:${(render.renderedMs / 1000).toFixed(1)}s/${render.stopReason} fifo:${render.fifoFillRate || render.sourceRate || 0}Hz play:${render.outputRate || render.sampleRate}Hz bias:${render.biasOutputRate || '?'}Hz dac:${render.dacBits || '?'}b${render.timerSourceRate ? ` timer:${render.timerSourceRate}` : ''} inst:${render.instructions}${sampleStats}${dsOnlyStats}` : '';
+      // Discontinuities that would actually sound like clicks, scanned across the whole render
+      // rather than eyeballed from a short mid-window sample. Bucket counts (10 equal time
+      // slices) show whether clicks are spread evenly or concentrated/growing over the render.
+      const clicksA = render?.clicksA;
+      const clicksB = render?.clicksB;
+      const clickSummary = clicksA
+        ? ` clicksA(${clicksA.count}):buckets[${clicksA.buckets.join(',')}] first[${clicksA.events.slice(0, 6).map(e => `${e.ms}ms:${e.from}->${e.to}(Δ${e.delta}/avg${e.localAvg})`).join(' ')}]${clicksB ? ` clicksB(${clicksB.count}):buckets[${clicksB.buckets.join(',')}] first[${clicksB.events.slice(0, 6).map(e => `${e.ms}ms:${e.from}->${e.to}(Δ${e.delta}/avg${e.localAvg})`).join(' ')}]` : ''}`
+        : '';
+      const renderSummary = render ? ` | render:${(render.renderedMs / 1000).toFixed(1)}s/${render.stopReason} fifo:${render.fifoFillRate || render.sourceRate || 0}Hz play:${render.outputRate || render.sampleRate}Hz bias:${render.biasOutputRate || '?'}Hz dac:${render.dacBits || '?'}b${render.timerSourceRate ? ` timer:${render.timerSourceRate}` : ''} inst:${render.instructions}${sampleStats}${dsOnlyStats}${clickSummary}` : '';
       const codeDump = audio?.timerCodeDump;
       const codeDumpSummary = codeDump
         ? ` | lit24d0:${codeDump.lit24d0} fn1:[${(codeDump.fn1||[]).filter(e=>!e.endsWith(':0x0000')).join(' ')}] fn2:[${codeDump.fn2.join(' ')}] iwram:[${(codeDump.iwramFn||[]).join(' ')}] iwramDiv1:[${(codeDump.iwramDiv1||[]).join(' ')}] snaps:[${(codeDump.regSnaps||[]).map(s=>`${s.label}@${s.pc}(c=${s.cycles} r0=${s.r0} r1=${s.r1} r5=${s.r5} lr=${s.lr})`).join(' ')}]`

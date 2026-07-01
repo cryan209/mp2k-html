@@ -3086,6 +3086,47 @@
       };
     }
 
+    // Scan the full render for sample-to-sample discontinuities a human ear would register as
+    // a "click" — jumps far bigger than the local waveform is actually moving. A fixed absolute
+    // threshold alone would miss clicks in quiet passages and over-fire during loud/fast attacks,
+    // so each candidate is judged against a rolling local average of recent deltas instead. Also
+    // buckets hits into 10 equal time slices across the render so we can see whether clicks are
+    // spread evenly, clustered at specific moments, or increase over the render (which would
+    // support a growing-drift explanation rather than one-off events).
+    _detectClicks(samples, playbackRate) {
+      const n = samples.length;
+      if (n < 3) return { count: 0, events: [], buckets: [] };
+      const WINDOW = 32;
+      const ABS_FLOOR = 180; // below this delta, never call it a click even with a quiet local average
+      const RATIO = 5; // delta must exceed the local average by this multiple
+      const events = [];
+      const buckets = new Array(10).fill(0);
+      let windowSum = 0;
+      const windowDeltas = [];
+      for (let i = 1; i < n; i++) {
+        const delta = Math.abs(samples[i] - samples[i - 1]);
+        const localAvg = windowDeltas.length ? windowSum / windowDeltas.length : 0;
+        if (delta >= ABS_FLOOR && delta >= localAvg * RATIO) {
+          const bucket = Math.min(9, Math.floor((i / n) * 10));
+          buckets[bucket]++;
+          if (events.length < 60) {
+            events.push({
+              index: i,
+              ms: Math.round((i / playbackRate) * 1000),
+              from: samples[i - 1],
+              to: samples[i],
+              delta,
+              localAvg: Math.round(localAvg),
+            });
+          }
+        }
+        windowDeltas.push(delta);
+        windowSum += delta;
+        if (windowDeltas.length > WINDOW) windowSum -= windowDeltas.shift();
+      }
+      return { count: buckets.reduce((a, b) => a + b, 0), events, buckets };
+    }
+
     async play(renderSeconds = 10, entryIndex = this.activeEntryIndex || 0) {
       if (entryIndex !== this.activeEntryIndex) this.selectEntry(entryIndex);
       if (!this.cpu) this._initCpu();
@@ -3214,6 +3255,8 @@
         sourceSamples,
         sampleStatsA: this._sampleStats(renderSamplesA),
         sampleStatsB: this._sampleStats(renderSamplesB),
+        clicksA: this._detectClicks(renderSamplesA, playbackRate),
+        clicksB: this._detectClicks(renderSamplesB, playbackRate),
         // Direct Sound BEFORE PSG gets mixed in — isolates whether Direct Sound alone is
         // correct on this track, since everything inspected so far has been the final mix.
         dsOnlyStatsA: this._sampleStats(this.bus.dsOnlySamplesA),

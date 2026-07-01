@@ -1501,7 +1501,20 @@
       const sourceText = source ? ` from ${source.kind} ${source.pcHex}->${source.targetHex}` : '';
       const trail = this._pcRingTrail();
       const trailText = trail.length ? ` trail:[${trail.join(',')}]` : '';
-      this.reason = `pc-out-of-range fetch ${bytes * 8}-bit at ${tools.hex(pc)}${sourceText}${trailText}`;
+      // Decode the raw instruction at the last executed PC (whatever jumped us
+      // to the invalid address) plus full register state, so we can tell
+      // whether it's a BX/POP{pc} reading a bad register/stack value.
+      let lastPcInfo = '';
+      if (trail.length) {
+        const lastPc = parseInt(trail[trail.length - 1], 16) >>> 0;
+        try {
+          const opcode16 = this.bus.read16(lastPc);
+          const opcode32 = this.bus.read32(lastPc);
+          const regsText = Array.from({ length: 16 }, (_, i) => `r${i}=${tools.hex(this.regs[i] >>> 0)}`).join(',');
+          lastPcInfo = ` lastOpcode:${tools.hex(opcode16, 4)}/${tools.hex(opcode32)} regs:[${regsText}] cpsr=${tools.hex(this.cpsr >>> 0)}`;
+        } catch (e) { /* ignore */ }
+      }
+      this.reason = `pc-out-of-range fetch ${bytes * 8}-bit at ${tools.hex(pc)}${sourceText}${trailText}${lastPcInfo}`;
       if (!this.fastMode) this.branches.push({
         kind: 'fetch-fault',
         pc: pc >>> 0,

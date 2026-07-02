@@ -1708,8 +1708,8 @@
       }
       if (this.cpsr & CPSR_T) {
         const pc = this.regs[15] >>> 0;
-        if (!this._canFetch(pc, 2)) return;
-        const instr = this.bus.read16(pc);
+        if (!this._canFetchFast(pc, 2)) return;
+        const instr = this._readCode16Fast(pc);
         this.bus.openBus = ((instr << 16) | instr) >>> 0;
         this.regs[15] = (pc + 2) >>> 0;
         this.instructions++;
@@ -1718,17 +1718,66 @@
         return;
       }
       const pc = this.regs[15] >>> 0;
-      if (!this._canFetch(pc, 4)) return;
-      const instr = this.bus.read32(pc);
+      if (!this._canFetchFast(pc, 4)) return;
+      const instr = this._readCode32Fast(pc);
       this.bus.openBus = instr >>> 0;
       this.regs[15] = (pc + 4) >>> 0;
       this.instructions++;
-      if (!this._conditionPassed(instr >>> 28)) {
+      const cond = instr >>> 28;
+      if (cond !== 0xe && !this._conditionPassed(cond)) {
         this._chargeCycles(pc, false);
         return;
       }
       this._execArm(instr, pc);
       this._chargeCycles(pc, false);
+    }
+
+    _canFetchFast(pc, bytes) {
+      pc >>>= 0;
+      let off;
+      if (pc >= 0x08000000 && pc < 0x0e000000) {
+        off = (pc - 0x08000000) & 0x01ffffff;
+        if (off + bytes <= this.bus.memory.rom.length) return true;
+      } else if (pc >= 0x03000000 && pc < 0x04000000) {
+        off = (pc - 0x03000000) & 0x7fff;
+        if (off + bytes <= this.bus.iwram.length) return true;
+      } else if (pc >= 0x02000000 && pc < 0x03000000) {
+        off = (pc - 0x02000000) & 0x3ffff;
+        if (off + bytes <= this.bus.ewram.length) return true;
+      }
+      return this._canFetch(pc, bytes);
+    }
+
+    _readCode16Fast(pc) {
+      let data;
+      let off;
+      if (pc >= 0x08000000) {
+        data = this.bus.memory.rom;
+        off = (pc - 0x08000000) & 0x01ffffff;
+      } else if (pc >= 0x03000000) {
+        data = this.bus.iwram;
+        off = (pc - 0x03000000) & 0x7fff;
+      } else {
+        data = this.bus.ewram;
+        off = (pc - 0x02000000) & 0x3ffff;
+      }
+      return data[off] | (data[off + 1] << 8);
+    }
+
+    _readCode32Fast(pc) {
+      let data;
+      let off;
+      if (pc >= 0x08000000) {
+        data = this.bus.memory.rom;
+        off = (pc - 0x08000000) & 0x01ffffff;
+      } else if (pc >= 0x03000000) {
+        data = this.bus.iwram;
+        off = (pc - 0x03000000) & 0x7fff;
+      } else {
+        data = this.bus.ewram;
+        off = (pc - 0x02000000) & 0x3ffff;
+      }
+      return (data[off] | (data[off + 1] << 8) | (data[off + 2] << 16) | (data[off + 3] << 24)) >>> 0;
     }
 
     _runDiagnosticProbes() {

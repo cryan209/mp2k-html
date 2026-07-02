@@ -220,6 +220,11 @@
       this.memoryWrites = [];
       this.timerCounters = [0, 0, 0, 0];
       this.timerPhases = [0, 0, 0, 0];
+      // Event-driven timer advancement: timers are lazily synced to this.cycles only
+      // when execution crosses nextTimerEventCycles (the earliest possible overflow),
+      // instead of being re-examined on every instruction's stepCycles call.
+      this.timerSyncCycles = 0;
+      this.nextTimerEventCycles = Infinity;
       this.timerControls = [0, 0, 0, 0];
       this.timerReloads = [0, 0, 0, 0];
       this.timerEnabledMask = 0;
@@ -344,6 +349,8 @@
         if (byteOff <= 1) { // CNT_L (counter) bytes
           const ctrl = this.io[0x102 + ch * 4]; // control low byte
           if (ctrl & 0x80) { // timer enabled
+            // Lazily-advanced timers: bring counters up to date before reading back.
+            if (this.cycles > this.timerSyncCycles) this._flushTimers();
             const counter = Math.floor(this.timerCounters[ch]) & 0xffff;
             return byteOff === 0 ? (counter & 0xff) : ((counter >> 8) & 0xff);
           }
@@ -469,6 +476,10 @@
           if ((value & 0x80) && !oldEnable) dmaEnableInit = ch;
         }
       }
+      // Timer config is about to change: bring the timers up to date under the OLD
+      // configuration first, so the pending un-synced span isn't re-interpreted (or
+      // double-counted for a timer that only becomes enabled now) under the new one.
+      if (addr >= 0x04000100 && addr < 0x04000110) this._flushTimers();
       r.data[r.off] = value;
       if (addr >= 0x04000100 && addr < 0x04000110) this._refreshTimerCache();
       this._logIoWrite(addr, loggedValue, 1);
@@ -578,6 +589,8 @@
         this.timerCounters[timerEnableInit] = (this.io[base - 0x04000000] | (this.io[base - 0x04000000 + 1] << 8));
         this.timerPhases[timerEnableInit] = -2;
       }
+      // Any timer-range write may have changed when the next overflow lands.
+      if (addr >= 0x04000100 && addr < 0x04000110) this._recomputeTimerEvent();
     }
 
     write16(addr, value) {
@@ -748,7 +761,7 @@
       cycles = Math.max(1, cycles | 0);
       this.cycles += cycles;
       this.frameCycles += cycles;
-      this._tickTimers(cycles);
+      if (this.cycles >= this.nextTimerEventCycles) this._syncTimers();
       this._processScanlineEvents(this.frameCycles - cycles, this.frameCycles);
       // The VBlank IRQ fires when the scanline counter enters the VBlank region
       // (scanline 160), not at the full-frame wrap (scanline 0/227->0). Firing it at
@@ -770,7 +783,7 @@
       const from = this.frameCycles;
       const to = from + cycles;
       this.cycles += cycles;
-      this._tickTimersFast(cycles);
+      if (this.cycles >= this.nextTimerEventCycles) this._syncTimers();
 
       if (to < GBA_CYCLES_PER_FRAME) {
         const lineStart = Math.floor(from / GBA_CYCLES_PER_SCANLINE) * GBA_CYCLES_PER_SCANLINE;
@@ -858,25 +871,34 @@
       }
     }
 
-    _tickTimers(cycles) {
+    // Advance all CPU-clocked timers by the span since the last sync, then compute the
+    // absolute cycle of the earliest possible next overflow. stepCycles compares one
+    // number against nextTimerEventCycles on the hot path instead of walking the timer
+    // state per instruction — with a 21kHz FIFO timer that's one real sync every ~800
+    // cycles instead of per-instruction bookkeeping.
+    _syncTimers() {
+      this._flushTimers();
+      this._recomputeTimerEvent();
+    }
+
+    _flushTimers() {
+      const delta = this.cycles - this.timerSyncCycles;
+      if (delta > 0) this._tickTimersFast(delta);
+      this.timerSyncCycles = this.cycles;
+    }
+
+    _recomputeTimerEvent() {
+      let min = Infinity;
       for (let mask = this.timerCpuMask; mask; mask &= mask - 1) {
         const bit = mask & -mask;
         const ch = bit === 1 ? 0 : bit === 2 ? 1 : bit === 4 ? 2 : 3;
-        const ctrl = this.timerControls[ch];
-        const prescaler = TIMER_PRESCALERS[ctrl & 3];
-        const reload = this.timerReloads[ch];
-        this.timerPhases[ch] += cycles;
-        if (this.timerPhases[ch] < 0) continue; // 2-cycle start delay still pending
-        let ticks = Math.floor(this.timerPhases[ch] / prescaler);
-        this.timerPhases[ch] -= ticks * prescaler;
-        while (ticks > 0) {
-          const space = 0x10000 - this.timerCounters[ch];
-          if (ticks < space) { this.timerCounters[ch] += ticks; break; }
-          ticks -= space;
-          this.timerCounters[ch] = reload;
-          this._timerOverflow(ch, ctrl);
-        }
+        const prescaler = TIMER_PRESCALERS[this.timerControls[ch] & 3];
+        // Cycles until this timer's next overflow: remaining counter ticks at its
+        // prescaler, minus already-accumulated phase (negative phase = start delay).
+        const remaining = (0x10000 - this.timerCounters[ch]) * prescaler - this.timerPhases[ch];
+        if (remaining < min) min = remaining;
       }
+      this.nextTimerEventCycles = min === Infinity ? Infinity : this.timerSyncCycles + Math.max(1, min);
     }
 
     _tickTimersFast(cycles) {
@@ -4667,8 +4689,11 @@
       const engine = this;
       const bus = this.bus;
       const CHUNK_SAMPLES = Math.max(256, Math.round(playbackRate * 0.15));
-      const TARGET_AHEAD_SEC = 0.6;
-      const MIN_AHEAD_SEC = 0.28;
+      // Runway of scheduled-but-unplayed audio. Production is gated on this draining,
+      // so a bigger runway costs no steady-state CPU — it only buys tolerance for
+      // main-thread stalls (GC, extensions, layout) before an audible underrun.
+      const TARGET_AHEAD_SEC = 1.2;
+      const MIN_AHEAD_SEC = 0.4;
 
       const producedTotal = () => stream.trimOffset + Math.max(bus.fifoSamplesA.length, bus.fifoSamplesB.length);
       const reachedEnd = () => engine.cpu.halted || (bus.cycles - cyclesAtStart) / GBA_CPU_HZ >= maxSeconds;

@@ -463,6 +463,11 @@
       this.divCounter = 0;
       this.timaCounter = 0;
       this.frameCounter = 0;
+      // Optional per-vector-address redirect (vector address -> actual jump target). ROM is
+      // read-only, so a host that can't inject real dispatch code at the fixed 0x40/0x48/...
+      // vector addresses (e.g. StandardGbsEngine, since GBS rips don't include a real vector
+      // table) can point the vector at a stub it wrote into writable HRAM instead.
+      this.vectorOverride = {};
     }
 
     _bankOffset(addr) { return this.romBank * 0x4000 + (addr - 0x4000); }
@@ -547,7 +552,8 @@
       for (let bit = 0; bit < 5; bit++) {
         if (pending & (1 << bit)) {
           this.if_ &= ~(1 << bit);
-          cpu.serviceVector(IRQ_VECTOR[bit]);
+          const addr = IRQ_VECTOR[bit];
+          cpu.serviceVector(this.vectorOverride[addr] ?? addr);
           return;
         }
       }

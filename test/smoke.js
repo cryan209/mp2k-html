@@ -16,6 +16,7 @@ load('psg_dmg.js');
 load('gsf_emulator.js'); // run from the repo root: npm test
 load('z80_emulator.js');
 load('gbs.js');
+load('dmg_emulator.js');
 
 var E = window.GsfEmulator;
 var failures = 0;
@@ -989,6 +990,58 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
     check(image[0] === 0, 'GbsTools.romImage zero-fills before loadAddr');
     check(image.length % 0x4000 === 0, 'GbsTools.romImage is bank-boundary sized (got ' + image.length + ')');
   })();
+})();
+
+// --- 24. StandardGbsEngine (dmg_emulator.js) end-to-end ---
+(function () {
+  var GbsTools = window.GbsTools;
+  var StandardGbsEngine = window.DmgEmulator.StandardGbsEngine;
+
+  function buildGbsWithDriver() {
+    // init (at loadAddr=0x0400): LD A,0xAB ; LD (0xC000),A ; RET
+    // play (at 0x0408):          LD A,0x01 ; LD (0xC001),A ; RET
+    var rom = [
+      0x3e, 0xab, 0xea, 0x00, 0xc0, 0xc9, 0x00, 0x00, // 0x0400-0x0407
+      0x3e, 0x01, 0xea, 0x01, 0xc0, 0xc9,             // 0x0408-0x040d
+    ];
+    var buf = new ArrayBuffer(GbsTools.HEADER_SIZE + rom.length);
+    var view = new DataView(buf);
+    var u8 = new Uint8Array(buf);
+    u8[0] = 0x47; u8[1] = 0x42; u8[2] = 0x53; u8[3] = 0x01;
+    view.setUint8(0x04, 1); view.setUint8(0x05, 1);
+    view.setUint16(0x06, 0x0400, true); // loadAddr
+    view.setUint16(0x08, 0x0400, true); // initAddr
+    view.setUint16(0x0a, 0x0408, true); // playAddr
+    view.setUint16(0x0c, 0xdff0, true); // stack pointer
+    view.setUint8(0x0e, 0); view.setUint8(0x0f, 0); // vblank-driven
+    var title = 'Smoke Song';
+    for (var i = 0; i < title.length; i++) u8[0x10 + i] = title.charCodeAt(i);
+    u8.set(rom, GbsTools.HEADER_SIZE);
+    return buf;
+  }
+
+  var eng = new StandardGbsEngine();
+  check(eng.canPlay() === false, 'fresh StandardGbsEngine reports not playable before loadBuffer');
+
+  var h = eng.loadBuffer(buildGbsWithDriver());
+  check(eng.state === 'loaded' && h.title === 'Smoke Song', 'StandardGbsEngine.loadBuffer parses header (title="' + h.title + '")');
+  check(eng.canPlay() === true, 'loaded StandardGbsEngine reports playable');
+  check(eng.summary().indexOf('PSG mix') >= 0, 'StandardGbsEngine summary mentions PSG mix');
+
+  eng._initCpu(0);
+  check(eng.bus.wram[0] === 0xab, 'StandardGbsEngine._initCpu runs the init routine (wram[0]=0x' + eng.bus.wram[0].toString(16) + ')');
+  check(eng.cpu.ime === true, 'StandardGbsEngine._initCpu leaves interrupts enabled for playback');
+
+  // Advance far enough (via renderSamples, which ticks the bus/timer/vblank every step) for
+  // at least one synthetic vblank to fire and dispatch through the HRAM stub into play().
+  eng.renderSamples(4096, 44100);
+  check(eng.bus.wram[1] === 0x01, 'StandardGbsEngine dispatches vblank IRQ through the HRAM stub into the play routine');
+
+  var rendered = eng.renderSamples(256, 44100);
+  check(rendered.left.length === 256 && rendered.right.length === 256, 'StandardGbsEngine.renderSamples returns requested sample count');
+  var finite = true;
+  for (var i = 0; i < rendered.left.length; i++) if (!isFinite(rendered.left[i]) || !isFinite(rendered.right[i])) finite = false;
+  check(finite, 'StandardGbsEngine.renderSamples output is finite (no NaN/Infinity)');
 })();
 
 print(failures === 0 ? 'ALL PASS' : failures + ' FAILURES');

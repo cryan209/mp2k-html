@@ -1379,6 +1379,41 @@
       this.stepCycles(GBA_CYCLES_PER_SCANLINE - (this.frameCycles % GBA_CYCLES_PER_SCANLINE));
     }
 
+    _cyclesUntilNextTimerOverflow() {
+      let best = Infinity;
+      for (let ch = 0; ch < 4; ch++) {
+        const base = 0x04000100 + ch * 4;
+        const ctrl = this.io[base - 0x04000000 + 2] | (this.io[base - 0x04000000 + 3] << 8);
+        if (!(ctrl & 0x80)) continue;
+        if (ch > 0 && (ctrl & 0x04)) continue;
+        const prescaler = TIMER_PRESCALERS[ctrl & 3];
+        const phase = this.timerPhases[ch];
+        const ticksToOverflow = Math.max(1, 0x10000 - (this.timerCounters[ch] & 0xffff));
+        const cycles = phase < 0
+          ? (-phase) + ticksToOverflow * prescaler
+          : ticksToOverflow * prescaler - phase;
+        if (cycles > 0 && cycles < best) best = cycles;
+      }
+      return best;
+    }
+
+    _cyclesUntilNextDisplayEvent() {
+      const frame = this.frameCycles % GBA_CYCLES_PER_FRAME;
+      const lineStart = Math.floor(frame / GBA_CYCLES_PER_SCANLINE) * GBA_CYCLES_PER_SCANLINE;
+      const hblankAt = lineStart + GBA_HBLANK_CYCLE_IN_LINE;
+      const nextLine = lineStart + GBA_CYCLES_PER_SCANLINE;
+      let next = frame < hblankAt ? hblankAt : nextLine;
+      if (!this._vblankFiredThisFrame && frame < GBA_VBLANK_CYCLE) next = Math.min(next, GBA_VBLANK_CYCLE);
+      if (next <= frame) next += GBA_CYCLES_PER_FRAME;
+      return Math.max(1, next - frame);
+    }
+
+    advanceToNextHaltEvent(maxCycles = GBA_CYCLES_PER_SCANLINE) {
+      const cycles = Math.min(maxCycles, this._cyclesUntilNextTimerOverflow(), this._cyclesUntilNextDisplayEvent());
+      this.stepCycles(Math.max(1, Math.floor(cycles)));
+      return cycles;
+    }
+
     // Watch every VBlank IRQ dispatch to see whether execution actually reaches the
     // sound-engine wrapper (0x081dcdc6, the fn2/SoundMainBatch caller) -- fn2CallCount only
     // reaches ~57% of vblankCount even after fixing IRQ delivery timing, so something
@@ -2948,15 +2983,17 @@
     // cycles of firing instead of being coalesced once per frame at the VBlank boundary.
     _biosHalt(pc = this.regs[15] >>> 0) {
       this._recordHaltEvent('before', pc);
-      const MAX_SLICES = GBA_TOTAL_SCANLINES * 8; // 8 frames worth
+      const MAX_CYCLES = GBA_CYCLES_PER_FRAME * 8;
+      let sleptCycles = 0;
       let slices = 0;
-      while (!this.bus.haltPendingIrq() && slices < MAX_SLICES) {
-        this.bus.advanceScanline();
+      while (!this.bus.haltPendingIrq() && sleptCycles < MAX_CYCLES) {
+        const step = this.bus.advanceToNextHaltEvent(MAX_CYCLES - sleptCycles);
+        sleptCycles += step;
         slices++;
       }
       this._checkAndDispatchIrq(); // internally gated on CPSR.I, IME, and nesting depth
       this._recordHaltEvent('after', pc);
-      return `halted ${slices} scanline${slices === 1 ? '' : 's'}`;
+      return `halted ${sleptCycles} cycles/${slices} event${slices === 1 ? '' : 's'}`;
     }
 
     _biosIntrWait() {
@@ -2982,21 +3019,22 @@
         this.bus.write16(BIOS_FLAGS, this.bus.read16(BIOS_FLAGS) & ~mask);
         this.bus.write16(0x04000202, mask); // acknowledge stale IF so we wait for a fresh edge
       }
-      const MAX_SLICES = GBA_TOTAL_SCANLINES * 8;
+      const MAX_CYCLES = GBA_CYCLES_PER_FRAME * 8;
+      let sleptCycles = 0;
       let sawHwIrq = false;
-      for (let slices = 0; slices < MAX_SLICES; slices++) {
+      for (let slices = 0; sleptCycles < MAX_CYCLES; slices++) {
         const flags = this.bus.read16(BIOS_FLAGS);
         if (flags & mask) {
           this.bus.write16(BIOS_FLAGS, flags & ~mask);
-          return `intrwait ${tools.hex(mask, 4)} satisfied after ${slices} scanlines`;
+          return `intrwait ${tools.hex(mask, 4)} satisfied after ${sleptCycles} cycles/${slices} events`;
         }
         // Degenerate handlers (e.g. the GSF idle stub) never mirror IF into 0x03007FF8;
         // once the requested IRQ has been observed on the wire, fall back to returning
         // rather than spinning to the cap on every single wait call.
         if (sawHwIrq && !this.bus.biosIrqFlagsWritten) {
-          return `intrwait ${tools.hex(mask, 4)} if-fallback after ${slices} scanlines`;
+          return `intrwait ${tools.hex(mask, 4)} if-fallback after ${sleptCycles} cycles/${slices} events`;
         }
-        this.bus.advanceScanline();
+        sleptCycles += this.bus.advanceToNextHaltEvent(MAX_CYCLES - sleptCycles);
         if (this.bus.haltPendingIrq(mask)) sawHwIrq = true;
         this._checkAndDispatchIrq(); // internally gated on CPSR.I, IME, and nesting depth
       }

@@ -298,6 +298,18 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   check(bus.psgNoise.lfsr === 0x7fff, 'noise trigger seeds all-one LFSR');
   bus._noiseAdvance(32);
   check(bus.psgNoise.lfsr === 0x3fff, 'noise LFSR uses xor feedback after one shift (got 0x' + bus.psgNoise.lfsr.toString(16) + ')');
+  check(bus.psgNoise.periodCycles === 32, 'noise r=0 s=0 clocks every 32 CPU cycles');
+  bus.write8(0x0400007c, 0x01); // r=1, s=0 => 64 cycles
+  check(bus.psgNoise.periodCycles === 64, 'noise NR43 live update retimes r=1 to 64 cycles');
+  bus.psgNoise.lfsr = 0x7fff;
+  bus.psgNoise.phaseCycles = 0;
+  bus.psgNoise.lastSampleCycles = 0;
+  bus._noiseAdvance(63);
+  check(bus.psgNoise.lfsr === 0x7fff, 'noise does not shift before live-updated period');
+  bus._noiseAdvance(64);
+  check(bus.psgNoise.lfsr === 0x3fff, 'noise shifts at live-updated 64-cycle period');
+  bus.write8(0x0400007c, 0x21); // r=1, s=2 => 256 cycles
+  check(bus.psgNoise.periodCycles === 256, 'noise shift clock applies shift field (period ' + bus.psgNoise.periodCycles + ')');
 })();
 
 // --- 10c. GBA wave-channel bank/digit-rate behavior ---

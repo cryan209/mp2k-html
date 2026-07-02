@@ -337,6 +337,7 @@
         envTimer: 0, envActive: false,
         lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
         divRatio: 0, widthMode: 0, shiftFreq: 0,
+        periodCycles: 32,
         lfsr: 0x7fff, phaseCycles: 0,
       };
       this.noiseTriggerLog = []; // first 8 + last 8 Noise trigger snapshots (gap/div/shift/width)
@@ -571,9 +572,13 @@
         this._waveUpdateFreq();
         if (value & 0x80) this._waveTrigger();
       }
-      // Noise (SOUND4CNT_H high byte, 0x7d): no frequency field to live-update — pitch is set
-      // by the clock divider/shift in the low byte, only Trigger restarts the LFSR/envelope.
-      if (addr === 0x0400007d && (value & 0x80)) this._noiseTrigger();
+      // Noise NR43 (0x7c) live-updates the LFSR clock divider/shift/width; NR44 trigger
+      // restarts envelope/length/LFSR state.
+      if (addr === 0x0400007c) this._noiseUpdateControl();
+      if (addr === 0x0400007d) {
+        this.psgNoise.lengthEnabled = !!(this.read16(0x0400007c) & 0x4000);
+        if (value & 0x80) this._noiseTrigger();
+      }
       // Log writes to TM0CNT_L/H (0x04000100-0x04000103) for debugging timer misconfiguration
       if (addr >= 0x04000100 && addr <= 0x04000103 && this.timerReloadLog.length < 64) {
         const pc = this.debugPc || 0;
@@ -1338,9 +1343,7 @@
       const lengthData = envReg & 0x3f;
       st.lengthCounter = 64 - lengthData;
       st.lengthCyclesTotal = st.lengthEnabled ? (64 - lengthData) * (GBA_CPU_HZ / 256) : Infinity;
-      st.divRatio = freqReg & 7;
-      st.widthMode = (freqReg >>> 3) & 1; // 0=15-bit, 1=7-bit
-      st.shiftFreq = (freqReg >>> 4) & 0xf;
+      this._noiseUpdateControl(freqReg);
       st.lfsr = 0x7fff;
       st.phaseCycles = 0;
       st.triggerCycles = this.cycles;
@@ -1360,20 +1363,28 @@
       else { if (this.noiseTriggerLog.length < 16) this.noiseTriggerLog.push(entry); else { this.noiseTriggerLog.splice(8, 1); this.noiseTriggerLog.push(entry); } }
     }
 
+    _noiseUpdateControl(freqReg = this.read16(0x0400007c)) {
+      const st = this.psgNoise;
+      st.divRatio = freqReg & 7;
+      st.widthMode = (freqReg >>> 3) & 1; // 0=15-bit, 1=7-bit
+      st.shiftFreq = (freqReg >>> 4) & 0xf;
+      // GBATEK: frequency = 524288 / r / 2^(s+1), with r=0 treated as 0.5.
+      // In CPU cycles this is exactly 64*r*2^s, or 32*2^s for r=0.
+      st.periodCycles = (st.divRatio ? 64 * st.divRatio : 32) * Math.pow(2, st.shiftFreq);
+      this.psgSampleCacheCycles = -1;
+    }
+
     _noiseAdvance(nowCycles) {
       const st = this.psgNoise;
       if (!st.enabled) return 0;
-      // freq = 524288 / r / 2^(s+1) Hz, r=0 treated as 0.5. Shift period in GBA cycles.
-      const r = st.divRatio || 0.5;
-      const shiftHz = 524288 / r / Math.pow(2, st.shiftFreq + 1);
-      const shiftPeriodCycles = GBA_CPU_HZ / shiftHz;
       const dCycles = nowCycles - st.lastSampleCycles;
       st.lastSampleCycles = nowCycles;
       st.phaseCycles += dCycles;
-      // Shift periods can be sub-cycle at max settings; cap iterations defensively so a huge
-      // dt (e.g. after a long halt) can't spin here for an unbounded amount of work.
-      let shifts = Math.min(4096, Math.floor(st.phaseCycles / Math.max(1, shiftPeriodCycles)));
-      st.phaseCycles -= shifts * shiftPeriodCycles;
+      // Shift periods are integer CPU-cycle counts. Cap iterations defensively so a huge
+      // dt (e.g. after a long halt) cannot spin here for an unbounded amount of work.
+      const period = Math.max(1, st.periodCycles || 32);
+      let shifts = Math.min(4096, Math.floor(st.phaseCycles / period));
+      st.phaseCycles -= shifts * period;
       // GB/CGB noise uses xor feedback from bits 0 and 1, shifts right, writes feedback to
       // bit14, and mirrors it into bit6 in 7-bit mode. The DAC output is the inverted low bit.
       while (shifts-- > 0) {
@@ -4694,6 +4705,7 @@
         envTimer: 0, envActive: false,
         lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
         divRatio: 0, widthMode: 0, shiftFreq: 0,
+        periodCycles: 32,
         lfsr: 0x7fff, phaseCycles: 0,
       };
       this.bus.noiseTriggerLog = [];

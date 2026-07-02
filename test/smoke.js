@@ -350,6 +350,11 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   check(bus.psgNoise.lfsr === 0x7fff, 'noise trigger seeds all-one LFSR');
   bus._noiseAdvance(32);
   check(bus.psgNoise.lfsr === 0x3fff, 'noise LFSR uses xor feedback after one shift (got 0x' + bus.psgNoise.lfsr.toString(16) + ')');
+  bus.psgNoise.lfsr = 0x7fff;
+  bus.psgNoise.phaseCycles = 0;
+  bus.psgNoise.lastSampleCycles = 0;
+  var avgNoise = bus._noiseAdvance(64);
+  check(avgNoise === -15 && bus.psgNoise.lfsr === 0x1fff, 'noise output averages interval while clocking exact shifts');
   check(bus.psgNoise.periodCycles === 32, 'noise r=0 s=0 clocks every 32 CPU cycles');
   bus.write8(0x0400007c, 0x01); // r=1, s=0 => 64 cycles
   check(bus.psgNoise.periodCycles === 64, 'noise NR43 live update retimes r=1 to 64 cycles');
@@ -396,7 +401,7 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   bus.psgWave.outputLevel = 1;
   var oneDigitCycles = 8192; // 16777216 / (2097152 / (2048 - 1024))
   var sample = bus._waveAdvance(oneDigitCycles);
-  check(sample === -6 && Math.floor(bus.psgWave.phase) === 1, 'wave channel advances at GBA digit rate (sample ' + sample + ', phase ' + bus.psgWave.phase + ')');
+  check(sample === -7 && Math.floor(bus.psgWave.phase) === 1, 'wave channel averages at GBA digit rate (sample ' + sample + ', phase ' + bus.psgWave.phase + ')');
 })();
 
 // --- 11. HuffUnComp (8-bit symbols) ---

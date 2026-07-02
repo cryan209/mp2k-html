@@ -1358,13 +1358,33 @@
       if (!st.enabled) return 0;
       const digitRate = 2097152 / (2048 - st.freqCur);
       const waveLength = this._wavePlaybackLength();
-      const dt = (nowCycles - st.lastSampleCycles) / GBA_CPU_HZ;
+      const dtCycles = nowCycles - st.lastSampleCycles;
       st.lastSampleCycles = nowCycles;
-      st.phase = ((st.phase + digitRate * dt) % waveLength + waveLength) % waveLength;
-      const index = Math.floor(st.phase) % waveLength;
-      const raw = this._waveSample(index);
       const level = st.forceVolume ? 0.75 : st.outputLevel;
+      if (!(dtCycles > 0)) return this._waveSample(Math.floor(st.phase) % waveLength) * level;
+      const digitPeriodCycles = GBA_CPU_HZ / digitRate;
+      const phaseStart = st.phase;
+      const phaseInc = dtCycles / digitPeriodCycles;
+      const raw = this._waveAreaAverage(phaseStart, phaseInc, waveLength);
+      st.phase = ((phaseStart + phaseInc) % waveLength + waveLength) % waveLength;
       return raw * level;
+    }
+
+    _waveAreaAverage(start, len, waveLength) {
+      if (!(len > 0)) return this._waveSample(Math.floor(start) % waveLength);
+      let pos = ((start % waveLength) + waveLength) % waveLength;
+      let remaining = len;
+      let weighted = 0;
+      let segments = 0;
+      while (remaining > 1e-9 && segments++ < 4096) {
+        const nextBoundary = Math.floor(pos) + 1;
+        const span = Math.min(remaining, nextBoundary - pos || 1);
+        weighted += this._waveSample(Math.floor(pos) % waveLength) * span;
+        remaining -= span;
+        pos = (pos + span) % waveLength;
+      }
+      if (remaining > 1e-9) weighted += this._waveSample(Math.floor(pos) % waveLength) * remaining;
+      return weighted / len;
     }
 
     _noiseTrigger() {
@@ -1421,20 +1441,38 @@
       if (!st.enabled) return 0;
       const dCycles = nowCycles - st.lastSampleCycles;
       st.lastSampleCycles = nowCycles;
-      st.phaseCycles += dCycles;
+      if (!(dCycles > 0)) return this._noiseOutput(st);
       // Shift periods are integer CPU-cycle counts. Cap iterations defensively so a huge
       // dt (e.g. after a long halt) cannot spin here for an unbounded amount of work.
       const period = Math.max(1, st.periodCycles || 32);
-      let shifts = Math.min(4096, Math.floor(st.phaseCycles / period));
-      st.phaseCycles -= shifts * period;
+      let remaining = dCycles;
+      let weighted = 0;
+      let segments = 0;
+      while (remaining > 0 && segments++ < 4096) {
+        const untilShift = Math.max(0, period - st.phaseCycles);
+        const span = Math.min(remaining, untilShift || period);
+        weighted += this._noiseOutput(st) * span;
+        st.phaseCycles += span;
+        remaining -= span;
+        if (st.phaseCycles >= period) {
+          st.phaseCycles -= period;
+          this._noiseShift(st);
+        }
+      }
+      if (remaining > 0) weighted += this._noiseOutput(st) * remaining;
+      return weighted / dCycles;
+    }
+
+    _noiseOutput(st) {
+      return (st.lfsr & 1) ? -st.volume : st.volume;
+    }
+
+    _noiseShift(st) {
       // GB/CGB noise uses xor feedback from bits 0 and 1, shifts right, writes feedback to
       // bit14, and mirrors it into bit6 in 7-bit mode. The DAC output is the inverted low bit.
-      while (shifts-- > 0) {
-        const feedback = (st.lfsr ^ (st.lfsr >>> 1)) & 1;
-        st.lfsr = (st.lfsr >>> 1) | (feedback << 14);
-        if (st.widthMode) st.lfsr = (st.lfsr & ~0x40) | (feedback << 6);
-      }
-      return (st.lfsr & 1) ? -st.volume : st.volume;
+      const feedback = (st.lfsr ^ (st.lfsr >>> 1)) & 1;
+      st.lfsr = (st.lfsr >>> 1) | (feedback << 14);
+      if (st.widthMode) st.lfsr = (st.lfsr & ~0x40) | (feedback << 6);
     }
 
     // Advance envelope/length/(ch0)sweep timing to `nowCycles` and return this channel's

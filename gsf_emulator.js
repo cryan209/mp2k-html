@@ -585,6 +585,7 @@
     // actually read at crash time.
     _noteStackCrashRead(addr, value, pc, kind) {
       addr >>>= 0;
+      if (this.fastMode && !this.diagnosticProbes) return;
       if (addr >= 0x03007f00 || addr + 4 <= 0x03007e80) return;
       if (!this.stackCrashReadLog) this.stackCrashReadLog = [];
       if (this.stackCrashReadLog.length < 400) {
@@ -2840,11 +2841,15 @@
         case 0xe: result = a & (~b); break;
         case 0xf: result = (~b) >>> 0; break;
       }
-      if (write) this._writeReg(rd, result, 'thumb-alu', (this.regs[15] - 2) >>> 0, { op });
+      result >>>= 0;
+      if (write) {
+        if (this.fastMode && !this.diagnosticProbes) this.regs[rd] = result;
+        else this._writeReg(rd, result, 'thumb-alu', (this.regs[15] - 2) >>> 0, { op });
+      }
       this._setNZ(result);
-      if ([0x5, 0x6, 0x9, 0xa, 0xb].includes(op)) {
+      if (op === 0x5 || op === 0x6 || op === 0x9 || op === 0xa || op === 0xb) {
         this.cpsr = (this.cpsr & ~(CPSR_C | CPSR_V)) | (carry ? CPSR_C : 0) | (overflow ? CPSR_V : 0);
-      } else if ([0x2, 0x3, 0x4, 0x7].includes(op)) {
+      } else if (op === 0x2 || op === 0x3 || op === 0x4 || op === 0x7) {
         this.cpsr = (this.cpsr & ~CPSR_C) | (carry ? CPSR_C : 0);
       }
     }
@@ -2975,6 +2980,33 @@
         } else {
           this._writeReg(13, (this.regs[13] - 0x40) >>> 0, 'thumb-push-sp', (this.regs[15] - 2) >>> 0);
           this._writeMem32(this.regs[13], (this.regs[15] + 4) >>> 0, 'thumb-push', { reg: 15, emptyRlist: true });
+        }
+        return;
+      }
+      if (this.fastMode && !this.diagnosticProbes) {
+        if (pop) {
+          let sp = this.regs[13] >>> 0;
+          for (let r = 0; r < 8; r++) {
+            if (!(list & (1 << r))) continue;
+            this.regs[r] = this.bus.read32(sp & ~3) >>> 0;
+            sp = (sp + 4) >>> 0;
+          }
+          if (extra) {
+            const target = this.bus.read32(sp & ~3) >>> 0;
+            this.regs[15] = target & ~1;
+            sp = (sp + 4) >>> 0;
+          }
+          this.regs[13] = sp;
+        } else {
+          const count = this._bitCount(list) + (extra ? 1 : 0);
+          let addr = (this.regs[13] - count * 4) >>> 0;
+          this.regs[13] = addr;
+          for (let r = 0; r < 8; r++) {
+            if (!(list & (1 << r))) continue;
+            this.bus.write32(addr & ~3, this.regs[r] >>> 0);
+            addr = (addr + 4) >>> 0;
+          }
+          if (extra) this.bus.write32(addr & ~3, this.regs[14] >>> 0);
         }
         return;
       }

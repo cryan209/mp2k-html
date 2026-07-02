@@ -5229,17 +5229,24 @@ function populateSongList(songs) {
   if (window.gs1Debug) updatePreviewWaveform(true);
 }
 
+// Resolve the current song-list selection to a GSF LLE minigsf entry index, preferring
+// the minigsf whose patch value maps to the selected song table entry.
+function gsfEntryIndexForSelection() {
+  const sel = document.getElementById('songSelect');
+  const selectedSong = player.songs.find(s => String(s.idx) === sel?.value) || player.songs[sel?.selectedIndex || 0];
+  const mappedKey = selectedSong?.gsfPatch?.key;
+  const mappedIndex = mappedKey && standardGsfEngine?.entries
+    ? standardGsfEngine.entries.findIndex(entry => entry.key === mappedKey)
+    : -1;
+  const entryIndex = mappedIndex >= 0 ? mappedIndex : (sel?.selectedIndex >= 0 ? sel.selectedIndex : 0);
+  return { entryIndex, selectedSong, mappedKey, mappedIndex, sel };
+}
+
 document.getElementById('btnPlay').addEventListener('click', async () => {
   if (document.getElementById('engineSelect')?.value === 'gsf-lle') {
     try {
       const debugEnabled = player.isDebugEnabled();
-      const sel = document.getElementById('songSelect');
-      const selectedSong = player.songs.find(s => String(s.idx) === sel?.value) || player.songs[sel?.selectedIndex || 0];
-      const mappedKey = selectedSong?.gsfPatch?.key;
-      const mappedIndex = mappedKey && standardGsfEngine?.entries
-        ? standardGsfEngine.entries.findIndex(entry => entry.key === mappedKey)
-        : -1;
-      const entryIndex = mappedIndex >= 0 ? mappedIndex : (sel?.selectedIndex >= 0 ? sel.selectedIndex : 0);
+      const { entryIndex, selectedSong, mappedKey, mappedIndex, sel } = gsfEntryIndexForSelection();
       const chosenEntry = standardGsfEngine?.entries?.[entryIndex];
       if (debugEnabled) {
         console.log(`[gsf-lle entry-select] selectedSong=${selectedSong?.name || selectedSong?.idx} gsfPatchKey=${mappedKey || '(none)'} mappedIndex=${mappedIndex} sel.selectedIndex=${sel?.selectedIndex} -> entryIndex=${entryIndex} chosenEntry.key=${chosenEntry?.key || '(none)'} chosenEntry.patch.loadAddr=${chosenEntry?.patch ? '0x' + chosenEntry.patch.loadAddr.toString(16) : '?'}+${chosenEntry?.patch?.size ?? '?'}`);
@@ -5535,6 +5542,42 @@ document.getElementById('btnStop').addEventListener('click', () => {
   player.stop();
   standardGsfEngine?.stop(); // also halt any live GSF LLE stream
   setStatus('Stopped');
+});
+
+document.getElementById('btnExportWav').addEventListener('click', async () => {
+  if (document.getElementById('engineSelect')?.value !== 'gsf-lle') {
+    setStatus('WAV export uses the GSF LLE engine — switch the engine selector to GSF LLE first.');
+    return;
+  }
+  if (!standardGsfEngine?.entries?.length) {
+    setStatus('Load a GSF file or archive before exporting.');
+    return;
+  }
+  const btn = document.getElementById('btnExportWav');
+  btn.disabled = true;
+  try {
+    const { entryIndex } = gsfEntryIndexForSelection();
+    const entryName = standardGsfEngine.entries[entryIndex]?.name || 'track';
+    setStatus(`Rendering "${entryName}" to WAV…`);
+    // 0 = use the rip's tagged track length (fallback 90s, capped at 5 min)
+    const result = await standardGsfEngine.exportWav(0, entryIndex, (done, total) => {
+      setStatus(`Rendering "${entryName}" to WAV… ${done.toFixed(1)}/${total.toFixed(0)}s`);
+    });
+    const url = URL.createObjectURL(result.blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = result.name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    setStatus(`Exported ${result.name}: ${result.seconds.toFixed(1)}s stereo at ${result.rate}Hz`
+      + (result.halted ? ` (render ended early: ${result.reason})` : ''));
+  } catch (err) {
+    setStatus('WAV export failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 document.getElementById('btnPrev').addEventListener('click', async () => {

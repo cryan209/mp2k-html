@@ -4848,6 +4848,100 @@
       if (this._audioCtx) { this._audioCtx.close(); this._audioCtx = null; }
     }
 
+    // Parse a GSF length tag ("m:ss", "m:ss.fff", or plain seconds) into seconds.
+    _tagSeconds(text) {
+      if (!text) return 0;
+      const m = String(text).trim().match(/^(?:(\d+):)?(\d+(?:\.\d+)?)$/);
+      if (!m) return 0;
+      return (m[1] ? parseInt(m[1], 10) * 60 : 0) + parseFloat(m[2]);
+    }
+
+    // Offline-render the selected entry (no audio graph involved) and return a 16-bit
+    // stereo WAV at the exact source sample rate — the proven-clean reference path for
+    // A/B listening against real hardware or other players. seconds <= 0 uses the
+    // rip's tagged track length when present (else 90s), capped at 5 minutes.
+    async exportWav(seconds = 0, entryIndex = this.activeEntryIndex || 0, onProgress = null) {
+      this.stop();
+      this.selectEntry(entryIndex); // clean rebuild so the render always starts from t=0
+      const entry = this.entries[this.activeEntryIndex];
+      if (!(seconds > 0)) seconds = this._tagSeconds(entry?.tags?.length) || 90;
+      seconds = Math.min(seconds, 300);
+      const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      this.bus.fastMode = true;
+      this.cpu.fastMode = true;
+      const targetCycles = Math.round(GBA_CPU_HZ * seconds);
+      let firstSampleCycles = -1;
+      await new Promise(resolve => {
+        const slice = () => {
+          const deadline = now() + 14;
+          while (now() < deadline) {
+            // Small batches: a halted step fast-forwards a whole frame, so checking the
+            // target only every N steps overshoots the render length by up to N frames.
+            for (let i = 0; i < 64; i++) this.cpu._stepFast();
+            if (firstSampleCycles < 0 && (this.bus.fifoSamplesA.length || this.bus.fifoSamplesB.length)) {
+              firstSampleCycles = this.bus.cycles;
+            }
+            if (this.cpu.halted || this.bus.cycles >= targetCycles) { resolve(); return; }
+          }
+          if (onProgress) onProgress(this.bus.cycles / GBA_CPU_HZ, seconds);
+          setTimeout(slice, 0);
+        };
+        setTimeout(slice, 0);
+      });
+
+      const a = this.bus.fifoSamplesA;
+      const b = this.bus.fifoSamplesB;
+      const producedSamples = Math.max(a.length, b.length);
+      const halted = this.cpu.halted;
+      const haltReason = this.cpu.reason;
+      // Same rate preference as play(): the exact timer-derived rate wins when it
+      // agrees with the post-first-sample production rate.
+      const timerRate = this._directSoundSampleRate(0);
+      const producedSeconds = firstSampleCycles >= 0 ? (this.bus.cycles - firstSampleCycles) / GBA_CPU_HZ : 0;
+      const observed = (producedSeconds > 0.5 && producedSamples > 256) ? Math.round(producedSamples / producedSeconds) : 0;
+      let rate;
+      if (timerRate && (!observed || Math.abs(timerRate - observed) / timerRate < 0.1)) rate = timerRate;
+      else rate = observed || timerRate || 13379;
+      // Trim any residual overshoot to the requested length.
+      const nSamples = Math.min(producedSamples, Math.round(seconds * rate));
+      // Leave a fresh CPU behind so a subsequent play() starts from t=0 rather than
+      // wherever this render stopped.
+      this._initCpu();
+      if (!nSamples) {
+        throw new Error(`render produced no audio${halted ? ` (CPU halted: ${haltReason})` : ''}`);
+      }
+
+      // 16-bit stereo interleaved WAV; FIFO B → left, FIFO A → right (playback convention).
+      const dataBytes = nSamples * 4;
+      const buf = new ArrayBuffer(44 + dataBytes);
+      const view = new DataView(buf);
+      const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+      writeStr(0, 'RIFF'); view.setUint32(4, 36 + dataBytes, true); writeStr(8, 'WAVE');
+      writeStr(12, 'fmt '); view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);  // PCM
+      view.setUint16(22, 2, true);  // stereo
+      view.setUint32(24, rate, true);
+      view.setUint32(28, rate * 4, true);
+      view.setUint16(32, 4, true);
+      view.setUint16(34, 16, true);
+      writeStr(36, 'data'); view.setUint32(40, dataBytes, true);
+      // Source samples span ±511; ×64 fills the int16 range (511×64 = 32704).
+      const clamp16 = v => v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+      for (let i = 0; i < nSamples; i++) {
+        view.setInt16(44 + i * 4, clamp16((b[i] || 0) * 64), true);
+        view.setInt16(44 + i * 4 + 2, clamp16((a[i] || 0) * 64), true);
+      }
+      return {
+        blob: new Blob([buf], { type: 'audio/wav' }),
+        name: `${(entry?.name || 'gsf-render').replace(/[\\/:*?"<>|]+/g, '_')}.wav`,
+        rate,
+        samples: nSamples,
+        seconds: nSamples / rate,
+        halted,
+        reason: halted ? haltReason : null,
+      };
+    }
+
     _entryAddr() {
       const entry = this.source?.entryAddr || this.library?.entryAddr || this.source?.loadAddr || tools.GBA_ROM_BASE;
       return entry >>> 0;

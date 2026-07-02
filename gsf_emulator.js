@@ -3157,11 +3157,19 @@
       if (traceThisDispatch) this.bus._beginIrqPcTrace();
       const vblBeforeHandler = this.bus.vblankCount;
       let count = 0;
-      while (count < MAX_HANDLER_STEPS) {
-        if (this.regs[15] === SENTINEL || this.halted) break;
-        if (traceThisDispatch) this.bus._recordIrqPcTraceStep(this.regs[15] >>> 0);
-        this.step();
-        count++;
+      if (this.fastMode && !this.diagnosticProbes) {
+        while (count < MAX_HANDLER_STEPS) {
+          if (this.regs[15] === SENTINEL || this.halted) break;
+          this._stepFast();
+          count++;
+        }
+      } else {
+        while (count < MAX_HANDLER_STEPS) {
+          if (this.regs[15] === SENTINEL || this.halted) break;
+          if (traceThisDispatch) this.bus._recordIrqPcTraceStep(this.regs[15] >>> 0);
+          this.step();
+          count++;
+        }
       }
       if (traceThisDispatch) this.bus._endIrqPcTrace();
       const result = this.regs[15] === SENTINEL ? 'returned' : this.halted ? 'halted' : 'capped';
@@ -3957,12 +3965,20 @@
       const WARMUP_TARGET_SAMPLES = 2048; // ~150ms at typical mp2k rates
       const WARMUP_MAX_CYCLES = GBA_CPU_HZ * 5;
       const warmupWallStart = now();
+      const fastPlayback = !debug;
+      const runCpuBatch = (count) => {
+        if (fastPlayback) {
+          for (let i = 0; i < count; i++) this.cpu._stepFast();
+        } else {
+          for (let i = 0; i < count; i++) this.cpu.step();
+        }
+      };
       await new Promise(resolve => {
         const slice = () => {
           const deadline = now() + 12;
           let done = false;
           while (now() < deadline) {
-            for (let i = 0; i < 256; i++) this.cpu.step();
+            runCpuBatch(256);
             const produced = Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length);
             if (this.cpu.halted || produced >= WARMUP_TARGET_SAMPLES
                 || this.bus.cycles - cyclesAtStart >= WARMUP_MAX_CYCLES) { done = true; break; }
@@ -4124,7 +4140,11 @@
         // slice so the UI thread stays responsive.
         const deadline = now() + 12;
         while (!reachedEnd() && producedTotal() - stream.consumed < CHUNK_SAMPLES && now() < deadline) {
-          for (let i = 0; i < 512; i++) engine.cpu.step();
+          if (fastPlayback) {
+            for (let i = 0; i < 512; i++) engine.cpu._stepFast();
+          } else {
+            for (let i = 0; i < 512; i++) engine.cpu.step();
+          }
         }
         while (producedTotal() - stream.consumed >= CHUNK_SAMPLES) scheduleChunk(CHUNK_SAMPLES);
         if (reachedEnd()) {

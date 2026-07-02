@@ -717,7 +717,10 @@
       if (addr >= 0x03007100 && addr < 0x03007180 && this.mplInitWrites.length < 256) {
         this.mplInitWrites.push({ a: tools.hex(addr), v: tools.hex(value), k: source.kind, pc: source.pc !== undefined ? tools.hex(source.pc) : '?' });
       }
-      if ((r.id === 'ewram' && r.off >= 0x4000 && r.off < 0x8000) || r.id === 'iwram') {
+      // Track write provenance for ALL of EWRAM + IWRAM. The old 0x4000-0x8000 EWRAM
+      // window was tuned to one engine's buffer placement; Golden Sun's ring lives at
+      // EWRAM 0x3520-0x3B4F and showed up as 100% "never written" in staleness traces.
+      if (r.id === 'ewram' || r.id === 'iwram') {
         this.soundBufferWriteMap.set(canonicalAddr & ~3, entry);
         if (entry.value !== 0 || this.soundBufferWrites.length < 8) {
           this.soundBufferWrites.push(entry);
@@ -1023,6 +1026,12 @@
     _consumeFifoChannel(channel) {
       const collectTrace = !this.fastMode || this.diagnosticProbes;
       const wasEmpty = this._fifoLength(channel) === 0;
+      // Underruns repeat the previous byte: each one time-stretches the waveform by a
+      // sample (pitch flat + warble when frequent). fastMode-safe cheap tally.
+      if (wasEmpty) {
+        if (channel === 'A') this.fifoUnderrunsA = (this.fifoUnderrunsA || 0) + 1;
+        else this.fifoUnderrunsB = (this.fifoUnderrunsB || 0) + 1;
+      }
       const shifted = wasEmpty ? null : this._fifoShift(channel);
       const value = shifted == null ? (channel === 'A' ? this.fifoLastA : this.fifoLastB) : shifted;
       const meta = (collectTrace && !wasEmpty) ? this._fifoMetaShift(channel) : null;
@@ -1472,7 +1481,13 @@
     _pushSoundFifoByte(channel, value, meta = null) {
       if (channel !== 'A' && channel !== 'B') return;
       const byte = value & 0xff;
-      if (!this._fifoPush(channel, byte < 128 ? byte : byte - 256)) return;
+      if (!this._fifoPush(channel, byte < 128 ? byte : byte - 256)) {
+        // Dropped byte on a full FIFO while the DMA latch still advanced past it:
+        // the stream skips time (pitch sharp + warble when frequent). fastMode-safe.
+        if (channel === 'A') this.fifoDropsA = (this.fifoDropsA || 0) + 1;
+        else this.fifoDropsB = (this.fifoDropsB || 0) + 1;
+        return;
+      }
       if (!this.fastMode || this.diagnosticProbes) this._fifoMetaPush(channel, meta);
     }
 
@@ -1655,10 +1670,15 @@
           });
         }
       }
+      // With probes on, record DMA writes in the provenance map too — engines that copy
+      // their mix output into the FIFO-DMA ring via another DMA channel (rather than CPU
+      // stores) otherwise show every ring byte as "never written" in staleness traces.
+      const noteDmaWrites = !this.fastMode || this.diagnosticProbes;
       for (let i = 0; i < maxCount; i++) {
         const value = width === 4 ? this.read32(src) : this.read16(src);
         if (width === 4) this.write32(dst, value);
         else this.write16(dst, value);
+        if (noteDmaWrites) this.noteMemoryWrite(dst, value, width, { kind: `dma${ch}-write` });
         src = (src + srcStep) >>> 0;
         dst = (dst + dstStep) >>> 0;
       }

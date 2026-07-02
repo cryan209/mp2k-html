@@ -4990,6 +4990,7 @@ class GS1Player {
 // ── UI ─────────────────────────────────────────────────────────────────────────
 const player = new GS1Player();
 const standardGsfEngine = window.StandardGsfEngine ? new window.StandardGsfEngine() : null;
+const standardGbsEngine = window.DmgEmulator ? new window.DmgEmulator.StandardGbsEngine() : null;
 player._drawLiveKeyboard();
 let currentSongListIdx = 0;
 
@@ -5235,6 +5236,16 @@ function gsfEntryIndexForSelection() {
 }
 
 document.getElementById('btnPlay').addEventListener('click', async () => {
+  if (document.getElementById('engineSelect')?.value === 'gbs-lle') {
+    try {
+      if (!standardGbsEngine?.canPlay()) { setStatus('Load a GBS file first.'); return; }
+      standardGbsEngine.play(0);
+      setStatus(`GBS LLE streaming: ${standardGbsEngine.header.title}`);
+    } catch (err) {
+      setStatus('GBS playback failed: ' + err.message);
+    }
+    return;
+  }
   if (document.getElementById('engineSelect')?.value === 'gsf-lle') {
     try {
       const debugEnabled = player.isDebugEnabled();
@@ -5533,6 +5544,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
 document.getElementById('btnStop').addEventListener('click', () => {
   player.stop();
   standardGsfEngine?.stop(); // also halt any live GSF LLE stream
+  standardGbsEngine?.stop(); // also halt any live GBS LLE stream
   setStatus('Stopped');
 });
 
@@ -6354,6 +6366,19 @@ function updateInfoText() {
 
 async function initWithBuffer(buf, source = {}) {
   try {
+    // GBS files are a standalone Z80/DMG program, not an MP2K ROM — they have no song
+    // table, voice group, or track data for the tracker pipeline below to parse, so handle
+    // them as a fully separate playback mode via StandardGbsEngine instead.
+    if (window.GbsTools?.isValid?.(buf)) {
+      if (!standardGbsEngine) throw new Error('GBS support is unavailable (dmg_emulator.js failed to load)');
+      const header = standardGbsEngine.loadBuffer(buf);
+      if (!standardGbsEngine.canPlay()) throw new Error(standardGbsEngine.error || 'failed to parse GBS file');
+      document.getElementById('engineSelect').value = 'gbs-lle';
+      document.getElementById('dropmsg').style.display = 'none';
+      document.getElementById('btnPlay').disabled = false;
+      setStatus(`GBS loaded: "${header.title}" by ${header.author} (${header.songCount} song${header.songCount === 1 ? '' : 's'}) — press ▶`);
+      return;
+    }
     const isZip = window.GsfTools?.isZip?.(buf) || false;
     const isSevenZip = window.GsfTools?.isSevenZip?.(buf) || false;
     const isArchive = isZip || isSevenZip;

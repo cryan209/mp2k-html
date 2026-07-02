@@ -165,6 +165,7 @@ button.ctrl.active { background:#6366f1; border-color:#6366f1; color:#fff; }
   <select class="ctrl" id="engineSelect" title="Playback engine">
     <option value="mp2k-hle" selected>MP2K HLE</option>
     <option value="gsf-lle">GSF LLE</option>
+    <option value="gbs-lle">GBS LLE</option>
   </select>
   <select class="ctrl" id="backendSelect" title="Playback backend">
     <option value="webaudio" selected>Web Audio graph</option>
@@ -273,9 +274,9 @@ button.ctrl.active { background:#6366f1; border-color:#6366f1; color:#fff; }
 </div>
 
 <div id="info"></div>
-<div id="dropmsg">Drop a GBA ROM, GSF dump, minigsf, gsflib, ZIP, or 7z here</div>
+<div id="dropmsg">Drop a GBA ROM, GSF dump, minigsf, gsflib, ZIP, 7z, or GBS here</div>
 <div class="file-actions">
-  <input id="filePicker" type="file" accept=".gba,.bin,.gsf,.gsflib,.minigsf,.zip,.7z">
+  <input id="filePicker" type="file" accept=".gba,.bin,.gsf,.gsflib,.minigsf,.zip,.7z,.gbs">
   <label class="ctrl" for="filePicker">Choose File</label>
 </div>
 

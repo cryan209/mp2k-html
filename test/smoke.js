@@ -674,64 +674,64 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   check(sincDb < linDb - 20, 'sinc beats linear by >=20dB (sinc ' + sincDb.toFixed(1) + 'dB vs linear ' + linDb.toFixed(1) + 'dB)');
 })();
 
-// --- 21. Z80 core (z80_emulator.js) ---
+// --- 21. SM83/GB-CPU core (z80_emulator.js) ---
+// NOT a standard Z80: no IX/IY, no shadow registers, no block ops, no ED prefix, and a
+// different flag layout (only Z/N/H/C at bits 7/6/5/4). See z80_emulator.js header comment.
 (function () {
-  var Z80Cpu = window.Z80Emulator.Z80Cpu;
+  var Sm83Cpu = window.Z80Emulator.Sm83Cpu;
+  var FLAG_C = 0x10, FLAG_H = 0x20, FLAG_N = 0x40, FLAG_Z = 0x80;
 
-  function freshZ80(prog, org) {
+  function freshSm83(prog, org) {
     org = org || 0;
     var mem = new Uint8Array(0x10000);
-    var ioIn = {}, ioOut = {};
     var bus = {
       read8: function (a) { return mem[a & 0xffff]; },
       write8: function (a, v) { mem[a & 0xffff] = v & 0xff; },
-      ioIn: function (p) { return ioIn[p] || 0; },
-      ioOut: function (p, v) { ioOut[p] = v; },
     };
-    var cpu = new Z80Cpu(bus);
+    var cpu = new Sm83Cpu(bus);
     cpu.pc = org;
     if (prog) mem.set(prog, org);
     cpu.mem = mem;
     return cpu;
   }
-  function runZ80(cpu, n) { for (var i = 0; i < n; i++) cpu.step(); }
+  function runSm83(cpu, n) { for (var i = 0; i < n; i++) cpu.step(); }
 
   var st0 = window.Z80Emulator.selfTest();
-  check(st0.a === 0x43 && st0.b === 1 && st0.c === 0x43 && st0.mem8000 === 0x43 && st0.halted,
-    'Z80 selfTest basics (a=' + st0.a.toString(16) + ')');
+  check(st0.a === 0x43 && st0.hl === 0x8001 && st0.mem8000 === 0x43 && st0.mem_ff10 === 0x43 && st0.halted,
+    'SM83 selfTest basics incl. LD (HL+),A and LDH (n),A (a=0x' + st0.a.toString(16) + ')');
 
   (function () {
-    var cpu = freshZ80([0x3e, 0x10, 0xc6, 0x05]); // LD A,0x10 ; ADD A,5
-    runZ80(cpu, 2);
-    check(cpu.a === 0x15, 'Z80 ADD A,n basic (got 0x' + cpu.a.toString(16) + ')');
+    var cpu = freshSm83([0x3e, 0x10, 0xc6, 0x05]); // LD A,0x10 ; ADD A,5
+    runSm83(cpu, 2);
+    check(cpu.a === 0x15, 'SM83 ADD A,n basic (got 0x' + cpu.a.toString(16) + ')');
   })();
 
   (function () {
-    var cpu = freshZ80([0x3e, 0x7f, 0x3c]); // LD A,0x7f ; INC A
-    runZ80(cpu, 2);
-    check(cpu.a === 0x80 && (cpu.f & 0x04), 'Z80 INC A sets overflow at 0x7f->0x80 (f=0x' + cpu.f.toString(16) + ')');
+    var cpu = freshSm83([0x3e, 0x7f, 0x3c]); // LD A,0x7f ; INC A
+    runSm83(cpu, 2);
+    check(cpu.a === 0x80 && (cpu.f & FLAG_H) && !(cpu.f & FLAG_Z), 'SM83 INC A half-carries at 0x7f->0x80 (f=0x' + cpu.f.toString(16) + ')');
   })();
 
   (function () {
-    var cpu = freshZ80([0x3e, 0x00, 0xd6, 0x01]); // LD A,0 ; SUB 1
-    runZ80(cpu, 2);
-    check(cpu.a === 0xff && (cpu.f & 0x01) && (cpu.f & 0x80), 'Z80 SUB underflow sets carry+sign (a=0x' + cpu.a.toString(16) + ' f=0x' + cpu.f.toString(16) + ')');
+    var cpu = freshSm83([0x3e, 0x00, 0xd6, 0x01]); // LD A,0 ; SUB 1
+    runSm83(cpu, 2);
+    check(cpu.a === 0xff && (cpu.f & FLAG_C) && (cpu.f & FLAG_N), 'SM83 SUB underflow sets carry+N, no sign flag exists (a=0x' + cpu.a.toString(16) + ' f=0x' + cpu.f.toString(16) + ')');
   })();
 
   (function () {
-    var cpu = freshZ80([0x3e, 0x09, 0xc6, 0x01, 0x27]); // LD A,9 ; ADD A,1 ; DAA
-    runZ80(cpu, 3);
-    check(cpu.a === 0x10, 'Z80 DAA after 9+1 -> 0x10 (got 0x' + cpu.a.toString(16) + ')');
+    var cpu = freshSm83([0x3e, 0x09, 0xc6, 0x01, 0x27]); // LD A,9 ; ADD A,1 ; DAA
+    runSm83(cpu, 3);
+    check(cpu.a === 0x10, 'SM83 DAA after 9+1 -> 0x10 (got 0x' + cpu.a.toString(16) + ')');
   })();
 
   (function () {
-    var cpu = freshZ80([0x21, 0x34, 0x12, 0x01, 0x01, 0x00, 0x09]); // LD HL,0x1234 ; LD BC,1 ; ADD HL,BC
-    runZ80(cpu, 3);
-    check(cpu.hl === 0x1235, 'Z80 ADD HL,BC basic (got 0x' + cpu.hl.toString(16) + ')');
+    var cpu = freshSm83([0x21, 0x34, 0x12, 0x01, 0x01, 0x00, 0x09]); // LD HL,0x1234 ; LD BC,1 ; ADD HL,BC
+    runSm83(cpu, 3);
+    check(cpu.hl === 0x1235, 'SM83 ADD HL,BC basic (got 0x' + cpu.hl.toString(16) + ')');
   })();
 
   (function () {
-    var cpu = freshZ80([
+    var cpu = freshSm83([
       0x21, 0x00, 0x90, // 0: LD HL,0x9000
       0xf9,             // 3: LD SP,HL
       0xcd, 0x0a, 0x00, // 4: CALL 0x000a
@@ -740,88 +740,115 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
       0x3e, 0x99,       // 10: LD A,0x99
       0xc9,             // 12: RET
     ]);
-    runZ80(cpu, 5);
-    check(cpu.a === 0x99, 'Z80 CALL reaches subroutine (a=0x' + cpu.a.toString(16) + ')');
-    check(cpu.pc === 7, 'Z80 RET returns to instruction after CALL (pc=0x' + cpu.pc.toString(16) + ')');
+    runSm83(cpu, 5);
+    check(cpu.a === 0x99, 'SM83 CALL reaches subroutine (a=0x' + cpu.a.toString(16) + ')');
+    check(cpu.pc === 7, 'SM83 RET returns to instruction after CALL (pc=0x' + cpu.pc.toString(16) + ')');
   })();
 
   (function () {
-    var cpu = freshZ80([
+    var cpu = freshSm83([
       0xaf,             // XOR A
       0xca, 0x06, 0x00, // JP Z,0x0006
       0x3e, 0xff,       // (skipped)
       0x3e, 0x55,       // LD A,0x55
     ]);
-    runZ80(cpu, 3);
-    check(cpu.a === 0x55, 'Z80 JP Z,nn taken when zero flag set (a=0x' + cpu.a.toString(16) + ')');
+    runSm83(cpu, 3);
+    check(cpu.a === 0x55, 'SM83 JP Z,nn taken when zero flag set (a=0x' + cpu.a.toString(16) + ')');
   })();
 
   (function () {
-    var cpu = freshZ80([
-      0xdd, 0x21, 0x00, 0x80, // LD IX,0x8000
-      0x3e, 0x7a,             // LD A,0x7a
-      0xdd, 0x77, 0x05,       // LD (IX+5),A
-      0xdd, 0x7e, 0x05,       // LD A,(IX+5)
-    ]);
-    runZ80(cpu, 3);
-    check(cpu.mem[0x8005] === 0x7a, 'Z80 LD (IX+d),A writes displaced address (got 0x' + cpu.mem[0x8005].toString(16) + ')');
-    cpu.a = 0;
-    runZ80(cpu, 1);
-    check(cpu.a === 0x7a, 'Z80 LD A,(IX+d) reads displaced address (got 0x' + cpu.a.toString(16) + ')');
-  })();
-
-  (function () {
-    var cpu = freshZ80([0x3e, 0x81, 0xcb, 0x07]); // LD A,0x81 ; RLC A
-    runZ80(cpu, 2);
-    check(cpu.a === 0x03 && (cpu.f & 0x01), 'Z80 CB RLC A rotates high bit into carry+low bit (a=0x' + cpu.a.toString(16) + ' f=0x' + cpu.f.toString(16) + ')');
-  })();
-
-  (function () {
-    var cpu = freshZ80([0x3e, 0x10, 0xcb, 0x67]); // LD A,0x10 ; BIT 4,A
-    runZ80(cpu, 2);
-    check(!(cpu.f & 0x40), 'Z80 BIT 4,A with bit set clears Z (f=0x' + cpu.f.toString(16) + ')');
-  })();
-
-  (function () {
-    var cpu = freshZ80([0x3e, 0x00, 0xcb, 0xc7]); // LD A,0 ; SET 0,A
-    runZ80(cpu, 2);
-    check(cpu.a === 0x01, 'Z80 SET 0,A (got 0x' + cpu.a.toString(16) + ')');
-  })();
-
-  (function () {
-    var cpu = freshZ80([
+    // GB repurposes 0x22/0x2A/0x32/0x3A as LD (HL+/-),A / LD A,(HL+/-) instead of Z80's
+    // LD (nn),HL / LD HL,(nn) / LD (nn),A / LD A,(nn).
+    var cpu = freshSm83([
       0x21, 0x00, 0x80, // LD HL,0x8000
-      0x11, 0x00, 0x81, // LD DE,0x8100
-      0x01, 0x03, 0x00, // LD BC,3
-      0xed, 0xb0,       // LDIR
+      0x3e, 0x7a,       // LD A,0x7a
+      0x22,             // LD (HL+),A -- writes 0x8000, HL->0x8001
+      0x2b,             // DEC HL     -- HL->0x8000
+      0x3e, 0x00,       // LD A,0
+      0x2a,             // LD A,(HL+) -- reads back 0x8000, HL->0x8001
     ]);
-    cpu.mem[0x8000] = 0x11; cpu.mem[0x8001] = 0x22; cpu.mem[0x8002] = 0x33;
-    runZ80(cpu, 6); // 3 setup + 3 LDIR iterations (each re-fetches via pc rewind)
-    check(cpu.mem[0x8100] === 0x11 && cpu.mem[0x8101] === 0x22 && cpu.mem[0x8102] === 0x33,
-      'Z80 LDIR copies 3 bytes (0x' + cpu.mem[0x8100].toString(16) + ',0x' + cpu.mem[0x8101].toString(16) + ',0x' + cpu.mem[0x8102].toString(16) + ')');
-    check(cpu.bc === 0, 'Z80 LDIR decrements BC to 0');
+    runSm83(cpu, 6);
+    check(cpu.mem[0x8000] === 0x7a && cpu.a === 0x7a && cpu.hl === 0x8001,
+      'SM83 LD (HL+),A / LD A,(HL+) auto-increment HL (mem=0x' + cpu.mem[0x8000].toString(16) + ' a=0x' + cpu.a.toString(16) + ' hl=0x' + cpu.hl.toString(16) + ')');
   })();
 
   (function () {
-    var cpu = freshZ80([
-      0x21, 0xff, 0xff, // LD HL,0xffff
-      0x01, 0x01, 0x00, // LD BC,1
-      0x09,             // ADD HL,BC -> HL=0, carry set
-      0x21, 0x00, 0x00, // LD HL,0
-      0x01, 0x00, 0x00, // LD BC,0
-      0xed, 0x4a,       // ADC HL,BC
+    // LDH (n),A / LDH A,(n): the fast path real GB driver code uses to hit sound registers.
+    var cpu = freshSm83([
+      0x3e, 0x77,       // LD A,0x77
+      0xe0, 0x12,       // LDH (0x12),A -> writes 0xff12 (NR12)
+      0x3e, 0x00,       // LD A,0
+      0xf0, 0x12,       // LDH A,(0x12)
     ]);
-    runZ80(cpu, 6);
-    check(cpu.hl === 1, 'Z80 ADC HL,BC includes carry from prior ADD HL,BC (got 0x' + cpu.hl.toString(16) + ')');
+    runSm83(cpu, 4);
+    check(cpu.mem[0xff12] === 0x77 && cpu.a === 0x77, 'SM83 LDH (n),A / LDH A,(n) hit the 0xFF00 page (got 0x' + cpu.a.toString(16) + ')');
   })();
 
   (function () {
-    var cpu = freshZ80([0xfb, 0x00, 0x00]); // EI ; NOP ; NOP
-    cpu.im = 1;
-    runZ80(cpu, 1);
-    cpu.requestIrq();
-    runZ80(cpu, 1);
-    check(cpu.pc === 0x38 || cpu.pc === 2, 'Z80 IM1 IRQ reaches 0x0038 (pc=0x' + cpu.pc.toString(16) + ')');
+    var cpu = freshSm83([0x3e, 0x81, 0xcb, 0x07]); // LD A,0x81 ; RLC A
+    runSm83(cpu, 2);
+    check(cpu.a === 0x03 && (cpu.f & FLAG_C), 'SM83 CB RLC A rotates high bit into carry+low bit (a=0x' + cpu.a.toString(16) + ' f=0x' + cpu.f.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshSm83([0x3e, 0x10, 0xcb, 0x67]); // LD A,0x10 ; BIT 4,A
+    runSm83(cpu, 2);
+    check(!(cpu.f & FLAG_Z), 'SM83 BIT 4,A with bit set clears Z (f=0x' + cpu.f.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshSm83([0x3e, 0x00, 0xcb, 0xc7]); // LD A,0 ; SET 0,A
+    runSm83(cpu, 2);
+    check(cpu.a === 0x01, 'SM83 SET 0,A (got 0x' + cpu.a.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshSm83([0x3e, 0x12, 0xcb, 0x37]); // LD A,0x12 ; SWAP A
+    runSm83(cpu, 2);
+    check(cpu.a === 0x21, 'SM83 SWAP A swaps nibbles (got 0x' + cpu.a.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshSm83([
+      0x31, 0x00, 0x90, // LD SP,0x9000
+      0xf3,             // DI
+      0xfb,             // EI
+      0xc3, 0x00, 0x00, // JP 0x0000 (would loop; we stop before executing it)
+    ]);
+    runSm83(cpu, 2); // LD SP,nn ; DI
+    check(cpu.ime === false, 'SM83 DI clears IME');
+    runSm83(cpu, 1); // EI
+    check(cpu.ime === true, 'SM83 EI sets IME');
+  })();
+
+  (function () {
+    // RETI is a single documented byte on GB (0xD9), unlike Z80 where it's ED 4D.
+    var cpu = freshSm83([
+      0x21, 0x00, 0x90, 0xf9,       // LD HL,0x9000 ; LD SP,HL
+      0xcd, 0x08, 0x00,             // CALL 0x0008
+      0x76,                         // 7: HALT
+      0x3e, 0x42,                   // 8: LD A,0x42
+      0xd9,                         // 10: RETI
+    ]);
+    runSm83(cpu, 4); // LD HL, LD SP,HL, CALL, LD A
+    cpu.ime = false;
+    runSm83(cpu, 1); // RETI
+    check(cpu.a === 0x42 && cpu.pc === 7 && cpu.ime === true, 'SM83 RETI pops PC and sets IME (pc=0x' + cpu.pc.toString(16) + ' ime=' + cpu.ime + ')');
+  })();
+
+  (function () {
+    // ADD SP,e / LD HL,SP+e: H/C computed from the low-byte addition only.
+    var cpu = freshSm83([0x31, 0xff, 0x00, 0xe8, 0x01]); // LD SP,0x00ff ; ADD SP,1
+    runSm83(cpu, 2);
+    check(cpu.sp === 0x0100 && (cpu.f & FLAG_H) && (cpu.f & FLAG_C), 'SM83 ADD SP,e carries out of low byte (sp=0x' + cpu.sp.toString(16) + ' f=0x' + cpu.f.toString(16) + ')');
+  })();
+
+  (function () {
+    // Opcodes that don't exist on GB (Z80's DD/ED/FD prefixes) should be treated as an
+    // illegal-opcode lockup rather than silently misdecoded.
+    var cpu = freshSm83([0xdd, 0x00, 0x00]);
+    runSm83(cpu, 1);
+    check(cpu.illegal === true && cpu.halted === true, 'SM83 treats Z80-only prefix byte 0xDD as illegal/lockup');
   })();
 })();
 

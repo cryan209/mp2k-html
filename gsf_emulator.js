@@ -90,6 +90,8 @@
   const GBA_SYSTEM_STACK = 0x03007f00;
   const TIMER_PRESCALERS = [1, 64, 256, 1024];
   const IRQ_VBLANK = 0x0001;
+  const BIT_COUNT_16 = new Uint8Array(0x10000);
+  for (let i = 1; i < BIT_COUNT_16.length; i++) BIT_COUNT_16[i] = BIT_COUNT_16[i >>> 1] + (i & 1);
 
   function signExtend24(v) {
     return (v & 0x00800000) ? (v | 0xff000000) : v;
@@ -380,6 +382,22 @@
       return (this.read8(addr) | (this.read8(addr + 1) << 8) | (this.read8(addr + 2) << 16) | (this.read8(addr + 3) << 24)) >>> 0;
     }
 
+    read32FastRam(addr) {
+      addr >>>= 0;
+      let data;
+      let off;
+      if (addr >= 0x03000000 && addr < 0x04000000) {
+        data = this.iwram;
+        off = (addr - 0x03000000) & 0x7fff;
+      } else if (addr >= 0x02000000 && addr < 0x03000000) {
+        data = this.ewram;
+        off = (addr - 0x02000000) & 0x3ffff;
+      } else {
+        return this.read32(addr);
+      }
+      return (data[off] | (data[(off + 1) & (data.length - 1)] << 8) | (data[(off + 2) & (data.length - 1)] << 16) | (data[(off + 3) & (data.length - 1)] << 24)) >>> 0;
+    }
+
     write8(addr, value) {
       addr >>>= 0;
       value &= 0xff;
@@ -576,6 +594,29 @@
       this.write8((addr + 1) >>> 0, value >>> 8);
       this.write8((addr + 2) >>> 0, value >>> 16);
       this.write8((addr + 3) >>> 0, value >>> 24);
+    }
+
+    write32FastRam(addr, value) {
+      addr >>>= 0;
+      value >>>= 0;
+      let data;
+      let off;
+      if (addr >= 0x03000000 && addr < 0x04000000) {
+        data = this.iwram;
+        off = (addr - 0x03000000) & 0x7fff;
+        if (off <= 0x7ffb && 0x7ff8 < off + 4) this.biosIrqFlagsWritten = true;
+      } else if (addr >= 0x02000000 && addr < 0x03000000) {
+        data = this.ewram;
+        off = (addr - 0x02000000) & 0x3ffff;
+      } else {
+        this.write32(addr, value);
+        return;
+      }
+      const mask = data.length - 1;
+      data[off] = value & 0xff;
+      data[(off + 1) & mask] = (value >>> 8) & 0xff;
+      data[(off + 2) & mask] = (value >>> 16) & 0xff;
+      data[(off + 3) & mask] = (value >>> 24) & 0xff;
     }
 
     // Golden Sun crash investigation: track every POP-driven read from the
@@ -1812,7 +1853,7 @@
         if ((instr & 0x0db0f000) === 0x0120f000) return this._msr(instr);
         return this._dataProcessingFast(instr);
       }
-      if (major === 0x08000000) return this._blockDataTransfer(instr);
+      if (major === 0x08000000) return this._blockDataTransferFast(instr);
       if ((instr & 0x0c000000) === 0x04000000) return this._singleDataTransfer(instr);
       if (major === 0x0a000000) return this._branch(instr, pc);
       if ((instr & 0x0f000000) === 0x0f000000) return this._swi((instr >>> 16) & 0xff, pc, 'arm');
@@ -2719,6 +2760,45 @@
       if (psr && load && (list & 0x8000)) {
         this._switchCpuMode(this.spsr & 0x1f); // bank-switch while this.cpsr still reflects the old mode
         this.cpsr = this.spsr; // restore CPSR from SPSR (mode switch back to interrupted mode)
+      }
+    }
+
+    _blockDataTransferFast(instr) {
+      const psr = !!(instr & 0x00400000);
+      const list = instr & 0xffff;
+      if (psr || (list & 0x8000) || list === 0) return this._blockDataTransfer(instr);
+
+      const pre = !!(instr & 0x01000000);
+      const up = !!(instr & 0x00800000);
+      const writeBack = !!(instr & 0x00200000);
+      const load = !!(instr & 0x00100000);
+      const rn = (instr >>> 16) & 0xf;
+      if (rn === 15) return this._blockDataTransfer(instr);
+
+      const count = BIT_COUNT_16[list];
+      const base = this.regs[rn] >>> 0;
+      let addr;
+      const finalBase = up ? (base + count * 4) >>> 0 : (base - count * 4) >>> 0;
+      if (up) addr = pre ? (base + 4) >>> 0 : base;
+      else addr = pre ? finalBase : (base - (count - 1) * 4) >>> 0;
+
+      const baseInList = !!(list & (1 << rn));
+      if (load) {
+        if (writeBack && !baseInList) this.regs[rn] = finalBase;
+        for (let reg = 0, bits = list; bits; reg++, bits >>>= 1) {
+          if (!(bits & 1)) continue;
+          this.regs[reg] = this.bus.read32FastRam(addr & ~3);
+          addr = (addr + 4) >>> 0;
+        }
+      } else {
+        const baseIsFirst = baseInList && (list & ((1 << rn) - 1)) === 0;
+        if (writeBack) this.regs[rn] = finalBase;
+        for (let reg = 0, bits = list; bits; reg++, bits >>>= 1) {
+          if (!(bits & 1)) continue;
+          const value = (reg === rn && baseIsFirst) ? base : (reg === 15 ? (this.regs[15] + 4) >>> 0 : this.regs[reg] >>> 0);
+          this.bus.write32FastRam(addr & ~3, value);
+          addr = (addr + 4) >>> 0;
+        }
       }
     }
 
@@ -3898,13 +3978,7 @@
     }
 
     _bitCount(v) {
-      v &= 0xffff;
-      let c = 0;
-      while (v) {
-        v &= v - 1;
-        c++;
-      }
-      return c;
+      return BIT_COUNT_16[v & 0xffff];
     }
 
     _branch(instr, pc) {

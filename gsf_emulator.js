@@ -1808,18 +1808,72 @@
       }
       if (this.cpsr & CPSR_T) {
         const pc = this.regs[15] >>> 0;
-        if (!this._canFetchFast(pc, 2)) return;
-        const instr = this._readCode16Fast(pc);
+        let data;
+        let off;
+        let cost;
+        if (pc >= 0x08000000 && pc < 0x0e000000) {
+          data = this.bus.memory.rom;
+          off = (pc - 0x08000000) & 0x01ffffff;
+          if (off + 2 > data.length) { if (!this._canFetch(pc, 2)) return; }
+          const ws = pc >= 0x0c000000 ? 2 : pc >= 0x0a000000 ? 1 : 0;
+          cost = this.bus.romCostThumb[ws];
+        } else if (pc >= 0x03000000 && pc < 0x04000000) {
+          data = this.bus.iwram;
+          off = (pc - 0x03000000) & 0x7fff;
+          if (off + 2 > data.length) { if (!this._canFetch(pc, 2)) return; }
+          cost = 1;
+        } else if (pc >= 0x02000000 && pc < 0x03000000) {
+          data = this.bus.ewram;
+          off = (pc - 0x02000000) & 0x3ffff;
+          if (off + 2 > data.length) { if (!this._canFetch(pc, 2)) return; }
+          cost = 3;
+        } else {
+          if (!this._canFetch(pc, 2)) return;
+          data = this.bus.executableRegion(pc).data;
+          off = this.bus.executableRegion(pc).off;
+          cost = 1;
+        }
+        const instr = data[off] | (data[off + 1] << 8);
         this.bus.openBus = ((instr << 16) | instr) >>> 0;
         this.regs[15] = (pc + 2) >>> 0;
         this.instructions++;
         this._execThumb(instr, pc);
-        this._chargeCycles(pc, true);
+        const stall = this.bus.stallCycles;
+        if (stall > 0) {
+          this.bus.stallCycles = 0;
+          cost += stall;
+        }
+        this.bus.stepCyclesFast(cost);
         return;
       }
       const pc = this.regs[15] >>> 0;
-      if (!this._canFetchFast(pc, 4)) return;
-      const instr = this._readCode32Fast(pc);
+      let data;
+      let off;
+      let cost;
+      if (pc >= 0x08000000 && pc < 0x0e000000) {
+        data = this.bus.memory.rom;
+        off = (pc - 0x08000000) & 0x01ffffff;
+        if (off + 4 > data.length) { if (!this._canFetch(pc, 4)) return; }
+        const ws = pc >= 0x0c000000 ? 2 : pc >= 0x0a000000 ? 1 : 0;
+        cost = this.bus.romCostArm[ws];
+      } else if (pc >= 0x03000000 && pc < 0x04000000) {
+        data = this.bus.iwram;
+        off = (pc - 0x03000000) & 0x7fff;
+        if (off + 4 > data.length) { if (!this._canFetch(pc, 4)) return; }
+        cost = 1;
+      } else if (pc >= 0x02000000 && pc < 0x03000000) {
+        data = this.bus.ewram;
+        off = (pc - 0x02000000) & 0x3ffff;
+        if (off + 4 > data.length) { if (!this._canFetch(pc, 4)) return; }
+        cost = 6;
+      } else {
+        if (!this._canFetch(pc, 4)) return;
+        const r = this.bus.executableRegion(pc);
+        data = r.data;
+        off = r.off;
+        cost = 1;
+      }
+      const instr = (data[off] | (data[off + 1] << 8) | (data[off + 2] << 16) | (data[off + 3] << 24)) >>> 0;
       this.bus.openBus = instr >>> 0;
       this.regs[15] = (pc + 4) >>> 0;
       this.instructions++;
@@ -1849,12 +1903,22 @@
           default: pass = false; break;
         }
         if (!pass) {
-          this._chargeCyclesFast(pc, false);
+          const stall = this.bus.stallCycles;
+          if (stall > 0) {
+            this.bus.stallCycles = 0;
+            cost += stall;
+          }
+          this.bus.stepCyclesFast(cost);
           return;
         }
       }
       this._execArmFast(instr, pc);
-      this._chargeCyclesFast(pc, false);
+      const stall = this.bus.stallCycles;
+      if (stall > 0) {
+        this.bus.stallCycles = 0;
+        cost += stall;
+      }
+      this.bus.stepCyclesFast(cost);
     }
 
     _canFetchFast(pc, bytes) {
@@ -2004,8 +2068,25 @@
 
       const opcode = (instr >>> 21) & 0xf;
       const setFlags = !!(instr & 0x00100000);
+      const needFlags = setFlags || opcode === 0x8 || opcode === 0x9 || opcode === 0xa || opcode === 0xb;
       const a = this.regs[rn] >>> 0;
-      const op2 = this._operand2Fast(instr);
+      let op2;
+      if (instr & 0x02000000) {
+        const imm = instr & 0xff;
+        const rotate = ((instr >>> 8) & 0xf) * 2;
+        if (rotate) {
+          op2 = ror32(imm, rotate);
+          this._operand2Carry = !!(op2 & 0x80000000);
+        } else {
+          op2 = imm;
+          this._operand2Carry = !!(this.cpsr & CPSR_C);
+        }
+      } else if ((instr & 0x00000ff0) === 0) {
+        op2 = this.regs[instr & 0xf] >>> 0;
+        this._operand2Carry = !!(this.cpsr & CPSR_C);
+      } else {
+        op2 = this._operand2Fast(instr);
+      }
       let result = 0;
       let write = true;
       let carry = this._operand2Carry;
@@ -2013,12 +2094,12 @@
       switch (opcode) {
         case 0x0: result = a & op2; break; // AND
         case 0x1: result = a ^ op2; break; // EOR
-        case 0x2: result = (a - op2) >>> 0; carry = a >= op2; overflow = subOverflow(a, op2, result); break; // SUB
-        case 0x3: result = (op2 - a) >>> 0; carry = op2 >= a; overflow = subOverflow(op2, a, result); break; // RSB
-        case 0x4: result = (a + op2) >>> 0; carry = result < a; overflow = addOverflow(a, op2, result); break; // ADD
-        case 0x5: { const c5 = this.cpsr & CPSR_C ? 1 : 0; result = (a + op2 + c5) >>> 0; carry = result < a || (c5 && result === a); overflow = addOverflow(a, op2, result); break; } // ADC
-        case 0x6: { const c6 = this.cpsr & CPSR_C ? 0 : 1; result = (a - op2 - c6) >>> 0; carry = a >= op2 + c6; overflow = subOverflow(a, op2, result); break; } // SBC
-        case 0x7: { const c7 = this.cpsr & CPSR_C ? 0 : 1; result = (op2 - a - c7) >>> 0; carry = op2 >= a + c7; overflow = subOverflow(op2, a, result); break; } // RSC
+        case 0x2: result = (a - op2) >>> 0; if (needFlags) { carry = a >= op2; overflow = subOverflow(a, op2, result); } break; // SUB
+        case 0x3: result = (op2 - a) >>> 0; if (needFlags) { carry = op2 >= a; overflow = subOverflow(op2, a, result); } break; // RSB
+        case 0x4: result = (a + op2) >>> 0; if (needFlags) { carry = result < a; overflow = addOverflow(a, op2, result); } break; // ADD
+        case 0x5: { const c5 = this.cpsr & CPSR_C ? 1 : 0; result = (a + op2 + c5) >>> 0; if (needFlags) { carry = result < a || (c5 && result === a); overflow = addOverflow(a, op2, result); } break; } // ADC
+        case 0x6: { const c6 = this.cpsr & CPSR_C ? 0 : 1; result = (a - op2 - c6) >>> 0; if (needFlags) { carry = a >= op2 + c6; overflow = subOverflow(a, op2, result); } break; } // SBC
+        case 0x7: { const c7 = this.cpsr & CPSR_C ? 0 : 1; result = (op2 - a - c7) >>> 0; if (needFlags) { carry = op2 >= a + c7; overflow = subOverflow(op2, a, result); } break; } // RSC
         case 0x8: result = a & op2; write = false; break; // TST
         case 0x9: result = a ^ op2; write = false; break; // TEQ
         case 0xa: result = (a - op2) >>> 0; carry = a >= op2; overflow = subOverflow(a, op2, result); write = false; break; // CMP
@@ -2031,7 +2112,7 @@
       }
       result >>>= 0;
       if (write) this.regs[rd] = result;
-      if (setFlags || !write) {
+      if (needFlags) {
         this.cpsr = (this.cpsr & ~(CPSR_N | CPSR_Z | CPSR_C | CPSR_V))
           | (result & 0x80000000 ? CPSR_N : 0)
           | (result === 0 ? CPSR_Z : 0)

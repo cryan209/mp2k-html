@@ -1809,13 +1809,107 @@
         if ((instr & 0x0ffffff0) === 0x012fff10) return this._bx(instr);
         if ((instr & 0x0fbf0fff) === 0x010f0000) return this._mrs(instr);
         if ((instr & 0x0db0f000) === 0x0120f000) return this._msr(instr);
-        return this._dataProcessing(instr);
+        return this._dataProcessingFast(instr);
       }
       if (major === 0x08000000) return this._blockDataTransfer(instr);
       if ((instr & 0x0c000000) === 0x04000000) return this._singleDataTransfer(instr);
       if (major === 0x0a000000) return this._branch(instr, pc);
       if ((instr & 0x0f000000) === 0x0f000000) return this._swi((instr >>> 16) & 0xff, pc, 'arm');
       this._unsupported(instr, pc);
+    }
+
+    _operand2Fast(instr) {
+      if (instr & 0x02000000) {
+        const imm = instr & 0xff;
+        const rotate = ((instr >>> 8) & 0xf) * 2;
+        const value = ror32(imm, rotate);
+        this._operand2Carry = rotate ? !!(value & 0x80000000) : !!(this.cpsr & CPSR_C);
+        return value >>> 0;
+      }
+      const rm = instr & 0xf;
+      const shiftType = (instr >>> 5) & 3;
+      const byReg = !!(instr & 0x10);
+      let amount = byReg ? (this.regs[(instr >>> 8) & 0xf] & 0xff) : ((instr >>> 7) & 0x1f);
+      let value = this.regs[rm] >>> 0;
+      let carry = !!(this.cpsr & CPSR_C);
+      if (amount === 0) {
+        if (!byReg && shiftType === 1) {
+          carry = !!(value & 0x80000000);
+          value = 0;
+        } else if (!byReg && shiftType === 2) {
+          carry = !!(value & 0x80000000);
+          value = carry ? 0xffffffff : 0;
+        } else if (!byReg && shiftType === 3) {
+          carry = !!(value & 1);
+          value = ((this.cpsr & CPSR_C ? 0x80000000 : 0) | (value >>> 1)) >>> 0;
+        }
+        this._operand2Carry = carry;
+        return value >>> 0;
+      }
+      if (shiftType === 0) {
+        carry = amount <= 32 ? !!(value & (1 << (32 - amount))) : false;
+        value = amount >= 32 ? 0 : (value << amount) >>> 0;
+      } else if (shiftType === 1) {
+        carry = amount <= 32 ? !!(value & (1 << (amount - 1))) : false;
+        value = amount >= 32 ? 0 : value >>> amount;
+      } else if (shiftType === 2) {
+        carry = amount <= 32 ? !!(value & (1 << (amount - 1))) : !!(value & 0x80000000);
+        value = amount >= 32 ? (value & 0x80000000 ? 0xffffffff : 0) : (value >> amount) >>> 0;
+      } else {
+        amount &= 31;
+        value = ror32(value, amount);
+        carry = !!(value & 0x80000000);
+      }
+      this._operand2Carry = carry;
+      return value >>> 0;
+    }
+
+    _dataProcessingFast(instr) {
+      const rn = (instr >>> 16) & 0xf;
+      const rd = (instr >>> 12) & 0xf;
+      if (rn === 15 || rd === 15) return this._dataProcessing(instr);
+      if (!(instr & 0x02000000)) {
+        const rm = instr & 0xf;
+        if (rm === 15) return this._dataProcessing(instr);
+        if ((instr & 0x10) && (((instr >>> 8) & 0xf) === 15)) return this._dataProcessing(instr);
+      }
+
+      const opcode = (instr >>> 21) & 0xf;
+      const setFlags = !!(instr & 0x00100000);
+      const a = this.regs[rn] >>> 0;
+      const op2 = this._operand2Fast(instr);
+      let result = 0;
+      let write = true;
+      let carry = this._operand2Carry;
+      let overflow = false;
+      switch (opcode) {
+        case 0x0: result = a & op2; break; // AND
+        case 0x1: result = a ^ op2; break; // EOR
+        case 0x2: result = (a - op2) >>> 0; carry = a >= op2; overflow = subOverflow(a, op2, result); break; // SUB
+        case 0x3: result = (op2 - a) >>> 0; carry = op2 >= a; overflow = subOverflow(op2, a, result); break; // RSB
+        case 0x4: result = (a + op2) >>> 0; carry = result < a; overflow = addOverflow(a, op2, result); break; // ADD
+        case 0x5: { const c5 = this.cpsr & CPSR_C ? 1 : 0; result = (a + op2 + c5) >>> 0; carry = result < a || (c5 && result === a); overflow = addOverflow(a, op2, result); break; } // ADC
+        case 0x6: { const c6 = this.cpsr & CPSR_C ? 0 : 1; result = (a - op2 - c6) >>> 0; carry = a >= op2 + c6; overflow = subOverflow(a, op2, result); break; } // SBC
+        case 0x7: { const c7 = this.cpsr & CPSR_C ? 0 : 1; result = (op2 - a - c7) >>> 0; carry = op2 >= a + c7; overflow = subOverflow(op2, a, result); break; } // RSC
+        case 0x8: result = a & op2; write = false; break; // TST
+        case 0x9: result = a ^ op2; write = false; break; // TEQ
+        case 0xa: result = (a - op2) >>> 0; carry = a >= op2; overflow = subOverflow(a, op2, result); write = false; break; // CMP
+        case 0xb: result = (a + op2) >>> 0; carry = result < a; overflow = addOverflow(a, op2, result); write = false; break; // CMN
+        case 0xc: result = a | op2; break; // ORR
+        case 0xd: result = op2; break; // MOV
+        case 0xe: result = a & (~op2); break; // BIC
+        case 0xf: result = (~op2) >>> 0; break; // MVN
+        default: return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
+      }
+      result >>>= 0;
+      if (write) this.regs[rd] = result;
+      if (setFlags || !write) {
+        this.cpsr = (this.cpsr & ~(CPSR_N | CPSR_Z | CPSR_C | CPSR_V))
+          | (result & 0x80000000 ? CPSR_N : 0)
+          | (result === 0 ? CPSR_Z : 0)
+          | (carry ? CPSR_C : 0)
+          | (overflow ? CPSR_V : 0);
+      }
     }
 
     _runDiagnosticProbes() {

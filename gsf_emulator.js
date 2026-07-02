@@ -1676,7 +1676,7 @@
         this.regs[15] = (pc + 2) >>> 0;
         this.instructions++;
         this._execThumb(instr, pc);
-        this._chargeCycles(pc, true);
+        this._chargeCyclesFast(pc, true);
         return;
       }
       const pc = this.regs[15] >>> 0;
@@ -1722,11 +1722,11 @@
       this.instructions++;
       const cond = instr >>> 28;
       if (cond !== 0xe && !this._conditionPassed(cond)) {
-        this._chargeCycles(pc, false);
+        this._chargeCyclesFast(pc, false);
         return;
       }
       this._execArm(instr, pc);
-      this._chargeCycles(pc, false);
+      this._chargeCyclesFast(pc, false);
     }
 
     _canFetchFast(pc, bytes) {
@@ -1775,6 +1775,26 @@
         off = (pc - 0x02000000) & 0x3ffff;
       }
       return (data[off] | (data[off + 1] << 8) | (data[off + 2] << 16) | (data[off + 3] << 24)) >>> 0;
+    }
+
+    _chargeCyclesFast(pc, thumb) {
+      let cost;
+      if (pc >= 0x08000000) {
+        const ws = pc >= 0x0c000000 ? 2 : pc >= 0x0a000000 ? 1 : 0;
+        cost = thumb ? this.bus.romCostThumb[ws] : this.bus.romCostArm[ws];
+      } else if (pc >= 0x03000000) {
+        cost = 1;
+      } else if (pc >= 0x02000000) {
+        cost = thumb ? 3 : 6;
+      } else {
+        cost = 1;
+      }
+      const stall = this.bus.stallCycles;
+      if (stall > 0) {
+        this.bus.stallCycles = 0;
+        cost += stall;
+      }
+      this.bus.stepCyclesFast(cost);
     }
 
     _runDiagnosticProbes() {
@@ -2901,7 +2921,10 @@
       const finalAddr = (addr + this._bitCount(list) * 4) >>> 0;
       for (let r = 0; r < 8; r++) {
         if (!(list & (1 << r))) continue;
-        if (load) this._writeReg(r, this.bus.read32(addr & ~3), 'thumb-multi-load', (this.regs[15] - 2) >>> 0, { addrHex: tools.hex(addr & ~3), rb });
+        if (load) {
+          const detail = this.fastMode ? { rb } : { addrHex: tools.hex(addr & ~3), rb };
+          this._writeReg(r, this.bus.read32(addr & ~3), 'thumb-multi-load', (this.regs[15] - 2) >>> 0, detail);
+        }
         else {
           const value = (r === rb && !rbIsFirst) ? finalAddr : this.regs[r];
           this._writeMem32(addr, value, 'thumb-multi-store', { r, rb });
@@ -3204,7 +3227,10 @@
       this._inIrqDispatch = true;
 
       // Save full CPU state
-      const savedRegs = Array.from(this.regs);
+      if (!this._irqSavedRegsStack) this._irqSavedRegsStack = [];
+      const savedSlot = this._irqDepth - 1;
+      const savedRegs = this._irqSavedRegsStack[savedSlot] || (this._irqSavedRegsStack[savedSlot] = new Uint32Array(16));
+      savedRegs.set(this.regs);
       const savedCpsr = this.cpsr;
       const savedSpsr = this.spsr;
       const savedHalted = this.halted;
@@ -3227,11 +3253,28 @@
       // values. The stacked lr is the interrupted PC + 4, as hardware IRQ entry sets it.
       const spBeforePush = this.regs[13] >>> 0;
       const frameBase = (spBeforePush - 24) >>> 0;
-      const frame = [savedRegs[0], savedRegs[1], savedRegs[2], savedRegs[3], savedRegs[12], (savedRegs[15] + 4) >>> 0];
-      for (let i = 0; i < 6; i++) {
-        const slotAddr = (frameBase + i * 4) >>> 0;
-        this.bus.write32(slotAddr, frame[i] >>> 0);
-        this.bus.noteMemoryWrite(slotAddr, frame[i] >>> 0, 4, { kind: 'bios-irq-frame' });
+      if (this.fastMode && !this.diagnosticProbes && frameBase >= 0x03000000 && frameBase + 24 <= 0x03008000) {
+        const mem = this.bus.iwram;
+        let off = (frameBase - 0x03000000) & 0x7fff;
+        let value = savedRegs[0] >>> 0;
+        mem[off] = value & 0xff; mem[off + 1] = (value >>> 8) & 0xff; mem[off + 2] = (value >>> 16) & 0xff; mem[off + 3] = value >>> 24; off += 4;
+        value = savedRegs[1] >>> 0;
+        mem[off] = value & 0xff; mem[off + 1] = (value >>> 8) & 0xff; mem[off + 2] = (value >>> 16) & 0xff; mem[off + 3] = value >>> 24; off += 4;
+        value = savedRegs[2] >>> 0;
+        mem[off] = value & 0xff; mem[off + 1] = (value >>> 8) & 0xff; mem[off + 2] = (value >>> 16) & 0xff; mem[off + 3] = value >>> 24; off += 4;
+        value = savedRegs[3] >>> 0;
+        mem[off] = value & 0xff; mem[off + 1] = (value >>> 8) & 0xff; mem[off + 2] = (value >>> 16) & 0xff; mem[off + 3] = value >>> 24; off += 4;
+        value = savedRegs[12] >>> 0;
+        mem[off] = value & 0xff; mem[off + 1] = (value >>> 8) & 0xff; mem[off + 2] = (value >>> 16) & 0xff; mem[off + 3] = value >>> 24; off += 4;
+        value = (savedRegs[15] + 4) >>> 0;
+        mem[off] = value & 0xff; mem[off + 1] = (value >>> 8) & 0xff; mem[off + 2] = (value >>> 16) & 0xff; mem[off + 3] = value >>> 24;
+      } else {
+        const frameValues = [savedRegs[0], savedRegs[1], savedRegs[2], savedRegs[3], savedRegs[12], (savedRegs[15] + 4) >>> 0];
+        for (let i = 0; i < 6; i++) {
+          const slotAddr = (frameBase + i * 4) >>> 0;
+          this.bus.write32(slotAddr, frameValues[i] >>> 0);
+          this.bus.noteMemoryWrite(slotAddr, frameValues[i] >>> 0, 4, { kind: 'bios-irq-frame' });
+        }
       }
       this.regs[13] = frameBase;
       this.regs[0] = 0x04000000;
@@ -3308,7 +3351,7 @@
       this.bankedR13R14[MODE_IRQ].r13 = this.r13_irq;
 
       // Restore CPU state to pre-IRQ values
-      for (let i = 0; i < 16; i++) this.regs[i] = savedRegs[i];
+      this.regs.set(savedRegs);
       this.cpsr = savedCpsr;
       this.spsr = savedSpsr;
       this.halted = savedHalted;

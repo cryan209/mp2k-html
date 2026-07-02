@@ -411,6 +411,8 @@
         const vMatch = line === this.io[5] ? 4 : 0;
         return (base & ~7) | inVBlank | inHBlank | vMatch;
       }
+      if (addr === 0x04000084) return this._soundCntXRead();
+      if (addr === 0x04000085) return 0;
       if (addr >= 0x04000090 && addr < 0x040000a0) return this._waveRamRead(addr);
       const r = this.region(addr);
       if (!r || r.off >= r.data.length) {
@@ -492,6 +494,11 @@
       let loggedValue = value;
       // SOUNDCNT_H bits 11 and 15 reset Direct Sound FIFOs. They are pulse
       // controls, not sticky readable state.
+      if (addr === 0x04000084) {
+        this._setSoundMasterEnabled(!!(value & 0x80));
+        value &= 0x80;
+      }
+      if (addr === 0x04000085) value = 0;
       if (addr === 0x04000083) {
         if (value & 0x08) this._resetSoundFifo('A');
         if (value & 0x80) this._resetSoundFifo('B');
@@ -1118,6 +1125,30 @@
         writeCycles: meta ? meta.writeCycles : null,
         staleCycles: (meta && meta.writeCycles != null) ? meta.readCycles - meta.writeCycles : null,
       };
+    }
+
+    _soundCntXRead() {
+      this._clockPsgFrameSequencer(this.cycles);
+      return (this.io[0x84] & 0x80)
+        | (this.psg[0]?.enabled ? 0x01 : 0)
+        | (this.psg[1]?.enabled ? 0x02 : 0)
+        | (this.psgWave?.enabled ? 0x04 : 0)
+        | (this.psgNoise?.enabled ? 0x08 : 0);
+    }
+
+    _setSoundMasterEnabled(enabled) {
+      const wasEnabled = !!(this.io[0x84] & 0x80);
+      this.io[0x84] = enabled ? 0x80 : 0;
+      this.psgSampleCacheCycles = -1;
+      if (enabled || !wasEnabled) return;
+      for (const st of this.psg) {
+        st.enabled = false;
+        st.envActive = false;
+        st.sweepEnabled = false;
+      }
+      this.psgWave.enabled = false;
+      this.psgNoise.enabled = false;
+      this.psgNoise.envActive = false;
     }
 
     // Live PSG frequency/length-enable update: called on EVERY write to SOUND1CNT_X (ch0) or

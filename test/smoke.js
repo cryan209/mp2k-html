@@ -217,6 +217,24 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   bus.write16(0x04000082, 0x0004); // DMA A 100%
   var v2 = bus._mixPsgInto('A', 100);
   check(v2 === 400, 'master-enable passes DS at full scale (got ' + v2 + ')');
+
+  bus.write8(0x04000084, 0x8f);
+  check(bus.read8(0x04000084) === 0x80, 'SOUNDCNT_X low status bits are read-only when channels are off');
+  bus.psg[0].enabled = true;
+  bus.psg[1].enabled = true;
+  bus.psgWave.enabled = true;
+  bus.psgNoise.enabled = true;
+  check(bus.read8(0x04000084) === 0x8f, 'SOUNDCNT_X reports live PSG channel status flags');
+  bus.write8(0x04000084, 0x00);
+  check(bus.read8(0x04000084) === 0 && !bus.psg[0].enabled && !bus.psgWave.enabled && !bus.psgNoise.enabled,
+    'master-disable clears PSG channel status');
+
+  bus.write8(0x04000084, 0x80);
+  bus.psg[0].enabled = true;
+  bus.psg[0].lengthEnabled = true;
+  bus.psg[0].lengthCounter = 1;
+  bus.cycles = 32768;
+  check(bus.read8(0x04000084) === 0x80, 'SOUNDCNT_X polling clocks expired length status');
 })();
 
 // --- 10b. PSG hardware-ish scaling/cache/noise ---

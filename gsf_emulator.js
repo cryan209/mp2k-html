@@ -2960,6 +2960,33 @@
 
     _swi(num, pc, state) {
       this.swiCounts[num & 0xff]++;
+      if (this.fastMode && !this.diagnosticProbes) {
+        try {
+          if (num === 0x02 || num === 0x03) this._biosHalt(pc);
+          else if (num === 0x04) this._biosIntrWait();
+          else if (num === 0x05) this._biosVBlankIntrWait();
+          else if (num === 0x06) this._biosDiv(false);
+          else if (num === 0x07) this._biosDiv(true);
+          else if (num === 0x08) this._biosSqrt();
+          else if (num === 0x09) this._biosArcTan();
+          else if (num === 0x0a) this._biosArcTan2();
+          else if (num === 0x0b) this._biosCpuSet();
+          else if (num === 0x0c) this._biosCpuFastSet();
+          else if (num === 0x10) this._biosBitUnPack();
+          else if (num === 0x11 || num === 0x12) this._biosLz77UnComp();
+          else if (num === 0x13) this._biosHuffUnComp();
+          else if (num === 0x14 || num === 0x15) this._biosRlUnComp();
+          else if (num === 0x16 || num === 0x17) this._biosDiffUnFilter(false);
+          else if (num === 0x18) this._biosDiffUnFilter(true);
+          else if (num === 0x19) this._biosSoundBias();
+          else if (num === 0x1f) this._biosMidiKey2Freq();
+        } catch (err) {
+          this.halted = true;
+          this.reason = `SWI ${tools.hex(num, 2)} failed at ${tools.hex(pc)}: ${err.message}`;
+        }
+        this.bus.biosOpenBus = 0xe3a02004;
+        return;
+      }
       const call = {
         num,
         name: this._swiName(num),

@@ -105,6 +105,34 @@
     return (v & 0x8000) ? (v | 0xffff0000) : v;
   }
 
+  // Polyphase windowed-sinc resampling kernel. Rows are fractional phases in [0,1);
+  // each row holds `taps` Blackman-windowed sinc coefficients (cutoff fcNorm in
+  // source-sample units), normalized to unit DC gain so amplitude cannot ripple with
+  // phase. Replaces linear interpolation in the stream path: linear interp of high-
+  // rate sources (e.g. Golden Sun's 21kHz mixer) leaves imaging around the source
+  // rate that beats against the music — audible as a watery warble that a proper
+  // sinc kernel suppresses by design.
+  function buildSincKernel(fcNorm, taps = 24, phases = 512) {
+    const half = taps / 2;
+    const table = new Float32Array(taps * phases);
+    for (let p = 0; p < phases; p++) {
+      const frac = p / phases;
+      let sum = 0;
+      for (let k = 0; k < taps; k++) {
+        const t = (k - (half - 1)) - frac; // distance (in source samples) to this tap
+        const x = Math.PI * fcNorm * t;
+        const sinc = x === 0 ? 1 : Math.sin(x) / x;
+        const wpos = (t + half) / taps;   // 0..1 across the kernel span
+        const w = 0.42 - 0.5 * Math.cos(2 * Math.PI * wpos) + 0.08 * Math.cos(4 * Math.PI * wpos);
+        const c = fcNorm * sinc * Math.max(0, w);
+        table[p * taps + k] = c;
+        sum += c;
+      }
+      if (sum !== 0) for (let k = 0; k < taps; k++) table[p * taps + k] /= sum;
+    }
+    return table;
+  }
+
   function ror32(value, amount) {
     amount &= 31;
     value >>>= 0;
@@ -4720,8 +4748,15 @@
       const engine = this;
       const bus = this.bus;
       const OUT_CHUNK = Math.max(256, Math.round(outRate * 0.15));
-      // Source samples a full output chunk needs, plus the interpolation neighbor.
-      const SRC_NEEDED = Math.ceil(OUT_CHUNK * ratio) + 2;
+      // Windowed-sinc polyphase kernel for the fixed source->device ratio. Cutoff at
+      // the lower of the two Nyquists (with a small transition margin) so upsampling
+      // suppresses source imaging and downsampling (e.g. GS2's 63kHz) pre-filters.
+      const KERNEL_TAPS = 24;
+      const KERNEL_PHASES = 512;
+      const KERNEL_HALF = KERNEL_TAPS / 2;
+      const kernel = buildSincKernel(Math.min(1, 1 / ratio) * 0.92, KERNEL_TAPS, KERNEL_PHASES);
+      // Source samples a full output chunk needs, plus the kernel's look-around.
+      const SRC_NEEDED = Math.ceil(OUT_CHUNK * ratio) + KERNEL_TAPS + 2;
       // Runway of scheduled-but-unplayed audio. Production is gated on this draining,
       // so a bigger runway costs no steady-state CPU — it only buys tolerance for
       // main-thread stalls (GC, extensions, layout) before an audible underrun.
@@ -4741,17 +4776,24 @@
         const left = buffer.getChannelData(0);
         const right = buffer.getChannelData(1);
         let pos = stream.srcPos;
+        const sampA = bus.fifoSamplesA;
+        const sampB = bus.fifoSamplesB;
         for (let i = 0; i < outN; i++) {
           const idxAbs = Math.floor(pos);
           const frac = pos - idxAbs;
-          const idx = idxAbs - stream.trimOffset;
+          const phase = Math.min(KERNEL_PHASES - 1, (frac * KERNEL_PHASES) | 0);
+          const rowOff = phase * KERNEL_TAPS;
+          const base = idxAbs - stream.trimOffset - (KERNEL_HALF - 1);
+          let accA = 0;
+          let accB = 0;
+          for (let k = 0; k < KERNEL_TAPS; k++) {
+            const c = kernel[rowOff + k];
+            accA += c * sampleFrom(sampA, base + k);
+            accB += c * sampleFrom(sampB, base + k);
+          }
           // Mixed samples span the hardware ±511 range; normalize by 512 for Web Audio.
-          const a0 = sampleFrom(bus.fifoSamplesA, idx);
-          const a1 = sampleFrom(bus.fifoSamplesA, idx + 1);
-          const b0 = sampleFrom(bus.fifoSamplesB, idx);
-          const b1 = sampleFrom(bus.fifoSamplesB, idx + 1);
-          right[i] = (a0 + (a1 - a0) * frac) / 512;
-          left[i] = (b0 + (b1 - b0) * frac) / 512;
+          right[i] = accA / 512;
+          left[i] = accB / 512;
           pos += ratio;
         }
         stream.srcPos = pos;
@@ -4812,7 +4854,7 @@
           if (reachedEnd()) {
             // Flush whatever full source samples remain as one final (shorter) chunk.
             const tailSrc = producedTotal() - stream.consumed;
-            const tailOut = Math.floor(Math.max(0, tailSrc - 2) / ratio);
+            const tailOut = Math.floor(Math.max(0, tailSrc - KERNEL_TAPS) / ratio);
             if (tailOut > 0) scheduleChunk(tailOut);
             stream.ended = true;
             if (engine.cpu.halted) console.warn('[GsfEngine] Stream ended: CPU halted:', engine.cpu.reason);
@@ -5554,6 +5596,7 @@
     applyDecodedProgram,
     selfTest,
     StandardGsfEngine,
+    buildSincKernel,
   };
   window.StandardGsfEngine = StandardGsfEngine;
 })();

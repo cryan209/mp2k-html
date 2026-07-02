@@ -432,4 +432,47 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   check(bus.read16(0x04000100) === 0x1004, 'timer ticks after start delay (got 0x' + bus.read16(0x04000100).toString(16) + ')');
 })();
 
+// --- 20. windowed-sinc resampler suppresses the imaging linear interp leaks ---
+(function () {
+  var srcRate = 21024, outRate = 48000, f = 6000; // image lands at 15024Hz, in-band
+  var n = 8192;
+  var src = [];
+  for (var i = 0; i < n; i++) src.push(400 * Math.sin(2 * Math.PI * f * i / srcRate));
+  var ratio = srcRate / outRate;
+  var TAPS = 24, PHASES = 512, HALF = 12;
+  var kernel = E.buildSincKernel(Math.min(1, 1 / ratio) * 0.92, TAPS, PHASES);
+  var rowSum = 0;
+  for (var k = 0; k < TAPS; k++) rowSum += kernel[100 * TAPS + k];
+  check(Math.abs(rowSum - 1) < 1e-5, 'sinc kernel rows are DC-normalized');
+  function clampAt(idx) { return src[idx < 0 ? 0 : idx >= src.length ? src.length - 1 : idx]; }
+  function goertzel(sig, freq, rate) {
+    var w = 2 * Math.PI * freq / rate, c = 2 * Math.cos(w), s0, s1 = 0, s2 = 0;
+    for (var i = 0; i < sig.length; i++) { s0 = sig[i] + c * s1 - s2; s2 = s1; s1 = s0; }
+    return Math.sqrt(Math.max(1e-12, s1 * s1 + s2 * s2 - c * s1 * s2)) / sig.length;
+  }
+  var outN = Math.floor((n - TAPS * 2) / ratio);
+  var sincOut = [], linOut = [];
+  var pos = TAPS;
+  for (var i = 0; i < outN; i++) {
+    var idxAbs = Math.floor(pos), frac = pos - idxAbs;
+    var phase = Math.min(PHASES - 1, (frac * PHASES) | 0), rowOff = phase * TAPS;
+    var acc = 0;
+    for (var k = 0; k < TAPS; k++) acc += kernel[rowOff + k] * clampAt(idxAbs - (HALF - 1) + k);
+    sincOut.push(acc);
+    linOut.push(clampAt(idxAbs) + (clampAt(idxAbs + 1) - clampAt(idxAbs)) * frac);
+    pos += ratio;
+  }
+  var imageFreq = srcRate - f;
+  var sincDb = 20 * Math.log10(goertzel(sincOut, imageFreq, outRate) / goertzel(sincOut, f, outRate));
+  var linDb = 20 * Math.log10(goertzel(linOut, imageFreq, outRate) / goertzel(linOut, f, outRate));
+  // Reference is the SOURCE tone's own level: linear interp droops a 6kHz fundamental
+  // to ~76% (sinc^2 rolloff), so it is not a valid comparison baseline.
+  var srcFund = goertzel(src, f, srcRate);
+  var sincRel = goertzel(sincOut, f, outRate) / srcFund;
+  var linRel = goertzel(linOut, f, outRate) / srcFund;
+  check(Math.abs(sincRel - 1) < 0.1, 'sinc preserves the fundamental (' + (sincRel * 100).toFixed(1) + '% vs linear ' + (linRel * 100).toFixed(1) + '%)');
+  check(sincDb < -50, 'sinc image below -50dB (got ' + sincDb.toFixed(1) + 'dB)');
+  check(sincDb < linDb - 20, 'sinc beats linear by >=20dB (sinc ' + sincDb.toFixed(1) + 'dB vs linear ' + linDb.toFixed(1) + 'dB)');
+})();
+
 print(failures === 0 ? 'ALL PASS' : failures + ' FAILURES');

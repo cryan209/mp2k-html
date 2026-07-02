@@ -15,6 +15,7 @@ var console = { warn: function (m) { print('WARN: ' + m); }, log: function (m) {
 load('psg_dmg.js');
 load('gsf_emulator.js'); // run from the repo root: npm test
 load('z80_emulator.js');
+load('gbs.js');
 
 var E = window.GsfEmulator;
 var failures = 0;
@@ -930,6 +931,63 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
     bus.serviceInterrupts(cpu);
     check(cpu.halted === false && cpu.pc === 0x40 && (bus.if_ & 0x01) === 0,
       'DmgMemoryBus serviceInterrupts wakes CPU and dispatches to VBlank vector 0x0040 (pc=0x' + cpu.pc.toString(16) + ')');
+  })();
+})();
+
+// --- 23. GBS file loader (gbs.js) ---
+(function () {
+  var GbsTools = window.GbsTools;
+
+  function buildGbs(fields, romBytes) {
+    fields = fields || {};
+    romBytes = romBytes || [0xaa, 0xbb, 0xcc];
+    var buf = new ArrayBuffer(GbsTools.HEADER_SIZE + romBytes.length);
+    var view = new DataView(buf);
+    var u8 = new Uint8Array(buf);
+    u8[0] = 0x47; u8[1] = 0x42; u8[2] = 0x53; u8[3] = 0x01; // 'GBS' + version 1
+    view.setUint8(0x04, fields.songCount != null ? fields.songCount : 1);
+    view.setUint8(0x05, fields.firstSong != null ? fields.firstSong : 1);
+    view.setUint16(0x06, fields.loadAddr != null ? fields.loadAddr : 0x0400, true);
+    view.setUint16(0x08, fields.initAddr != null ? fields.initAddr : 0x0400, true);
+    view.setUint16(0x0a, fields.playAddr != null ? fields.playAddr : 0x0410, true);
+    view.setUint16(0x0c, fields.stackPointer != null ? fields.stackPointer : 0xdff0, true);
+    view.setUint8(0x0e, fields.timerModulo || 0);
+    view.setUint8(0x0f, fields.timerControl || 0);
+    var title = fields.title || 'Test Song';
+    for (var i = 0; i < title.length && i < 32; i++) u8[0x10 + i] = title.charCodeAt(i);
+    u8.set(romBytes, GbsTools.HEADER_SIZE);
+    return buf;
+  }
+
+  (function () {
+    var buf = buildGbs();
+    check(GbsTools.isValid(buf) === true, 'GbsTools.isValid accepts a well-formed GBS buffer');
+    var bad = buildGbs(); new Uint8Array(bad)[3] = 0x02; // wrong version byte
+    check(GbsTools.isValid(bad) === false, 'GbsTools.isValid rejects wrong version byte');
+  })();
+
+  (function () {
+    var buf = buildGbs({ loadAddr: 0x0500, initAddr: 0x0500, playAddr: 0x0520, timerModulo: 0, timerControl: 0, title: 'Foo' });
+    var h = GbsTools.decodeHeader(buf);
+    check(h.loadAddr === 0x0500 && h.initAddr === 0x0500 && h.playAddr === 0x0520, 'GbsTools.decodeHeader parses load/init/play addresses');
+    check(h.title === 'Foo', 'GbsTools.decodeHeader parses null-padded title string (got "' + h.title + '")');
+    check(h.usesTimer === false, 'GbsTools.decodeHeader: zero TMA/TAC means vblank-driven (usesTimer=false)');
+  })();
+
+  (function () {
+    var buf = buildGbs({ timerModulo: 0x80, timerControl: 0x05 });
+    var h = GbsTools.decodeHeader(buf);
+    check(h.usesTimer === true, 'GbsTools.decodeHeader: nonzero TMA/TAC means timer-driven (usesTimer=true)');
+  })();
+
+  (function () {
+    var buf = buildGbs({ loadAddr: 0x0400 }, [0xaa, 0xbb, 0xcc]);
+    var h = GbsTools.decodeHeader(buf);
+    var image = GbsTools.romImage(buf, h);
+    check(image[0x0400] === 0xaa && image[0x0401] === 0xbb && image[0x0402] === 0xcc,
+      'GbsTools.romImage places ROM bytes starting at loadAddr');
+    check(image[0] === 0, 'GbsTools.romImage zero-fills before loadAddr');
+    check(image.length % 0x4000 === 0, 'GbsTools.romImage is bank-boundary sized (got ' + image.length + ')');
   })();
 })();
 

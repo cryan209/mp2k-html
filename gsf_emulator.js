@@ -1725,7 +1725,7 @@
         this._chargeCyclesFast(pc, false);
         return;
       }
-      this._execArm(instr, pc);
+      this._execArmFast(instr, pc);
       this._chargeCyclesFast(pc, false);
     }
 
@@ -1795,6 +1795,27 @@
         cost += stall;
       }
       this.bus.stepCyclesFast(cost);
+    }
+
+    _execArmFast(instr, pc) {
+      const major = instr & 0x0e000000;
+      if ((instr & 0x0c000000) === 0x00000000) {
+        if ((instr & 0x0e000090) === 0x00000090) {
+          if ((instr & 0x0fc000f0) === 0x00000090) return this._multiply(instr);
+          if ((instr & 0x0f8000f0) === 0x00800090) return this._multiplyLong(instr);
+          if ((instr & 0x0fb00ff0) === 0x01000090) return this._swp(instr);
+          return this._halfwordDataTransfer(instr);
+        }
+        if ((instr & 0x0ffffff0) === 0x012fff10) return this._bx(instr);
+        if ((instr & 0x0fbf0fff) === 0x010f0000) return this._mrs(instr);
+        if ((instr & 0x0db0f000) === 0x0120f000) return this._msr(instr);
+        return this._dataProcessing(instr);
+      }
+      if (major === 0x08000000) return this._blockDataTransfer(instr);
+      if ((instr & 0x0c000000) === 0x04000000) return this._singleDataTransfer(instr);
+      if (major === 0x0a000000) return this._branch(instr, pc);
+      if ((instr & 0x0f000000) === 0x0f000000) return this._swi((instr >>> 16) & 0xff, pc, 'arm');
+      this._unsupported(instr, pc);
     }
 
     _runDiagnosticProbes() {

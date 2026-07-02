@@ -4686,7 +4686,12 @@
           left[i] = sampleFrom(bus.fifoSamplesB, startIdx + i) / 512;
         }
         if (stream.nextTime < ctx.currentTime + 0.02) {
-          if (stream.consumed > 0) stream.underruns++;
+          if (stream.consumed > 0) {
+            stream.underruns++;
+            if (stream.underruns <= 5) {
+              console.warn(`[GsfEngine] stream underrun #${stream.underruns} (audible gap) — emulation fell behind the playhead`);
+            }
+          }
           stream.nextTime = ctx.currentTime + 0.05;
         }
         const src = ctx.createBufferSource();
@@ -4715,28 +4720,37 @@
 
       const tick = () => {
         if (stream.stopped) return;
-        // Emulate until a chunk's worth of new samples exists, bounded by a wall-clock
-        // slice so the UI thread stays responsive.
-        const deadline = now() + 12;
-        while (!reachedEnd() && producedTotal() - stream.consumed < CHUNK_SAMPLES && now() < deadline) {
-          if (fastPlayback) {
-            for (let i = 0; i < 512; i++) engine.cpu._stepFast();
-          } else {
-            for (let i = 0; i < 512; i++) engine.cpu.step();
+        // Only produce when the scheduled runway has actually drained below target.
+        // Previously every tick emulated + scheduled another chunk regardless of how
+        // far ahead playback already was, so production ran ~3x real time forever:
+        // the emulator never idled (constant tab CPU) and thousands of pending
+        // one-shot buffer sources piled up in the audio graph. In steady state this
+        // now emulates only the ~1x real time the playhead consumes and keeps at
+        // most a few chunks in flight.
+        if (stream.nextTime - ctx.currentTime < TARGET_AHEAD_SEC) {
+          // Emulate until a chunk's worth of new samples exists, bounded by a
+          // wall-clock slice so the UI thread stays responsive.
+          const deadline = now() + 12;
+          while (!reachedEnd() && producedTotal() - stream.consumed < CHUNK_SAMPLES && now() < deadline) {
+            if (fastPlayback) {
+              for (let i = 0; i < 512; i++) engine.cpu._stepFast();
+            } else {
+              for (let i = 0; i < 512; i++) engine.cpu.step();
+            }
           }
+          while (producedTotal() - stream.consumed >= CHUNK_SAMPLES) scheduleChunk(CHUNK_SAMPLES);
+          if (reachedEnd()) {
+            const tail = producedTotal() - stream.consumed;
+            if (tail > 0) scheduleChunk(tail);
+            stream.ended = true;
+            if (engine.cpu.halted) console.warn('[GsfEngine] Stream ended: CPU halted:', engine.cpu.reason);
+            // Let the final scheduled buffer play out, then release the audio context.
+            const remainMs = Math.max(0, (stream.nextTime - ctx.currentTime) * 1000) + 200;
+            stream.timer = setTimeout(() => { if (engine._stream === stream) engine.stop(); }, remainMs);
+            return;
+          }
+          trimConsumed();
         }
-        while (producedTotal() - stream.consumed >= CHUNK_SAMPLES) scheduleChunk(CHUNK_SAMPLES);
-        if (reachedEnd()) {
-          const tail = producedTotal() - stream.consumed;
-          if (tail > 0) scheduleChunk(tail);
-          stream.ended = true;
-          if (engine.cpu.halted) console.warn('[GsfEngine] Stream ended: CPU halted:', engine.cpu.reason);
-          // Let the final scheduled buffer play out, then release the audio context.
-          const remainMs = Math.max(0, (stream.nextTime - ctx.currentTime) * 1000) + 200;
-          stream.timer = setTimeout(() => { if (engine._stream === stream) engine.stop(); }, remainMs);
-          return;
-        }
-        trimConsumed();
         const ahead = stream.nextTime - ctx.currentTime;
         const delayMs = ahead > TARGET_AHEAD_SEC
           ? 50

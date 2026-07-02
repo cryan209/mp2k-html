@@ -2235,7 +2235,8 @@
         const imm = instr & 0xff;
         const rotate = ((instr >>> 8) & 0xf) * 2;
         const value = ror32(imm, rotate);
-        return { value, carry: rotate ? !!(value & 0x80000000) : !!(this.cpsr & CPSR_C) };
+        this._operand2Carry = rotate ? !!(value & 0x80000000) : !!(this.cpsr & CPSR_C);
+        return value;
       }
       const rm = instr & 0xf;
       const shiftType = (instr >>> 5) & 3;
@@ -2258,7 +2259,8 @@
           carry = !!(value & 1);
           value = ((this.cpsr & CPSR_C ? 0x80000000 : 0) | (value >>> 1)) >>> 0;
         }
-        return { value: value >>> 0, carry };
+        this._operand2Carry = carry;
+        return value >>> 0;
       }
       if (shiftType === 0) {
         carry = amount <= 32 ? !!(value & (1 << (32 - amount))) : false;
@@ -2274,7 +2276,8 @@
         value = ror32(value, amount);
         carry = !!(value & 0x80000000);
       }
-      return { value: value >>> 0, carry };
+      this._operand2Carry = carry;
+      return value >>> 0;
     }
 
     _dataProcessing(instr) {
@@ -2286,25 +2289,25 @@
       const op2 = this._operand2(instr);
       let result = 0;
       let write = true;
-      let carry = op2.carry;
+      let carry = this._operand2Carry;
       let overflow = false;
       switch (opcode) {
-        case 0x0: result = a & op2.value; break; // AND
-        case 0x1: result = a ^ op2.value; break; // EOR
-        case 0x2: result = (a - op2.value) >>> 0; carry = a >= op2.value; overflow = subOverflow(a, op2.value, result); break; // SUB
-        case 0x3: result = (op2.value - a) >>> 0; carry = op2.value >= a; overflow = subOverflow(op2.value, a, result); break; // RSB
-        case 0x4: result = (a + op2.value) >>> 0; carry = result < a; overflow = addOverflow(a, op2.value, result); break; // ADD
-        case 0x5: { const c5 = this.cpsr & CPSR_C ? 1 : 0; result = (a + op2.value + c5) >>> 0; carry = result < a || (c5 && result === a); overflow = addOverflow(a, op2.value, result); break; } // ADC
-        case 0x6: { const c6 = this.cpsr & CPSR_C ? 0 : 1; result = (a - op2.value - c6) >>> 0; carry = a >= op2.value + c6; overflow = subOverflow(a, op2.value, result); break; } // SBC
-        case 0x7: { const c7 = this.cpsr & CPSR_C ? 0 : 1; result = (op2.value - a - c7) >>> 0; carry = op2.value >= a + c7; overflow = subOverflow(op2.value, a, result); break; } // RSC
-        case 0x8: result = a & op2.value; write = false; break; // TST
-        case 0x9: result = a ^ op2.value; write = false; break; // TEQ
-        case 0xa: result = (a - op2.value) >>> 0; carry = a >= op2.value; overflow = subOverflow(a, op2.value, result); write = false; break; // CMP
-        case 0xb: result = (a + op2.value) >>> 0; carry = result < a; overflow = addOverflow(a, op2.value, result); write = false; break; // CMN
-        case 0xc: result = a | op2.value; break; // ORR
-        case 0xd: result = op2.value; break; // MOV
-        case 0xe: result = a & (~op2.value); break; // BIC
-        case 0xf: result = (~op2.value) >>> 0; break; // MVN
+        case 0x0: result = a & op2; break; // AND
+        case 0x1: result = a ^ op2; break; // EOR
+        case 0x2: result = (a - op2) >>> 0; carry = a >= op2; overflow = subOverflow(a, op2, result); break; // SUB
+        case 0x3: result = (op2 - a) >>> 0; carry = op2 >= a; overflow = subOverflow(op2, a, result); break; // RSB
+        case 0x4: result = (a + op2) >>> 0; carry = result < a; overflow = addOverflow(a, op2, result); break; // ADD
+        case 0x5: { const c5 = this.cpsr & CPSR_C ? 1 : 0; result = (a + op2 + c5) >>> 0; carry = result < a || (c5 && result === a); overflow = addOverflow(a, op2, result); break; } // ADC
+        case 0x6: { const c6 = this.cpsr & CPSR_C ? 0 : 1; result = (a - op2 - c6) >>> 0; carry = a >= op2 + c6; overflow = subOverflow(a, op2, result); break; } // SBC
+        case 0x7: { const c7 = this.cpsr & CPSR_C ? 0 : 1; result = (op2 - a - c7) >>> 0; carry = op2 >= a + c7; overflow = subOverflow(op2, a, result); break; } // RSC
+        case 0x8: result = a & op2; write = false; break; // TST
+        case 0x9: result = a ^ op2; write = false; break; // TEQ
+        case 0xa: result = (a - op2) >>> 0; carry = a >= op2; overflow = subOverflow(a, op2, result); write = false; break; // CMP
+        case 0xb: result = (a + op2) >>> 0; carry = result < a; overflow = addOverflow(a, op2, result); write = false; break; // CMN
+        case 0xc: result = a | op2; break; // ORR
+        case 0xd: result = op2; break; // MOV
+        case 0xe: result = a & (~op2); break; // BIC
+        case 0xf: result = (~op2) >>> 0; break; // MVN
         default: return this._unsupported(instr, (this.regs[15] - 4) >>> 0);
       }
       // ARM exception return: S=1, Rd=15, privileged mode (not User 0x10)

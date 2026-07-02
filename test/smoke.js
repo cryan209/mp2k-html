@@ -852,4 +852,85 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   })();
 })();
 
+// --- 22. DmgMemoryBus (banking, timer, synthetic vblank IRQ, native PSG wiring) ---
+(function () {
+  var DmgMemoryBus = window.Z80Emulator.DmgMemoryBus;
+  var Sm83Cpu = window.Z80Emulator.Sm83Cpu;
+
+  function freshDmgRom(bankCount) {
+    var rom = new Uint8Array(0x4000 * bankCount);
+    for (var b = 0; b < bankCount; b++) rom[b * 0x4000] = b; // tag each bank's first byte with its index
+    return rom;
+  }
+
+  (function () {
+    var bus = new DmgMemoryBus(freshDmgRom(3));
+    check(bus.read8(0x0000) === 0, 'DmgMemoryBus bank 0 fixed at 0x0000 (got ' + bus.read8(0x0000) + ')');
+    check(bus.read8(0x4000) === 1, 'DmgMemoryBus defaults to bank 1 at 0x4000 (got ' + bus.read8(0x4000) + ')');
+    bus.write8(0x2000, 2);
+    check(bus.read8(0x4000) === 2, 'DmgMemoryBus bank-select write switches 0x4000 window (got ' + bus.read8(0x4000) + ')');
+    bus.write8(0x2000, 0);
+    check(bus.romBank === 0 && bus.read8(0x4000) === 0, 'DmgMemoryBus bank-select allows bank 0 (MBC5-style, got bank ' + bus.romBank + ')');
+  })();
+
+  (function () {
+    var bus = new DmgMemoryBus(freshDmgRom(2));
+    bus.write8(0xc000, 0x42);
+    check(bus.read8(0xc000) === 0x42, 'DmgMemoryBus WRAM read/write');
+    check(bus.read8(0xe000) === 0x42, 'DmgMemoryBus echo RAM mirrors 0xC000-0xDFFF at 0xE000');
+  })();
+
+  (function () {
+    var bus = new DmgMemoryBus(freshDmgRom(2));
+    bus.write8(0xff06, 0x80); // TMA reload value
+    bus.write8(0xff05, 0xfe); // TIMA starts 2 ticks from overflow
+    bus.write8(0xff07, 0x05); // TAC: enabled, clock select 01 (16 cycles/tick)
+    bus.write8(0xffff, 0x04); // IE: timer only
+    bus.tick(16, null); // TIMA: 0xfe -> 0xff
+    check(bus.read8(0xff05) === 0xff && (bus.if_ & 0x04) === 0, 'DmgMemoryBus TIMA increments without overflowing yet');
+    bus.tick(16, null); // TIMA: 0xff -> overflow -> reload TMA, request timer IRQ
+    check(bus.read8(0xff05) === 0x80, 'DmgMemoryBus TIMA reloads from TMA on overflow (got 0x' + bus.read8(0xff05).toString(16) + ')');
+    check((bus.if_ & 0x04) !== 0, 'DmgMemoryBus timer overflow requests IF bit2');
+  })();
+
+  (function () {
+    var bus = new DmgMemoryBus(freshDmgRom(2));
+    bus.tick(70223, null);
+    check((bus.if_ & 0x01) === 0, 'DmgMemoryBus vblank not yet requested before one frame elapses');
+    bus.tick(1, null);
+    check((bus.if_ & 0x01) !== 0, 'DmgMemoryBus synthetic vblank requests IF bit0 after ~70224 cycles');
+  })();
+
+  (function () {
+    // NR12/NR14 written at native DMG addresses (0xFF12/0xFF14) should reach the shared
+    // PsgDmg module directly, with no address translation layer (unlike the GBA bus).
+    var bus = new DmgMemoryBus(freshDmgRom(2));
+    bus.write8(0xff12, 0xf0); // NR12: volume 15, increasing... actually 0xf0 = vol 15, dir 0 (decrease), no period
+    bus.write8(0xff13, 0x00); // NR13: freq lo
+    bus.write8(0xff14, 0x87); // NR14: freq hi bit + trigger
+    check(bus.psg.square[0].enabled === true && bus.psg.square[0].volume === 15,
+      'DmgMemoryBus NR12/NR14 writes trigger PsgDmg square1 natively (enabled=' + bus.psg.square[0].enabled + ' vol=' + bus.psg.square[0].volume + ')');
+  })();
+
+  (function () {
+    var bus = new DmgMemoryBus(freshDmgRom(2));
+    bus.write8(0xff30, 0xab);
+    check(bus.psg.readWave(0) === 0xab, 'DmgMemoryBus wave RAM (0xFF30+) reaches PsgDmg natively');
+  })();
+
+  (function () {
+    var bus = new DmgMemoryBus(freshDmgRom(2));
+    var cpu = new Sm83Cpu(bus);
+    cpu.halted = true;
+    cpu.ime = true;
+    cpu.pc = 0x1234;
+    cpu.sp = 0xfffe;
+    bus.ie = 0x01;
+    bus.if_ = 0x01;
+    bus.serviceInterrupts(cpu);
+    check(cpu.halted === false && cpu.pc === 0x40 && (bus.if_ & 0x01) === 0,
+      'DmgMemoryBus serviceInterrupts wakes CPU and dispatches to VBlank vector 0x0040 (pc=0x' + cpu.pc.toString(16) + ')');
+  })();
+})();
+
 print(failures === 0 ? 'ALL PASS' : failures + ' FAILURES');

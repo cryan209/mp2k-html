@@ -435,6 +435,140 @@
     }
   }
 
+  const DMG_CYCLES_PER_FRAME = 70224; // ~59.7Hz synthetic vblank, matching real DMG timing
+  const TAC_PERIOD = [1024, 16, 64, 256]; // CPU cycles per TIMA tick, indexed by TAC bits 0-1
+  const IF_VBLANK = 0, IF_LCDSTAT = 1, IF_TIMER = 2, IF_SERIAL = 3, IF_JOYPAD = 4;
+  const IRQ_VECTOR = [0x40, 0x48, 0x50, 0x58, 0x60];
+
+  // DMG memory bus + interrupt controller + timer, for driving a GBS file's Z80 (SM83) music
+  // driver headlessly (no PPU/joypad — GBS files don't need either). Wires the shared PsgDmg
+  // module (psg_dmg.js) in at its native 0xFF10-0xFF3F addressing, unlike gsf_emulator.js's
+  // GbaMemoryBus which has to translate a differently-laid-out register map.
+  class DmgMemoryBus {
+    constructor(romBytes, { cpuHz = 4194304 } = {}) {
+      this.cpuHz = cpuHz;
+      const bytes = romBytes instanceof Uint8Array ? romBytes : new Uint8Array(romBytes || 0);
+      this.bankCount = Math.max(2, Math.ceil(bytes.length / 0x4000));
+      this.rom = new Uint8Array(this.bankCount * 0x4000);
+      this.rom.set(bytes.subarray(0, Math.min(bytes.length, this.rom.length)));
+      this.romBank = 1; // MBC5-style single bank-select register (0x2000-0x3FFF), per the
+                         // simple bank-switching convention real .gbs rips assume
+      this.wram = new Uint8Array(0x2000); // 8KB, 0xC000-0xDFFF, mirrored at 0xE000-0xFDFF
+      this.hram = new Uint8Array(0x7f);   // 0xFF80-0xFFFE
+      this.io = new Uint8Array(0x80);     // 0xFF00-0xFF7F, for registers PsgDmg/timer don't own
+      this.ie = 0;   // 0xFFFF
+      this.if_ = 0;  // 0xFF0F, bits 0-4 = VBlank/LCDSTAT/Timer/Serial/Joypad
+      this.psg = new window.PsgDmg({ cpuHz });
+      this.cycles = 0;
+      this.divCounter = 0;
+      this.timaCounter = 0;
+      this.frameCounter = 0;
+    }
+
+    _bankOffset(addr) { return this.romBank * 0x4000 + (addr - 0x4000); }
+
+    read8(addr) {
+      addr &= 0xffff;
+      if (addr < 0x4000) return this.rom[addr] || 0; // fixed bank 0
+      if (addr < 0x8000) return this.rom[this._bankOffset(addr) % this.rom.length] || 0; // switchable bank
+      if (addr >= 0xc000 && addr < 0xe000) return this.wram[addr - 0xc000];
+      if (addr >= 0xe000 && addr < 0xfe00) return this.wram[addr - 0xe000]; // echo RAM
+      if (addr >= 0xff10 && addr <= 0xff23) return this.psg.readReg(addr - 0xff10);
+      if (addr >= 0xff30 && addr <= 0xff3f) return this.psg.readWave(addr - 0xff30);
+      if (addr === 0xff04) return (this.divCounter >>> 8) & 0xff; // DIV = high byte of the internal counter
+      if (addr === 0xff05) return this.io[0x05]; // TIMA
+      if (addr === 0xff06) return this.io[0x06]; // TMA
+      if (addr === 0xff07) return this.io[0x07]; // TAC
+      if (addr === 0xff0f) return this.if_ & 0x1f;
+      if (addr === 0xffff) return this.ie & 0x1f;
+      if (addr >= 0xff80 && addr <= 0xfffe) return this.hram[addr - 0xff80];
+      if (addr >= 0xff00 && addr < 0xff80) return this.io[addr - 0xff00];
+      return 0xff; // unmapped (no PPU/joypad/serial hardware backing this headless bus)
+    }
+
+    write8(addr, value) {
+      addr &= 0xffff; value &= 0xff;
+      if (addr >= 0x2000 && addr < 0x4000) { this.romBank = value % this.bankCount; return; } // MBC5-style bank select (unlike MBC1, bank 0 is a valid switchable-window value)
+      if (addr < 0x8000) return; // other ROM-area writes are bank-control regs this simple loader doesn't need
+      if (addr >= 0xc000 && addr < 0xe000) { this.wram[addr - 0xc000] = value; return; }
+      if (addr >= 0xe000 && addr < 0xfe00) { this.wram[addr - 0xe000] = value; return; }
+      if (addr >= 0xff10 && addr <= 0xff23) { this.psg.writeReg(addr - 0xff10, value, this.cycles); return; }
+      if (addr >= 0xff30 && addr <= 0xff3f) { this.psg.writeWave(addr - 0xff30, value); return; }
+      if (addr === 0xff04) { this.divCounter = 0; return; } // any write resets DIV
+      if (addr === 0xff05) { this.io[0x05] = value; return; }
+      if (addr === 0xff06) { this.io[0x06] = value; return; }
+      if (addr === 0xff07) { this.io[0x07] = value & 0x07; return; }
+      if (addr === 0xff0f) { this.if_ = value & 0x1f; return; }
+      if (addr === 0xffff) { this.ie = value & 0x1f; return; }
+      if (addr >= 0xff80 && addr <= 0xfffe) { this.hram[addr - 0xff80] = value; return; }
+      if (addr >= 0xff00 && addr < 0xff80) { this.io[addr - 0xff00] = value; return; }
+    }
+
+    requestInterrupt(bit) { this.if_ |= (1 << bit); }
+
+    // Advances DIV/TIMA/synthetic-vblank timing and the shared PSG's frame sequencer by
+    // deltaCycles (the cycle cost of the instruction the CPU just executed). Call once per
+    // cpu.step() from the host engine's run loop.
+    tick(deltaCycles, cpu) {
+      this.cycles += deltaCycles;
+      this.divCounter = (this.divCounter + deltaCycles) & 0xffff;
+
+      const tac = this.io[0x07];
+      if (tac & 0x04) {
+        this.timaCounter += deltaCycles;
+        const period = TAC_PERIOD[tac & 0x03];
+        while (this.timaCounter >= period) {
+          this.timaCounter -= period;
+          const next = (this.io[0x05] + 1) & 0xff;
+          if (next === 0) { this.io[0x05] = this.io[0x06]; this.requestInterrupt(IF_TIMER); }
+          else this.io[0x05] = next;
+        }
+      }
+
+      this.frameCounter += deltaCycles;
+      while (this.frameCounter >= DMG_CYCLES_PER_FRAME) {
+        this.frameCounter -= DMG_CYCLES_PER_FRAME;
+        this.requestInterrupt(IF_VBLANK);
+      }
+
+      this.psg.stepCycles(this.cycles);
+
+      if (cpu) this.serviceInterrupts(cpu);
+    }
+
+    // Fixed-vector dispatch per real DMG semantics: on any pending IE&IF bit, a halted CPU
+    // wakes regardless of IME; the actual jump-to-handler only happens if IME is set, and
+    // only the single highest-priority pending bit (lowest bit index) is serviced per call.
+    serviceInterrupts(cpu) {
+      const pending = this.ie & this.if_ & 0x1f;
+      if (!pending) return;
+      if (cpu.halted) cpu.wake();
+      if (!cpu.ime) return;
+      for (let bit = 0; bit < 5; bit++) {
+        if (pending & (1 << bit)) {
+          this.if_ &= ~(1 << bit);
+          cpu.serviceVector(IRQ_VECTOR[bit]);
+          return;
+        }
+      }
+    }
+
+    // Simple stereo mix of the 4 PSG channels per NR50 (master volume)/NR51 (panning),
+    // analogous to gsf_emulator.js's _mixPsgInto but for real DMG's simpler additive mixer
+    // (no separate Direct Sound path to blend against, since GBS has no PCM/FIFO channels).
+    mixSample() {
+      const nr50 = this.io[0x24] || 0, nr51 = this.io[0x25] || 0;
+      const rightVol = (nr50 & 0x07) + 1, leftVol = ((nr50 >>> 4) & 0x07) + 1;
+      const out = this.psg.outputsAt(this.cycles);
+      let right = 0, left = 0;
+      for (let ch = 0; ch < 4; ch++) {
+        if (nr51 & (1 << ch)) right += out[ch];
+        if (nr51 & (1 << (ch + 4))) left += out[ch];
+      }
+      return [(left * leftVol) / 32, (right * rightVol) / 32];
+    }
+  }
+
   // Hand-assembled smoke check exercising representative GB-specific opcodes (LDH, HL+/-,
   // flag layout) alongside ordinary load/arithmetic/jump/call. Mirrors Arm7Cpu's selfTest()
   // pattern (gsf_emulator.js) — first target for test/smoke.js.
@@ -461,5 +595,5 @@
     return { a: cpu.a, hl: cpu.hl, mem8000: mem[0x8000], mem_ff10: mem[0xff10], halted: cpu.halted };
   }
 
-  window.Z80Emulator = { Sm83Cpu, selfTest };
+  window.Z80Emulator = { Sm83Cpu, DmgMemoryBus, selfTest };
 })();

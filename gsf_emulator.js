@@ -700,6 +700,38 @@
       }
     }
 
+    stepCyclesFast(cycles) {
+      cycles = Math.max(1, cycles | 0);
+      const from = this.frameCycles;
+      const to = from + cycles;
+      this.cycles += cycles;
+      this._tickTimers(cycles);
+
+      if (to < GBA_CYCLES_PER_FRAME) {
+        const lineStart = Math.floor(from / GBA_CYCLES_PER_SCANLINE) * GBA_CYCLES_PER_SCANLINE;
+        const hblankAt = lineStart + GBA_HBLANK_CYCLE_IN_LINE;
+        const nextLine = lineStart + GBA_CYCLES_PER_SCANLINE;
+        const crossesHBlank = from < hblankAt && hblankAt <= to;
+        const crossesLine = from < nextLine && nextLine <= to;
+        const crossesVBlank = !this._vblankFiredThisFrame && from < GBA_VBLANK_CYCLE && GBA_VBLANK_CYCLE <= to;
+        if (!crossesHBlank && !crossesLine && !crossesVBlank) {
+          this.frameCycles = to;
+          return;
+        }
+      }
+
+      this.frameCycles = to;
+      this._processScanlineEvents(from, to);
+      if (!this._vblankFiredThisFrame && this.frameCycles >= GBA_VBLANK_CYCLE) {
+        this._vblankFiredThisFrame = true;
+        this._enterVBlank();
+      }
+      while (this.frameCycles >= GBA_CYCLES_PER_FRAME) {
+        this.frameCycles -= GBA_CYCLES_PER_FRAME;
+        this._vblankFiredThisFrame = false;
+      }
+    }
+
     // Derive per-region ROM fetch costs from WAITCNT's sequential-wait bits. Thumb
     // fetch = one 16-bit access (1+s cycles); ARM fetch = two (1+2s). WS0 s-wait:
     // bit4 (0=2, 1=1); WS1: bit7 (0=4, 1=1); WS2: bit10 (0=8, 1=1). Games that program
@@ -1916,7 +1948,8 @@
         this.bus.stallCycles = 0;
         cost += stall;
       }
-      this.bus.stepCycles(cost);
+      if (this.fastMode && !this.diagnosticProbes) this.bus.stepCyclesFast(cost);
+      else this.bus.stepCycles(cost);
     }
 
     snapshot() {

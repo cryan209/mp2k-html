@@ -8,6 +8,7 @@ window.GsfTools = {
   isZip: function () { return false; },
   isSevenZip: function () { return false; },
   isValid: function () { return false; },
+  tagSummary: function () { return ''; },
 };
 var console = { warn: function (m) { print('WARN: ' + m); }, log: function (m) { print(m); } };
 
@@ -29,6 +30,17 @@ function freshBus(romBytes) {
 // --- 0. existing selfTest still passes ---
 var st = E.selfTest();
 check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
+
+// --- 0b. loaded engines report playable ---
+(function () {
+  var eng = new E.StandardGsfEngine();
+  eng.state = 'loaded';
+  eng.memory = E.createMemoryImage();
+  eng.entries = [{ name: 'smoke' }];
+  eng._initCpu();
+  check(eng.canPlay() === true, 'loaded GSF LLE engine reports playable');
+  check(eng.summary().indexOf('PSG mix') >= 0, 'GSF LLE summary mentions PSG mix');
+})();
 
 // --- 1. ROM mirrors ---
 (function () {
@@ -205,6 +217,50 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   bus.write16(0x04000082, 0x0004); // DMA A 100%
   var v2 = bus._mixPsgInto('A', 100);
   check(v2 === 400, 'master-enable passes DS at full scale (got ' + v2 + ')');
+})();
+
+// --- 10b. PSG hardware-ish scaling/cache/noise ---
+(function () {
+  function armSquare(bus, duty, lastCycles) {
+    bus.psg[0].enabled = true;
+    bus.psg[0].triggerCycles = 0;
+    bus.psg[0].lastSampleCycles = lastCycles == null ? bus.cycles : lastCycles;
+    bus.psg[0].freqRaw = 1024;
+    bus.psg[0].freqCur = 1024;
+    bus.psg[0].dutyFraction = duty == null ? 0.5 : duty;
+    bus.psg[0].volume = 15;
+    bus.psg[0].lengthEnabled = false;
+    bus.psg[0].phase = 0;
+    bus.psgSampleCacheCycles = -1;
+  }
+
+  var bus = freshBus();
+  bus.write16(0x04000084, 0x0080);
+  bus.write16(0x04000080, 0x0107); // ch0 right, right master 7/7
+  bus.write16(0x04000082, 0x0000); // PSG ratio 25%
+  armSquare(bus);
+  var quarter = bus._mixPsgInto('A', 0);
+  bus.write16(0x04000082, 0x0002); // PSG ratio 100%
+  var full = bus._mixPsgInto('A', 0);
+  check(quarter === 32 && full === 128, 'PSG SOUNDCNT_H ratio scales 25%/100% (' + quarter + '/' + full + ')');
+
+  bus = freshBus();
+  bus.cycles = 65536;
+  bus.write16(0x04000084, 0x0080);
+  bus.write16(0x04000080, 0x1177); // ch0 right+left, both master 7/7
+  bus.write16(0x04000082, 0x0002);
+  armSquare(bus, 0.25, 0);
+  var right = bus._mixPsgInto('A', 0);
+  var left = bus._mixPsgInto('B', 0);
+  check(right === left, 'same-cycle PSG sample is reused for left/right (' + right + '/' + left + ')');
+
+  bus = freshBus();
+  bus.write16(0x04000078, 0xf000);
+  bus.write16(0x0400007c, 0x0000);
+  bus._noiseTrigger();
+  check(bus.psgNoise.lfsr === 0x7fff, 'noise trigger seeds all-one LFSR');
+  bus._noiseAdvance(32);
+  check(bus.psgNoise.lfsr === 0x3fff, 'noise LFSR uses xor feedback after one shift (got 0x' + bus.psgNoise.lfsr.toString(16) + ')');
 })();
 
 // --- 11. HuffUnComp (8-bit symbols) ---

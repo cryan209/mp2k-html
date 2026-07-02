@@ -24,9 +24,9 @@ No install step is required; the npm script only wraps Python's built-in static 
 
 `gsf.js` includes a minimum viable GSF decoder. It parses the PSF/GSF container header, decompresses the executable payload, decodes the GBA entry/load/data header, maps loads to GBA memory regions, and extracts ZIP/7z archive contents.
 
-`gsf_emulator.js` owns the LLE emulator boundary. It materializes ROM-backed payloads, applies minigsf patches from ZIP/7z/gsflib sets into a memory image, and includes the first ARM7TDMI CPU/memory diagnostic scaffold for IO hook, hot patch, timer, DMA, and sound register work.
+`gsf_emulator.js` owns the LLE emulator boundary. It materializes ROM-backed payloads, applies minigsf patches from ZIP/7z/gsflib sets into a memory image, and runs the ARM7TDMI CPU/memory path for IO hooks, hot patches, timers, DMA, Direct Sound FIFO, and PSG square/wave/noise mixing.
 
-Playback through the standard GSF LLE path is not emulated yet. The decoder state is exposed for inspection with:
+Playback through the standard GSF LLE path can stream in-browser or export a WAV. The decoder and emulator state are exposed for inspection with:
 
 ```js
 window.gs1Debug.gsfReport()

@@ -311,6 +311,8 @@
         total: 0, sameFreq: 0, minGapCycles: Infinity, sumGapCycles: 0, gapSamples: 0,
       }));
       this.psgFreqLog = [[], []]; // melodic-contour trace, first 24 + last 24 per channel
+      this.psgSampleCacheCycles = -1;
+      this.psgSampleCache = [0, 0, 0, 0];
       // PSG Wave (ch 2): plays back the 32x4-bit sample table at WAVE_RAM (0x04000090-9F)
       // at the programmed frequency, scaled by a fixed output-level select (no envelope).
       this.psgWave = {
@@ -327,7 +329,7 @@
         volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
         lengthEnabled: false, lengthCyclesTotal: Infinity,
         divRatio: 0, widthMode: 0, shiftFreq: 0,
-        lfsr: 0x4000, out: false, phaseCycles: 0,
+        lfsr: 0x7fff, phaseCycles: 0,
       };
       this.noiseTriggerLog = []; // first 8 + last 8 Noise trigger snapshots (gap/div/shift/width)
       this._noiseTriggerCount = 0;
@@ -457,10 +459,10 @@
         this._updateWaitstates();
       }
       // Tally writes to the PSG channel registers (Square1/2, Wave, Noise), fastMode-safe.
-      // We don't synthesize PSG output at all right now (no oscillators, no mixing into the
-      // output buffer) — if a game's active instruments are PSG-typed rather than Direct
-      // Sound samples, this is the only place we'd ever see that activity.
+      // The live PSG synth below consumes the same register state when FIFO samples are
+      // mixed, so this tally now doubles as a quick activity summary in diagnostics.
       if (addr >= 0x04000060 && addr < 0x04000080) {
+        this.psgSampleCacheCycles = -1;
         if (!this.psgRegWrites) this.psgRegWrites = new Map();
         const name = ioName(addr & ~1);
         this.psgRegWrites.set(name, (this.psgRegWrites.get(name) || 0) + 1);
@@ -1217,8 +1219,7 @@
       st.divRatio = freqReg & 7;
       st.widthMode = (freqReg >>> 3) & 1; // 0=15-bit, 1=7-bit
       st.shiftFreq = (freqReg >>> 4) & 0xf;
-      st.lfsr = st.widthMode ? 0x40 : 0x4000; // per GBATEK: X=40h (7bit) or X=4000h (15bit)
-      st.out = false;
+      st.lfsr = 0x7fff;
       st.phaseCycles = 0;
       st.triggerCycles = this.cycles;
       st.lastSampleCycles = this.cycles;
@@ -1261,20 +1262,14 @@
       // dt (e.g. after a long halt) can't spin here for an unbounded amount of work.
       let shifts = Math.min(4096, Math.floor(st.phaseCycles / Math.max(1, shiftPeriodCycles)));
       st.phaseCycles -= shifts * shiftPeriodCycles;
-      // Per GBATEK: X = X SHR 1; IF the bit shifted out (carry) THEN Out=HIGH, X ^= 60h(7bit)/
-      // 6000h(15bit) ELSE Out=LOW. Output is the carry of the *last* shift, not a bit read back
-      // out of X afterward — persist it across calls in case zero shifts happen this sample.
+      // GB/CGB noise uses xor feedback from bits 0 and 1, shifts right, writes feedback to
+      // bit14, and mirrors it into bit6 in 7-bit mode. The DAC output is the inverted low bit.
       while (shifts-- > 0) {
-        const carry = st.lfsr & 1;
-        st.lfsr = st.lfsr >>> 1;
-        if (carry) {
-          st.lfsr ^= st.widthMode ? 0x60 : 0x6000;
-          st.out = true;
-        } else {
-          st.out = false;
-        }
+        const feedback = (st.lfsr ^ (st.lfsr >>> 1)) & 1;
+        st.lfsr = (st.lfsr >>> 1) | (feedback << 14);
+        if (st.widthMode) st.lfsr = (st.lfsr & ~0x40) | (feedback << 6);
       }
-      return st.out ? st.volume : -st.volume;
+      return (st.lfsr & 1) ? -st.volume : st.volume;
     }
 
     // Advance envelope/length/(ch0)sweep timing to `nowCycles` and return this channel's
@@ -1329,6 +1324,18 @@
       return highTime / len;
     }
 
+    _psgOutputsAt(nowCycles) {
+      if (this.psgSampleCacheCycles === nowCycles) return this.psgSampleCache;
+      const out = this.psgSampleCache || [0, 0, 0, 0];
+      out[0] = this._psgAdvance(0, nowCycles);
+      out[1] = this._psgAdvance(1, nowCycles);
+      out[2] = this._waveAdvance(nowCycles);
+      out[3] = this._noiseAdvance(nowCycles);
+      this.psgSampleCache = out;
+      this.psgSampleCacheCycles = nowCycles;
+      return out;
+    }
+
     // Mix the active PSG channels (gated by SOUNDCNT_L's per-channel L/R enable bits) into a
     // Direct Sound FIFO sample, matching GBATEK's documented hardware mixing ratios: a single
     // FIFO spans the FULL internal range (±200h=512) at 100% DMA volume, while each of the 4
@@ -1346,20 +1353,22 @@
       const soundCntH = this.read16(0x04000082);
       const isRight = channel === 'A';
       const masterVol = isRight ? (soundCntL & 7) : ((soundCntL >>> 4) & 7); // 0-7
+      const psgVolumeRatio = [0.25, 0.5, 1, 1][soundCntH & 3];
 
       // SOUNDCNT_H bit2 (DMA Sound A) / bit3 (DMA Sound B): 0=50%, 1=100% volume.
       const dmaFull = !!(soundCntH & (channel === 'A' ? 0x04 : 0x08));
       const dsScaled = dsValue * 4 * (dmaFull ? 1 : 0.5);
 
       let psgMix = 0;
+      const psgOut = this._psgOutputsAt(this.cycles);
       for (let ch = 0; ch < 2; ch++) {
         const enableBit = isRight ? (8 + ch) : (12 + ch);
-        if (soundCntL & (1 << enableBit)) psgMix += this._psgAdvance(ch, this.cycles);
+        if (soundCntL & (1 << enableBit)) psgMix += psgOut[ch];
       }
       // Wave = ch2 (bit10 right / bit14 left), Noise = ch3 (bit11 right / bit15 left).
-      if (soundCntL & (1 << (isRight ? 10 : 14))) psgMix += this._waveAdvance(this.cycles);
-      if (soundCntL & (1 << (isRight ? 11 : 15))) psgMix += this._noiseAdvance(this.cycles);
-      const psgScaled = psgMix * (128 / 15) * (masterVol / 7);
+      if (soundCntL & (1 << (isRight ? 10 : 14))) psgMix += psgOut[2];
+      if (soundCntL & (1 << (isRight ? 11 : 15))) psgMix += psgOut[3];
+      const psgScaled = psgMix * (128 / 15) * psgVolumeRatio * (masterVol / 7);
 
       // Real hardware adds a BIAS then clips the unsigned result to 0..3FFh; with the default
       // bias (200h) that's an effective signed range of roughly ±511 before bias. GBATEK notes
@@ -4309,7 +4318,7 @@
         this._rebuildMemoryForEntry(0);
         this.decodeReport = this._makeDecodeReport();
         this._initCpu();
-        this.state = 'loaded-no-emulator';
+        this.state = 'loaded';
         return this.source;
       } catch (err) {
         this.state = 'error';
@@ -4356,7 +4365,7 @@
       this._rebuildMemoryForEntry(0);
       this.decodeReport = this._makeDecodeReport();
       this._initCpu();
-      this.state = 'loaded-no-emulator';
+      this.state = 'loaded';
       return this.source;
     }
 
@@ -4377,7 +4386,7 @@
     }
 
     canPlay() {
-      return false;
+      return this.state === 'loaded' && !!this.memory && !!this.cpu && this.entries.length > 0;
     }
 
     _directSoundSampleRate(fallback = 13379) {
@@ -4573,6 +4582,8 @@
         total: 0, sameFreq: 0, minGapCycles: Infinity, sumGapCycles: 0, gapSamples: 0,
       }));
       this.bus.psgFreqLog = [[], []];
+      this.bus.psgSampleCacheCycles = -1;
+      this.bus.psgSampleCache = [0, 0, 0, 0];
       this.bus.psgWave = {
         enabled: false, triggerCycles: 0, lastSampleCycles: 0,
         freqRaw: 0, freqCur: 0,
@@ -4585,7 +4596,7 @@
         volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
         lengthEnabled: false, lengthCyclesTotal: Infinity,
         divRatio: 0, widthMode: 0, shiftFreq: 0,
-        lfsr: 0x4000, out: false, phaseCycles: 0,
+        lfsr: 0x7fff, phaseCycles: 0,
       };
       this.bus.noiseTriggerLog = [];
       this.bus._noiseTriggerCount = 0;
@@ -5558,7 +5569,7 @@
       if (this.decodeReport) parts.push(this.reportText());
       const summaryText = tools.tagSummary(this.source?.tags);
       if (summaryText) parts.push(summaryText);
-      parts.push('playback: not emulated yet');
+      parts.push('playback: LLE stream/export available, including PSG mix');
       return parts.join(' | ');
     }
   }

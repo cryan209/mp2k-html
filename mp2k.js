@@ -5582,8 +5582,11 @@ document.getElementById('btnExportWav').addEventListener('click', async () => {
 
 document.getElementById('btnPrev').addEventListener('click', async () => {
   if (document.getElementById('engineSelect')?.value === 'gsf-lle') {
-    setStatus('GSF LLE playback is not emulated yet; switch to MP2K HLE to play detected songs.');
-    updateInfoText();
+    const sel = document.getElementById('songSelect');
+    if (!sel?.options?.length) return;
+    currentSongListIdx = Math.max(0, sel.selectedIndex - 1);
+    sel.selectedIndex = currentSongListIdx;
+    document.getElementById('btnPlay').click();
     return;
   }
   if (player.songs.length === 0) return;
@@ -5595,8 +5598,11 @@ document.getElementById('btnPrev').addEventListener('click', async () => {
 
 document.getElementById('btnNext').addEventListener('click', async () => {
   if (document.getElementById('engineSelect')?.value === 'gsf-lle') {
-    setStatus('GSF LLE playback is not emulated yet; switch to MP2K HLE to play detected songs.');
-    updateInfoText();
+    const sel = document.getElementById('songSelect');
+    if (!sel?.options?.length) return;
+    currentSongListIdx = Math.min(sel.options.length - 1, sel.selectedIndex + 1);
+    sel.selectedIndex = currentSongListIdx;
+    document.getElementById('btnPlay').click();
     return;
   }
   if (player.songs.length === 0) return;
@@ -5713,8 +5719,8 @@ document.getElementById('engineSelect').addEventListener('change', e => {
   player.stop();
   if (e.target.value === 'gsf-lle') {
     setStatus(standardGsfEngine?.canPlay()
-      ? 'GSF LLE engine selected'
-      : 'GSF LLE engine selected — payload comparison only until a GBA emulator is wired in');
+      ? 'GSF LLE engine selected — streaming/export available'
+      : 'GSF LLE engine selected — load a GSF file or archive to stream');
   } else {
     setStatus(player.songs.length
       ? `${player.songs.length} songs loaded — select one and press ▶`

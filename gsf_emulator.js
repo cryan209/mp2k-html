@@ -220,6 +220,10 @@
       this.memoryWrites = [];
       this.timerCounters = [0, 0, 0, 0];
       this.timerPhases = [0, 0, 0, 0];
+      this.timerControls = [0, 0, 0, 0];
+      this.timerReloads = [0, 0, 0, 0];
+      this.timerEnabledMask = 0;
+      this.timerCpuMask = 0;
       this.fifoDmaPhase = [0, 0]; // overflow counter for timer 0 and 1; DMA fires every 16
       this.wordWrites = new Map();
       this.fastMode = false;
@@ -466,6 +470,7 @@
         }
       }
       r.data[r.off] = value;
+      if (addr >= 0x04000100 && addr < 0x04000110) this._refreshTimerCache();
       this._logIoWrite(addr, loggedValue, 1);
       // PSG frequency register (SOUND1CNT_X for ch0, SOUND2CNT_H for ch1): the live frequency
       // takes effect immediately on every write, not just on Trigger — games commonly rewrite
@@ -717,8 +722,26 @@
     }
 
     timerReload(ch) {
-      const base = ch * 4;
-      return (this.io[base + 0x100] | (this.io[base + 0x101] << 8)) & 0xffff;
+      return this.timerReloads[ch] & 0xffff;
+    }
+
+    _refreshTimerCache() {
+      let enabledMask = 0;
+      let cpuMask = 0;
+      for (let ch = 0; ch < 4; ch++) {
+        const base = 0x100 + ch * 4;
+        const ctrl = (this.io[base + 2] | (this.io[base + 3] << 8)) & 0xffff;
+        this.timerControls[ch] = ctrl;
+        this.timerReloads[ch] = (this.io[base] | (this.io[base + 1] << 8)) & 0xffff;
+        if (ctrl & 0x80) {
+          enabledMask |= 1 << ch;
+          if (!(ch > 0 && (ctrl & 0x04))) cpuMask |= 1 << ch;
+        } else {
+          this.timerPhases[ch] = 0;
+        }
+      }
+      this.timerEnabledMask = enabledMask;
+      this.timerCpuMask = cpuMask;
     }
 
     stepCycles(cycles) {
@@ -747,7 +770,7 @@
       const from = this.frameCycles;
       const to = from + cycles;
       this.cycles += cycles;
-      this._tickTimers(cycles);
+      this._tickTimersFast(cycles);
 
       if (to < GBA_CYCLES_PER_FRAME) {
         const lineStart = Math.floor(from / GBA_CYCLES_PER_SCANLINE) * GBA_CYCLES_PER_SCANLINE;
@@ -836,13 +859,12 @@
     }
 
     _tickTimers(cycles) {
-      for (let ch = 0; ch < 4; ch++) {
-        const base = 0x04000100 + ch * 4;
-        const ctrl = (this.io[base - 0x04000000 + 2] | (this.io[base - 0x04000000 + 3] << 8));
-        if (!(ctrl & 0x80)) { this.timerPhases[ch] = 0; continue; } // disabled
-        if (ch > 0 && (ctrl & 0x04)) continue; // cascade, driven by previous timer
+      for (let mask = this.timerCpuMask; mask; mask &= mask - 1) {
+        const bit = mask & -mask;
+        const ch = bit === 1 ? 0 : bit === 2 ? 1 : bit === 4 ? 2 : 3;
+        const ctrl = this.timerControls[ch];
         const prescaler = TIMER_PRESCALERS[ctrl & 3];
-        const reload = (this.io[base - 0x04000000] | (this.io[base - 0x04000000 + 1] << 8));
+        const reload = this.timerReloads[ch];
         this.timerPhases[ch] += cycles;
         if (this.timerPhases[ch] < 0) continue; // 2-cycle start delay still pending
         let ticks = Math.floor(this.timerPhases[ch] / prescaler);
@@ -857,13 +879,52 @@
       }
     }
 
+    _tickTimersFast(cycles) {
+      let mask = this.timerCpuMask;
+      if (!mask) return;
+      while (mask) {
+        const bit = mask & -mask;
+        const ch = bit === 1 ? 0 : bit === 2 ? 1 : bit === 4 ? 2 : 3;
+        mask &= mask - 1;
+        const ctrl = this.timerControls[ch];
+        const prescaler = TIMER_PRESCALERS[ctrl & 3];
+        let phase = this.timerPhases[ch] + cycles;
+        if (phase < 0) {
+          this.timerPhases[ch] = phase;
+          continue;
+        }
+        let ticks;
+        if (prescaler === 1) {
+          ticks = phase;
+          phase = 0;
+        } else {
+          ticks = Math.floor(phase / prescaler);
+          phase -= ticks * prescaler;
+        }
+        this.timerPhases[ch] = phase;
+        if (ticks <= 0) continue;
+        let counter = this.timerCounters[ch];
+        const reload = this.timerReloads[ch];
+        while (ticks > 0) {
+          const space = 0x10000 - counter;
+          if (ticks < space) {
+            this.timerCounters[ch] = counter + ticks;
+            break;
+          }
+          ticks -= space;
+          counter = reload;
+          this.timerCounters[ch] = counter;
+          this._timerOverflow(ch, ctrl);
+        }
+      }
+    }
+
     _timerOverflow(ch, ctrl) {
       // Cascade: tick next timer by 1
       if (ch < 3) {
-        const nBase = 0x04000100 + (ch + 1) * 4;
-        const nCtrl = (this.io[nBase - 0x04000000 + 2] | (this.io[nBase - 0x04000000 + 3] << 8));
+        const nCtrl = this.timerControls[ch + 1];
         if ((nCtrl & 0x80) && (nCtrl & 0x04)) {
-          const nReload = (this.io[nBase - 0x04000000] | (this.io[nBase - 0x04000000 + 1] << 8));
+          const nReload = this.timerReloads[ch + 1];
           this.timerCounters[ch + 1]++;
           if (this.timerCounters[ch + 1] >= 0x10000) {
             this.timerCounters[ch + 1] = nReload;
@@ -1763,9 +1824,34 @@
       this.regs[15] = (pc + 4) >>> 0;
       this.instructions++;
       const cond = instr >>> 28;
-      if (cond !== 0xe && !this._conditionPassed(cond)) {
-        this._chargeCyclesFast(pc, false);
-        return;
+      if (cond !== 0xe) {
+        const f = this.cpsr;
+        const n = !!(f & CPSR_N);
+        const z = !!(f & CPSR_Z);
+        const c = !!(f & CPSR_C);
+        const v = !!(f & CPSR_V);
+        let pass;
+        switch (cond) {
+          case 0x0: pass = z; break;
+          case 0x1: pass = !z; break;
+          case 0x2: pass = c; break;
+          case 0x3: pass = !c; break;
+          case 0x4: pass = n; break;
+          case 0x5: pass = !n; break;
+          case 0x6: pass = v; break;
+          case 0x7: pass = !v; break;
+          case 0x8: pass = c && !z; break;
+          case 0x9: pass = !c || z; break;
+          case 0xa: pass = n === v; break;
+          case 0xb: pass = n !== v; break;
+          case 0xc: pass = !z && n === v; break;
+          case 0xd: pass = z || n !== v; break;
+          default: pass = false; break;
+        }
+        if (!pass) {
+          this._chargeCyclesFast(pc, false);
+          return;
+        }
       }
       this._execArmFast(instr, pc);
       this._chargeCyclesFast(pc, false);

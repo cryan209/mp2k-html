@@ -603,6 +603,13 @@
     noteMemoryWrite(addr, value, bytes, source = {}) {
       addr >>>= 0;
       value >>>= 0;
+      // In streaming playback this hook is otherwise pure diagnostics, and it sits in
+      // the IRQ mixer's hottest block-store path. Keep only the BIOS IRQ flag side
+      // effect that IntrWait/VBlankIntrWait semantics depend on.
+      if (this.fastMode && !this.diagnosticProbes) {
+        if (addr <= 0x03007ffa && 0x03007ff8 < addr + bytes) this.biosIrqFlagsWritten = true;
+        return;
+      }
       const r = this.region(addr);
       if (!r || r.id === 'io' || r.id === 'rom') return;
       const entry = {
@@ -1985,18 +1992,22 @@
       value >>>= 0;
       const pc = (this.regs[15] - (this.cpsr & CPSR_T ? 2 : 4)) >>> 0;
       this.bus.write32(addr & ~3, value);
-      this.bus.noteMemoryWrite(addr & ~3, value, 4, {
-        kind,
-        pc,
-        pcHex: tools.hex(pc),
-        ...detail,
-      });
+      if (this.bus.fastMode && !this.bus.diagnosticProbes) {
+        this.bus.noteMemoryWrite(addr & ~3, value, 4);
+      } else {
+        this.bus.noteMemoryWrite(addr & ~3, value, 4, {
+          kind,
+          pc,
+          pcHex: tools.hex(pc),
+          ...detail,
+        });
+      }
       // Capture the actual packed-PCM words the mixer stores at its two STR sites
       // (left channel at 0x030012cc, right channel at 0x030012c8) for the first fn2
       // invocation, decoded into 4 signed 8-bit samples each, so the real output
       // waveform shape can be inspected directly instead of inferred from register
       // snapshots taken 20 instructions apart.
-      if (this.bus._fn2CallCount === 1 && (pc === 0x030012c8 || pc === 0x030012cc)) {
+      if (this.bus.diagnosticProbes && this.bus._fn2CallCount === 1 && (pc === 0x030012c8 || pc === 0x030012cc)) {
         if (!this.bus.mixerPcmTrace) this.bus.mixerPcmTrace = [];
         const t = this.bus.mixerPcmTrace;
         if (t.length < 256) {
@@ -2014,12 +2025,16 @@
       value &= 0xff;
       const pc = (this.regs[15] - (this.cpsr & CPSR_T ? 2 : 4)) >>> 0;
       this.bus.write8(addr, value);
-      this.bus.noteMemoryWrite(addr, value, 1, {
-        kind,
-        pc,
-        pcHex: tools.hex(pc),
-        ...detail,
-      });
+      if (this.bus.fastMode && !this.bus.diagnosticProbes) {
+        this.bus.noteMemoryWrite(addr, value, 1);
+      } else {
+        this.bus.noteMemoryWrite(addr, value, 1, {
+          kind,
+          pc,
+          pcHex: tools.hex(pc),
+          ...detail,
+        });
+      }
     }
 
     _writeMem16(addr, value, kind, detail = {}) {
@@ -2027,12 +2042,16 @@
       value &= 0xffff;
       const pc = (this.regs[15] - (this.cpsr & CPSR_T ? 2 : 4)) >>> 0;
       this.bus.write16(addr & ~1, value);
-      this.bus.noteMemoryWrite(addr & ~1, value, 2, {
-        kind,
-        pc,
-        pcHex: tools.hex(pc),
-        ...detail,
-      });
+      if (this.bus.fastMode && !this.bus.diagnosticProbes) {
+        this.bus.noteMemoryWrite(addr & ~1, value, 2);
+      } else {
+        this.bus.noteMemoryWrite(addr & ~1, value, 2, {
+          kind,
+          pc,
+          pcHex: tools.hex(pc),
+          ...detail,
+        });
+      }
     }
 
     _conditionPassed(cond) {

@@ -262,6 +262,36 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   check(Math.floor(bus.psg[0].phase) === 1, 'square PSG advances at 1048576-derived duty-step rate (phase ' + bus.psg[0].phase + ')');
 
   bus = freshBus();
+  armSquare(bus, 0.5, 0);
+  bus.psg[0].lengthEnabled = true;
+  bus.psg[0].lengthCounter = 1;
+  bus._psgOutputsAt(32768); // one 512Hz frame-sequencer tick
+  check(bus.psg[0].enabled === false, 'frame sequencer clocks square length counter');
+
+  bus = freshBus();
+  armSquare(bus, 0.5, 0);
+  bus.psg[0].volume = 5;
+  bus.psg[0].envDir = 1;
+  bus.psg[0].envStep = 1;
+  bus.psg[0].envTimer = 1;
+  bus.psg[0].envActive = true;
+  bus._psgOutputsAt(262144); // eight 512Hz ticks => one 64Hz envelope clock
+  check(bus.psg[0].volume === 6, 'frame sequencer clocks envelope at 64Hz (vol ' + bus.psg[0].volume + ')');
+
+  bus = freshBus();
+  armSquare(bus, 0.5, 0);
+  bus.psg[0].freqCur = 1000;
+  bus.psg[0].freqRaw = 1000;
+  bus.psg[0].sweepShadow = 1000;
+  bus.psg[0].sweepShift = 1;
+  bus.psg[0].sweepDir = 0;
+  bus.psg[0].sweepPeriod = 1;
+  bus.psg[0].sweepTimer = 1;
+  bus.psg[0].sweepEnabled = true;
+  bus._psgOutputsAt(98304); // step 2: first 128Hz sweep clock, next overflow check disables
+  check(bus.psg[0].freqCur === 1500 && bus.psg[0].enabled === false, 'sweep updates frequency then disables on overflow check');
+
+  bus = freshBus();
   bus.write16(0x04000078, 0xf000);
   bus.write16(0x0400007c, 0x0000);
   bus._noiseTrigger();

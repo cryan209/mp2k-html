@@ -82,6 +82,7 @@
   const IO_DMA_END = 0x040000e0;
   const GBA_CPU_HZ = 16777216;
   const GBA_CYCLES_PER_FRAME = 280896;
+  const PSG_FRAME_SEQ_CYCLES = GBA_CPU_HZ / 512;
   const GBA_CYCLES_PER_SCANLINE = 1232; // 280896 / 228 scanlines (exact)
   const GBA_TOTAL_SCANLINES = 228;
   const GBA_VBLANK_SCANLINE = 160;
@@ -245,6 +246,8 @@
       this.dsFifoBufferSize = 0;
       this.dmaSadLog = []; // every write that touches DMA1/DMA2 SAD (sound FIFO source reg), fastMode-safe
       this.psgRegWrites = new Map(); // PSG channel register write tally, fastMode-safe
+      this.psgFrameSeqCycles = 0;
+      this.psgFrameSeqStep = 0;
       this.memoryWrites = [];
       this.timerCounters = [0, 0, 0, 0];
       this.timerPhases = [0, 0, 0, 0];
@@ -301,8 +304,10 @@
         dutyFraction: 0.5,
         dutyStep: 4,
         volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
-        lengthEnabled: false, lengthCyclesTotal: Infinity,
+        envTimer: 0, envActive: false,
+        lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
         sweepShift: 0, sweepDir: 0, sweepPeriod: 0, sweepStepsApplied: 0,
+        sweepTimer: 0, sweepEnabled: false, sweepShadow: 0,
         phase: 0,
       }));
       // Per-channel trigger stats: how many retriggers keep the same frequency (suggests
@@ -320,7 +325,7 @@
       this.psgWave = {
         enabled: false, triggerCycles: 0, lastSampleCycles: 0,
         freqRaw: 0, freqCur: 0,
-        lengthEnabled: false, lengthCyclesTotal: Infinity,
+        lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
         outputLevel: 0, forceVolume: false,
         phase: 0,
       };
@@ -329,7 +334,8 @@
       this.psgNoise = {
         enabled: false, triggerCycles: 0, lastSampleCycles: 0,
         volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
-        lengthEnabled: false, lengthCyclesTotal: Infinity,
+        envTimer: 0, envActive: false,
+        lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
         divRatio: 0, widthMode: 0, shiftFreq: 0,
         lfsr: 0x7fff, phaseCycles: 0,
       };
@@ -1128,6 +1134,7 @@
     _psgTrigger(ch) {
       const st = this.psg[ch];
       const envReg = ch === 0 ? this.read16(0x04000062) : this.read16(0x04000068);
+      let triggerEnabled = true;
       const dutyBits = (envReg >>> 6) & 3;
       st.dutyFraction = [0.125, 0.25, 0.5, 0.75][dutyBits];
       st.dutyStep = [1, 2, 4, 6][dutyBits];
@@ -1136,7 +1143,10 @@
       st.envDir = (envReg >>> 11) & 1; // 0=decrease, 1=increase
       st.envStep = (envReg >>> 8) & 7;
       st.envStepsApplied = 0;
+      st.envTimer = st.envStep || 8;
+      st.envActive = st.envStep > 0;
       const lengthData = envReg & 0x3f;
+      st.lengthCounter = 64 - lengthData;
       st.lengthCyclesTotal = st.lengthEnabled ? (64 - lengthData) * (GBA_CPU_HZ / 256) : Infinity;
       if (ch === 0) {
         const sweepReg = this.read16(0x04000060);
@@ -1144,6 +1154,10 @@
         st.sweepDir = (sweepReg >>> 3) & 1; // 0=increase, 1=decrease
         st.sweepPeriod = (sweepReg >>> 4) & 7;
         st.sweepStepsApplied = 0;
+        st.sweepTimer = st.sweepPeriod || 8;
+        st.sweepShadow = st.freqCur;
+        st.sweepEnabled = !!(st.sweepPeriod || st.sweepShift);
+        if (st.sweepShift && this._psgSweepCalc(st, false) > 2047) triggerEnabled = false;
       }
       // Real hardware does NOT reset a pulse channel's duty-cycle position on Trigger if the
       // channel is already playing — only the frequency-timer reload, envelope, and volume
@@ -1155,7 +1169,78 @@
       if (!st.enabled) st.phase = 0;
       st.triggerCycles = this.cycles;
       st.lastSampleCycles = this.cycles;
-      st.enabled = true;
+      st.enabled = triggerEnabled;
+    }
+
+    _clockPsgLength(st) {
+      if (!st || !st.enabled || !st.lengthEnabled || !(st.lengthCounter > 0)) return;
+      st.lengthCounter--;
+      if (st.lengthCounter <= 0) st.enabled = false;
+    }
+
+    _clockPsgEnvelope(st) {
+      if (!st || !st.enabled || !st.envActive || !(st.envStep > 0)) return;
+      st.envTimer--;
+      if (st.envTimer > 0) return;
+      st.envTimer = st.envStep || 8;
+      const next = st.volume + (st.envDir ? 1 : -1);
+      if (next >= 0 && next <= 15) {
+        st.volume = next;
+        st.envStepsApplied++;
+      } else {
+        st.envActive = false;
+      }
+    }
+
+    _psgSweepCalc(st, commit) {
+      const delta = st.sweepShadow >> st.sweepShift;
+      const next = st.sweepDir ? (st.sweepShadow - delta) : (st.sweepShadow + delta);
+      if (next > 2047 || next < 0) {
+        if (commit) st.enabled = false;
+        return next;
+      }
+      if (commit && st.sweepShift > 0) {
+        st.sweepShadow = next;
+        st.freqCur = next;
+        st.freqRaw = next;
+      }
+      return next;
+    }
+
+    _clockPsgSweep() {
+      const st = this.psg[0];
+      if (!st?.enabled || !st.sweepEnabled) return;
+      st.sweepTimer--;
+      if (st.sweepTimer > 0) return;
+      st.sweepTimer = st.sweepPeriod || 8;
+      st.sweepStepsApplied++;
+      if (st.sweepPeriod > 0) {
+        const next = this._psgSweepCalc(st, true);
+        if (st.enabled && st.sweepShift > 0 && next <= 2047 && this._psgSweepCalc(st, false) > 2047) {
+          st.enabled = false;
+        }
+      }
+    }
+
+    _clockPsgFrameSequencer(nowCycles) {
+      if (nowCycles < this.psgFrameSeqCycles) this.psgFrameSeqCycles = nowCycles;
+      while (this.psgFrameSeqCycles + PSG_FRAME_SEQ_CYCLES <= nowCycles) {
+        this.psgFrameSeqCycles += PSG_FRAME_SEQ_CYCLES;
+        const step = this.psgFrameSeqStep & 7;
+        if ((step & 1) === 0) {
+          this._clockPsgLength(this.psg[0]);
+          this._clockPsgLength(this.psg[1]);
+          this._clockPsgLength(this.psgWave);
+          this._clockPsgLength(this.psgNoise);
+        }
+        if (step === 2 || step === 6) this._clockPsgSweep();
+        if (step === 7) {
+          this._clockPsgEnvelope(this.psg[0]);
+          this._clockPsgEnvelope(this.psg[1]);
+          this._clockPsgEnvelope(this.psgNoise);
+        }
+        this.psgFrameSeqStep = (this.psgFrameSeqStep + 1) & 7;
+      }
     }
 
     _waveUpdateFreq() {
@@ -1200,6 +1285,7 @@
       st.outputLevel = [0, 1, 0.5, 0.25][levelBits];
       st.forceVolume = !!(cntH & 0x8000);
       const lengthData = cntH & 0xff;
+      st.lengthCounter = 256 - lengthData;
       st.lengthCyclesTotal = st.lengthEnabled ? (256 - lengthData) * (GBA_CPU_HZ / 256) : Infinity;
       st.phase = 0;
       st.triggerCycles = this.cycles;
@@ -1224,8 +1310,6 @@
     _waveAdvance(nowCycles) {
       const st = this.psgWave;
       if (!st.enabled) return 0;
-      const elapsed = nowCycles - st.triggerCycles;
-      if (st.lengthEnabled && elapsed >= st.lengthCyclesTotal) { st.enabled = false; return 0; }
       const digitRate = 2097152 / (2048 - st.freqCur);
       const waveLength = this._wavePlaybackLength();
       const dt = (nowCycles - st.lastSampleCycles) / GBA_CPU_HZ;
@@ -1248,8 +1332,11 @@
       st.envDir = (envReg >>> 11) & 1;
       st.envStep = (envReg >>> 8) & 7;
       st.envStepsApplied = 0;
+      st.envTimer = st.envStep || 8;
+      st.envActive = st.envStep > 0;
       st.lengthEnabled = !!(freqReg & 0x4000);
       const lengthData = envReg & 0x3f;
+      st.lengthCounter = 64 - lengthData;
       st.lengthCyclesTotal = st.lengthEnabled ? (64 - lengthData) * (GBA_CPU_HZ / 256) : Infinity;
       st.divRatio = freqReg & 7;
       st.widthMode = (freqReg >>> 3) & 1; // 0=15-bit, 1=7-bit
@@ -1276,16 +1363,6 @@
     _noiseAdvance(nowCycles) {
       const st = this.psgNoise;
       if (!st.enabled) return 0;
-      const elapsed = nowCycles - st.triggerCycles;
-      if (st.lengthEnabled && elapsed >= st.lengthCyclesTotal) { st.enabled = false; return 0; }
-      if (st.envStep > 0) {
-        const period = st.envStep * (GBA_CPU_HZ / 64);
-        const stepsNow = Math.floor(elapsed / period);
-        if (stepsNow > st.envStepsApplied) {
-          st.envStepsApplied = stepsNow;
-          st.volume = Math.max(0, Math.min(15, st.volInit + (st.envDir ? stepsNow : -stepsNow)));
-        }
-      }
       // freq = 524288 / r / 2^(s+1) Hz, r=0 treated as 0.5. Shift period in GBA cycles.
       const r = st.divRatio || 0.5;
       const shiftHz = 524288 / r / Math.pow(2, st.shiftFreq + 1);
@@ -1313,26 +1390,6 @@
     _psgAdvance(ch, nowCycles) {
       const st = this.psg[ch];
       if (!st.enabled) return 0;
-      const elapsed = nowCycles - st.triggerCycles;
-      if (st.lengthEnabled && elapsed >= st.lengthCyclesTotal) { st.enabled = false; return 0; }
-      if (st.envStep > 0) {
-        const period = st.envStep * (GBA_CPU_HZ / 64);
-        const stepsNow = Math.floor(elapsed / period);
-        if (stepsNow > st.envStepsApplied) {
-          st.envStepsApplied = stepsNow;
-          st.volume = Math.max(0, Math.min(15, st.volInit + (st.envDir ? stepsNow : -stepsNow)));
-        }
-      }
-      if (ch === 0 && st.sweepPeriod > 0) {
-        const period = st.sweepPeriod * (GBA_CPU_HZ / 128);
-        const stepsNow = Math.floor(elapsed / period);
-        while (st.sweepStepsApplied < stepsNow) {
-          st.sweepStepsApplied++;
-          const delta = st.freqCur >> st.sweepShift;
-          st.freqCur = st.sweepDir ? (st.freqCur - delta) : (st.freqCur + delta);
-          if (st.freqCur > 2047 || st.freqCur < 0) { st.enabled = false; return 0; }
-        }
-      }
       const stepRate = 1048576 / (2048 - st.freqCur);
       const dt = (nowCycles - st.lastSampleCycles) / GBA_CPU_HZ;
       st.lastSampleCycles = nowCycles;
@@ -1361,6 +1418,7 @@
 
     _psgOutputsAt(nowCycles) {
       if (this.psgSampleCacheCycles === nowCycles) return this.psgSampleCache;
+      this._clockPsgFrameSequencer(nowCycles);
       const out = this.psgSampleCache || [0, 0, 0, 0];
       out[0] = this._psgAdvance(0, nowCycles);
       out[1] = this._psgAdvance(1, nowCycles);
@@ -4605,12 +4663,16 @@
       this.bus.reloadEffectLog = [];
       this.bus.dmaReloadBranchLog = [];
       this.bus.psgRegWrites = new Map();
+      this.bus.psgFrameSeqCycles = 0;
+      this.bus.psgFrameSeqStep = 0;
       this.bus.psg = [0, 1].map(() => ({
         enabled: false, triggerCycles: 0, lastSampleCycles: 0,
         freqRaw: 0, freqCur: 0, dutyFraction: 0.5, dutyStep: 4,
         volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
-        lengthEnabled: false, lengthCyclesTotal: Infinity,
+        envTimer: 0, envActive: false,
+        lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
         sweepShift: 0, sweepDir: 0, sweepPeriod: 0, sweepStepsApplied: 0,
+        sweepTimer: 0, sweepEnabled: false, sweepShadow: 0,
         phase: 0,
       }));
       this.bus.psgTriggerStats = [0, 1].map(() => ({
@@ -4622,14 +4684,15 @@
       this.bus.psgWave = {
         enabled: false, triggerCycles: 0, lastSampleCycles: 0,
         freqRaw: 0, freqCur: 0,
-        lengthEnabled: false, lengthCyclesTotal: Infinity,
+        lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
         outputLevel: 0, forceVolume: false,
         phase: 0,
       };
       this.bus.psgNoise = {
         enabled: false, triggerCycles: 0, lastSampleCycles: 0,
         volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
-        lengthEnabled: false, lengthCyclesTotal: Infinity,
+        envTimer: 0, envActive: false,
+        lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
         divRatio: 0, widthMode: 0, shiftFreq: 0,
         lfsr: 0x7fff, phaseCycles: 0,
       };

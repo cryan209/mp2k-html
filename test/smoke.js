@@ -228,6 +228,8 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   bus.write8(0x04000084, 0x00);
   check(bus.read8(0x04000084) === 0 && !bus.psg[0].enabled && !bus.psgWave.enabled && !bus.psgNoise.enabled,
     'master-disable clears PSG channel status');
+  check(bus.read16(0x04000062) === 0 && bus.read16(0x04000080) === 0,
+    'master-disable clears PSG control registers');
 
   bus.write8(0x04000084, 0x80);
   bus.psg[0].enabled = true;
@@ -310,6 +312,38 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   check(bus.psg[0].freqCur === 1500 && bus.psg[0].enabled === false, 'sweep updates frequency then disables on overflow check');
 
   bus = freshBus();
+  bus.write16(0x04000062, 0x0000);
+  bus.write16(0x04000064, 0x8000);
+  check(bus.psg[0].enabled === false && (bus.read8(0x04000084) & 1) === 0, 'zero-volume square trigger does not set channel status');
+
+  bus = freshBus();
+  bus.write16(0x04000062, 0xf03f); // vol 15, length data 63 => one length tick
+  bus.write16(0x04000064, 0x8000); // trigger, length disabled
+  check(bus.psg[0].enabled === true && bus.psg[0].lengthEnabled === false, 'square trigger starts with length disabled');
+  bus.write16(0x04000064, 0x4000); // no trigger, live-enable length
+  check(bus.psg[0].lengthEnabled === true, 'square length enable updates without retrigger');
+  bus._psgOutputsAt(32768);
+  check(bus.psg[0].enabled === false, 'live-enabled square length expires on frame sequencer');
+
+  bus = freshBus();
+  bus.write8(0x04000070, 0x80);
+  bus.write16(0x04000072, 0x2000 | 0x00ff); // 100% volume, length data 255 => one tick
+  bus.write16(0x04000074, 0x8000); // trigger, length disabled
+  check(bus.psgWave.enabled === true && bus.psgWave.lengthEnabled === false, 'wave trigger starts with length disabled');
+  bus.write16(0x04000074, 0x4000); // live-enable length
+  check(bus.psgWave.lengthEnabled === true, 'wave length enable updates without retrigger');
+  bus._psgOutputsAt(32768);
+  check(bus.psgWave.enabled === false, 'live-enabled wave length expires on frame sequencer');
+
+  bus = freshBus();
+  bus.write8(0x04000070, 0x80);
+  bus.write16(0x04000072, 0x2000);
+  bus.write16(0x04000074, 0x8000);
+  check(bus.psgWave.enabled === true, 'wave DAC-on trigger enables channel');
+  bus.write8(0x04000070, 0x00);
+  check(bus.psgWave.enabled === false && (bus.read8(0x04000084) & 4) === 0, 'wave DAC-off clears channel status');
+
+  bus = freshBus();
   bus.write16(0x04000078, 0xf000);
   bus.write16(0x0400007c, 0x0000);
   bus._noiseTrigger();
@@ -328,6 +362,11 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   check(bus.psgNoise.lfsr === 0x3fff, 'noise shifts at live-updated 64-cycle period');
   bus.write8(0x0400007c, 0x21); // r=1, s=2 => 256 cycles
   check(bus.psgNoise.periodCycles === 256, 'noise shift clock applies shift field (period ' + bus.psgNoise.periodCycles + ')');
+
+  bus = freshBus();
+  bus.write16(0x04000078, 0x0000);
+  bus.write16(0x0400007c, 0x8000);
+  check(bus.psgNoise.enabled === false && (bus.read8(0x04000084) & 8) === 0, 'zero-volume noise trigger does not set channel status');
 })();
 
 // --- 10c. GBA wave-channel bank/digit-rate behavior ---
@@ -336,6 +375,9 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   bus.write8(0x04000070, 0x00); // play bank 0, CPU accesses bank 1
   bus.write8(0x04000090, 0x12);
   check(bus.waveRam[16] === 0x12 && bus._waveSample(0) === -8, 'wave RAM write targets non-playback bank');
+  bus.write8(0x04000084, 0x80);
+  bus.write8(0x04000084, 0x00);
+  check(bus.waveRam[16] === 0x12, 'master-disable preserves wave RAM');
   bus.write8(0x04000070, 0x40); // play bank 1, CPU accesses bank 0
   check(bus.read8(0x04000090) === 0 && bus._waveSample(0) === -7, 'wave bank select swaps playback/access banks');
 

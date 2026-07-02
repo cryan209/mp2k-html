@@ -575,6 +575,7 @@
         }
       }
       // Wave (SOUND3CNT_X high byte, 0x75): same live-frequency + Trigger split as Square.
+      if (addr === 0x04000070 && !(value & 0x80)) this.psgWave.enabled = false;
       if (addr === 0x04000075) {
         this._waveUpdateFreq();
         if (value & 0x80) this._waveTrigger();
@@ -1141,14 +1142,20 @@
       this.io[0x84] = enabled ? 0x80 : 0;
       this.psgSampleCacheCycles = -1;
       if (enabled || !wasEnabled) return;
+      this.io.fill(0, 0x60, 0x84);
       for (const st of this.psg) {
         st.enabled = false;
         st.envActive = false;
         st.sweepEnabled = false;
+        st.volume = 0;
+        st.lengthCounter = 0;
       }
       this.psgWave.enabled = false;
+      this.psgWave.lengthCounter = 0;
       this.psgNoise.enabled = false;
       this.psgNoise.envActive = false;
+      this.psgNoise.volume = 0;
+      this.psgNoise.lengthCounter = 0;
     }
 
     // Live PSG frequency/length-enable update: called on EVERY write to SOUND1CNT_X (ch0) or
@@ -1161,6 +1168,7 @@
       st.freqRaw = freqReg & 0x7ff;
       st.freqCur = st.freqRaw;
       st.lengthEnabled = !!(freqReg & 0x4000);
+      if (!st.lengthEnabled && st.lengthCounter <= 0) st.lengthCounter = 64;
     }
 
     // PSG trigger ("Initial"/restart): relatch duty/envelope/volume, length, and (Square1
@@ -1176,6 +1184,7 @@
       st.dutyStep = [1, 2, 4, 6][dutyBits];
       st.volInit = (envReg >>> 12) & 0xf;
       st.volume = st.volInit;
+      if (st.volInit === 0) triggerEnabled = false;
       st.envDir = (envReg >>> 11) & 1; // 0=decrease, 1=increase
       st.envStep = (envReg >>> 8) & 7;
       st.envStepsApplied = 0;
@@ -1285,6 +1294,7 @@
       st.freqRaw = freqReg & 0x7ff;
       st.freqCur = st.freqRaw;
       st.lengthEnabled = !!(freqReg & 0x4000);
+      if (!st.lengthEnabled && st.lengthCounter <= 0) st.lengthCounter = 256;
     }
 
     _wavePlaybackBank() {
@@ -1365,6 +1375,7 @@
       const wasEnabled = st.enabled;
       st.volInit = (envReg >>> 12) & 0xf;
       st.volume = st.volInit;
+      const triggerEnabled = st.volInit > 0;
       st.envDir = (envReg >>> 11) & 1;
       st.envStep = (envReg >>> 8) & 7;
       st.envStepsApplied = 0;
@@ -1379,7 +1390,7 @@
       st.phaseCycles = 0;
       st.triggerCycles = this.cycles;
       st.lastSampleCycles = this.cycles;
-      st.enabled = true;
+      st.enabled = triggerEnabled;
       // Trigger log: unlike Square's phase, Noise's LFSR IS reset to the same seed on every
       // trigger per real hardware. If this channel is retriggered very frequently (like
       // Sappy's sustain-via-retrigger pattern seen on Square), the LFSR would keep replaying

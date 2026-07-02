@@ -14,6 +14,7 @@ var console = { warn: function (m) { print('WARN: ' + m); }, log: function (m) {
 
 load('psg_dmg.js');
 load('gsf_emulator.js'); // run from the repo root: npm test
+load('z80_emulator.js');
 
 var E = window.GsfEmulator;
 var failures = 0;
@@ -671,6 +672,157 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   check(Math.abs(sincRel - 1) < 0.1, 'sinc preserves the fundamental (' + (sincRel * 100).toFixed(1) + '% vs linear ' + (linRel * 100).toFixed(1) + '%)');
   check(sincDb < -50, 'sinc image below -50dB (got ' + sincDb.toFixed(1) + 'dB)');
   check(sincDb < linDb - 20, 'sinc beats linear by >=20dB (sinc ' + sincDb.toFixed(1) + 'dB vs linear ' + linDb.toFixed(1) + 'dB)');
+})();
+
+// --- 21. Z80 core (z80_emulator.js) ---
+(function () {
+  var Z80Cpu = window.Z80Emulator.Z80Cpu;
+
+  function freshZ80(prog, org) {
+    org = org || 0;
+    var mem = new Uint8Array(0x10000);
+    var ioIn = {}, ioOut = {};
+    var bus = {
+      read8: function (a) { return mem[a & 0xffff]; },
+      write8: function (a, v) { mem[a & 0xffff] = v & 0xff; },
+      ioIn: function (p) { return ioIn[p] || 0; },
+      ioOut: function (p, v) { ioOut[p] = v; },
+    };
+    var cpu = new Z80Cpu(bus);
+    cpu.pc = org;
+    if (prog) mem.set(prog, org);
+    cpu.mem = mem;
+    return cpu;
+  }
+  function runZ80(cpu, n) { for (var i = 0; i < n; i++) cpu.step(); }
+
+  var st0 = window.Z80Emulator.selfTest();
+  check(st0.a === 0x43 && st0.b === 1 && st0.c === 0x43 && st0.mem8000 === 0x43 && st0.halted,
+    'Z80 selfTest basics (a=' + st0.a.toString(16) + ')');
+
+  (function () {
+    var cpu = freshZ80([0x3e, 0x10, 0xc6, 0x05]); // LD A,0x10 ; ADD A,5
+    runZ80(cpu, 2);
+    check(cpu.a === 0x15, 'Z80 ADD A,n basic (got 0x' + cpu.a.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshZ80([0x3e, 0x7f, 0x3c]); // LD A,0x7f ; INC A
+    runZ80(cpu, 2);
+    check(cpu.a === 0x80 && (cpu.f & 0x04), 'Z80 INC A sets overflow at 0x7f->0x80 (f=0x' + cpu.f.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshZ80([0x3e, 0x00, 0xd6, 0x01]); // LD A,0 ; SUB 1
+    runZ80(cpu, 2);
+    check(cpu.a === 0xff && (cpu.f & 0x01) && (cpu.f & 0x80), 'Z80 SUB underflow sets carry+sign (a=0x' + cpu.a.toString(16) + ' f=0x' + cpu.f.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshZ80([0x3e, 0x09, 0xc6, 0x01, 0x27]); // LD A,9 ; ADD A,1 ; DAA
+    runZ80(cpu, 3);
+    check(cpu.a === 0x10, 'Z80 DAA after 9+1 -> 0x10 (got 0x' + cpu.a.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshZ80([0x21, 0x34, 0x12, 0x01, 0x01, 0x00, 0x09]); // LD HL,0x1234 ; LD BC,1 ; ADD HL,BC
+    runZ80(cpu, 3);
+    check(cpu.hl === 0x1235, 'Z80 ADD HL,BC basic (got 0x' + cpu.hl.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshZ80([
+      0x21, 0x00, 0x90, // 0: LD HL,0x9000
+      0xf9,             // 3: LD SP,HL
+      0xcd, 0x0a, 0x00, // 4: CALL 0x000a
+      0x76,             // 7: HALT
+      0x00, 0x00,       // 8-9: padding
+      0x3e, 0x99,       // 10: LD A,0x99
+      0xc9,             // 12: RET
+    ]);
+    runZ80(cpu, 5);
+    check(cpu.a === 0x99, 'Z80 CALL reaches subroutine (a=0x' + cpu.a.toString(16) + ')');
+    check(cpu.pc === 7, 'Z80 RET returns to instruction after CALL (pc=0x' + cpu.pc.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshZ80([
+      0xaf,             // XOR A
+      0xca, 0x06, 0x00, // JP Z,0x0006
+      0x3e, 0xff,       // (skipped)
+      0x3e, 0x55,       // LD A,0x55
+    ]);
+    runZ80(cpu, 3);
+    check(cpu.a === 0x55, 'Z80 JP Z,nn taken when zero flag set (a=0x' + cpu.a.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshZ80([
+      0xdd, 0x21, 0x00, 0x80, // LD IX,0x8000
+      0x3e, 0x7a,             // LD A,0x7a
+      0xdd, 0x77, 0x05,       // LD (IX+5),A
+      0xdd, 0x7e, 0x05,       // LD A,(IX+5)
+    ]);
+    runZ80(cpu, 3);
+    check(cpu.mem[0x8005] === 0x7a, 'Z80 LD (IX+d),A writes displaced address (got 0x' + cpu.mem[0x8005].toString(16) + ')');
+    cpu.a = 0;
+    runZ80(cpu, 1);
+    check(cpu.a === 0x7a, 'Z80 LD A,(IX+d) reads displaced address (got 0x' + cpu.a.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshZ80([0x3e, 0x81, 0xcb, 0x07]); // LD A,0x81 ; RLC A
+    runZ80(cpu, 2);
+    check(cpu.a === 0x03 && (cpu.f & 0x01), 'Z80 CB RLC A rotates high bit into carry+low bit (a=0x' + cpu.a.toString(16) + ' f=0x' + cpu.f.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshZ80([0x3e, 0x10, 0xcb, 0x67]); // LD A,0x10 ; BIT 4,A
+    runZ80(cpu, 2);
+    check(!(cpu.f & 0x40), 'Z80 BIT 4,A with bit set clears Z (f=0x' + cpu.f.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshZ80([0x3e, 0x00, 0xcb, 0xc7]); // LD A,0 ; SET 0,A
+    runZ80(cpu, 2);
+    check(cpu.a === 0x01, 'Z80 SET 0,A (got 0x' + cpu.a.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshZ80([
+      0x21, 0x00, 0x80, // LD HL,0x8000
+      0x11, 0x00, 0x81, // LD DE,0x8100
+      0x01, 0x03, 0x00, // LD BC,3
+      0xed, 0xb0,       // LDIR
+    ]);
+    cpu.mem[0x8000] = 0x11; cpu.mem[0x8001] = 0x22; cpu.mem[0x8002] = 0x33;
+    runZ80(cpu, 6); // 3 setup + 3 LDIR iterations (each re-fetches via pc rewind)
+    check(cpu.mem[0x8100] === 0x11 && cpu.mem[0x8101] === 0x22 && cpu.mem[0x8102] === 0x33,
+      'Z80 LDIR copies 3 bytes (0x' + cpu.mem[0x8100].toString(16) + ',0x' + cpu.mem[0x8101].toString(16) + ',0x' + cpu.mem[0x8102].toString(16) + ')');
+    check(cpu.bc === 0, 'Z80 LDIR decrements BC to 0');
+  })();
+
+  (function () {
+    var cpu = freshZ80([
+      0x21, 0xff, 0xff, // LD HL,0xffff
+      0x01, 0x01, 0x00, // LD BC,1
+      0x09,             // ADD HL,BC -> HL=0, carry set
+      0x21, 0x00, 0x00, // LD HL,0
+      0x01, 0x00, 0x00, // LD BC,0
+      0xed, 0x4a,       // ADC HL,BC
+    ]);
+    runZ80(cpu, 6);
+    check(cpu.hl === 1, 'Z80 ADC HL,BC includes carry from prior ADD HL,BC (got 0x' + cpu.hl.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshZ80([0xfb, 0x00, 0x00]); // EI ; NOP ; NOP
+    cpu.im = 1;
+    runZ80(cpu, 1);
+    cpu.requestIrq();
+    runZ80(cpu, 1);
+    check(cpu.pc === 0x38 || cpu.pc === 2, 'Z80 IM1 IRQ reaches 0x0038 (pc=0x' + cpu.pc.toString(16) + ')');
+  })();
 })();
 
 print(failures === 0 ? 'ALL PASS' : failures + ' FAILURES');

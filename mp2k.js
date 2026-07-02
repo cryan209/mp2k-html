@@ -1352,9 +1352,7 @@ class AudioEngine {
           remainingCycles -= segmentCycles;
           while (timerCycles >= quant.timerPeriodCycles) {
             timerCycles -= quant.timerPeriodCycles;
-            const bit = (lfsr ^ (lfsr >>> 1)) & 1;
-            lfsr = (lfsr >>> 1) | (bit << 14);
-            if (config.noiseWidth7) lfsr = (lfsr & ~0x40) | (bit << 6);
+            lfsr = PsgDmg.noiseShift(lfsr, config.noiseWidth7);
           }
         }
         level = accumLevel / cyclesPerSample;
@@ -1367,9 +1365,7 @@ class AudioEngine {
       while (timerCycles >= quant.timerPeriodCycles) {
         timerCycles -= quant.timerPeriodCycles;
         if (config.noise) {
-          const bit = (lfsr ^ (lfsr >>> 1)) & 1;
-          lfsr = (lfsr >>> 1) | (bit << 14);
-          if (config.noiseWidth7) lfsr = (lfsr & ~0x40) | (bit << 6);
+          lfsr = PsgDmg.noiseShift(lfsr, config.noiseWidth7);
         } else {
           step = (step + 1) % quant.stepsPerCycle;
         }
@@ -1454,9 +1450,7 @@ class AudioEngine {
               remainingCycles -= segmentCycles;
               while (state.timerCycles >= periodCycles) {
                 state.timerCycles -= periodCycles;
-                const bit = (state.lfsr ^ (state.lfsr >>> 1)) & 1;
-                state.lfsr = (state.lfsr >>> 1) | (bit << 14);
-                if (cfg.noiseWidth7) state.lfsr = (state.lfsr & ~0x40) | (bit << 6);
+                state.lfsr = PsgDmg.noiseShift(state.lfsr, cfg.noiseWidth7);
               }
             }
             state.noiseHeldLevel = accumLevel / cyclesPerDacSample;
@@ -1480,9 +1474,7 @@ class AudioEngine {
         while (state.timerCycles >= periodCycles) {
           state.timerCycles -= periodCycles;
           if (cfg.noise) {
-            const bit = (state.lfsr ^ (state.lfsr >>> 1)) & 1;
-            state.lfsr = (state.lfsr >>> 1) | (bit << 14);
-            if (cfg.noiseWidth7) state.lfsr = (state.lfsr & ~0x40) | (bit << 6);
+            state.lfsr = PsgDmg.noiseShift(state.lfsr, cfg.noiseWidth7);
           } else {
             state.step = (state.step + 1) % quantNow.stepsPerCycle;
           }

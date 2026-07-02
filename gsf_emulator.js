@@ -82,7 +82,31 @@
   const IO_DMA_END = 0x040000e0;
   const GBA_CPU_HZ = 16777216;
   const GBA_CYCLES_PER_FRAME = 280896;
-  const PSG_FRAME_SEQ_CYCLES = GBA_CPU_HZ / 512;
+  // Maps GBA sound-register byte addresses (0x04000060-0x0400007F) to the shared PsgDmg
+  // module's canonical DMG register offsets (relative to 0xFF10, i.e. 0x00=NR10..0x13=NR44).
+  // -1 marks unused/padding bytes that don't correspond to any real PSG register.
+  const PSG_CANONICAL_OFFSET = (() => {
+    const table = new Int8Array(0x20).fill(-1);
+    table[0x00] = 0x00; // NR10 (SOUND1CNT_L)
+    table[0x02] = 0x01; // NR11 (SOUND1CNT_H low)
+    table[0x03] = 0x02; // NR12 (SOUND1CNT_H high)
+    table[0x04] = 0x03; // NR13 (SOUND1CNT_X low)
+    table[0x05] = 0x04; // NR14 (SOUND1CNT_X high)
+    table[0x08] = 0x06; // NR21 (SOUND2CNT_L low)
+    table[0x09] = 0x07; // NR22 (SOUND2CNT_L high)
+    table[0x0c] = 0x08; // NR23 (SOUND2CNT_H low)
+    table[0x0d] = 0x09; // NR24 (SOUND2CNT_H high)
+    table[0x10] = 0x0a; // NR30 (SOUND3CNT_L)
+    table[0x12] = 0x0b; // NR31 (SOUND3CNT_H low)
+    table[0x13] = 0x0c; // NR32 (SOUND3CNT_H high)
+    table[0x14] = 0x0d; // NR33 (SOUND3CNT_X low)
+    table[0x15] = 0x0e; // NR34 (SOUND3CNT_X high)
+    table[0x18] = 0x10; // NR41 (SOUND4CNT_L low)
+    table[0x19] = 0x11; // NR42 (SOUND4CNT_L high)
+    table[0x1c] = 0x12; // NR43 (SOUND4CNT_H low)
+    table[0x1d] = 0x13; // NR44 (SOUND4CNT_H high)
+    return table;
+  })();
   const GBA_CYCLES_PER_SCANLINE = 1232; // 280896 / 228 scanlines (exact)
   const GBA_TOTAL_SCANLINES = 228;
   const GBA_VBLANK_SCANLINE = 160;
@@ -246,8 +270,6 @@
       this.dsFifoBufferSize = 0;
       this.dmaSadLog = []; // every write that touches DMA1/DMA2 SAD (sound FIFO source reg), fastMode-safe
       this.psgRegWrites = new Map(); // PSG channel register write tally, fastMode-safe
-      this.psgFrameSeqCycles = 0;
-      this.psgFrameSeqStep = 0;
       this.memoryWrites = [];
       this.timerCounters = [0, 0, 0, 0];
       this.timerPhases = [0, 0, 0, 0];
@@ -295,21 +317,10 @@
       this.debugPc = 0; // set by CPU before each step for write logging
       this.debugThumb = false;
       this.debugRegs = null; // reference to CPU registers array, set by CPU init
-      // PSG Square1 (ch 0) and Square2 (ch 1) oscillator state. Square2 has no sweep.
-      this.psg = [0, 1].map(ch => ({
-        enabled: false,
-        triggerCycles: 0,
-        lastSampleCycles: 0,
-        freqRaw: 0, freqCur: 0,
-        dutyFraction: 0.5,
-        dutyStep: 4,
-        volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
-        envTimer: 0, envActive: false,
-        lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
-        sweepShift: 0, sweepDir: 0, sweepPeriod: 0, sweepStepsApplied: 0,
-        sweepTimer: 0, sweepEnabled: false, sweepShadow: 0,
-        phase: 0,
-      }));
+      // PSG chip state (Square1/2, Wave, Noise) lives in the shared PsgDmg module (psg_dmg.js)
+      // so GSF and GBS playback share one implementation; this bus only keeps what's genuinely
+      // GBA-specific (register-address translation, wave RAM bank-swap MMIO, SOUNDCNT mixing).
+      this._psg = new window.PsgDmg({ cpuHz: GBA_CPU_HZ });
       // Per-channel trigger stats: how many retriggers keep the same frequency (suggests
       // vibrato/pitch-bend re-pokes rather than new notes, which would cause audible phase-
       // reset clicks) and how close together they land. fastMode-safe.
@@ -317,32 +328,22 @@
         total: 0, sameFreq: 0, minGapCycles: Infinity, sumGapCycles: 0, gapSamples: 0,
       }));
       this.psgFreqLog = [[], []]; // melodic-contour trace, first 24 + last 24 per channel
-      this.psgSampleCacheCycles = -1;
-      this.psgSampleCache = [0, 0, 0, 0];
       // PSG Wave (ch 2): plays back the 32x4-bit sample table at WAVE_RAM (0x04000090-9F)
       // at the programmed digit rate, scaled by a fixed output-level select (no envelope).
+      // GBA doubles real DMG wave RAM to two 16-byte banks (bank-swap is GBA-only MMIO), so
+      // this stays bus-owned rather than living in the shared module (see _waveSample below).
       this.waveRam = new Uint8Array(32); // two 16-byte banks, each 32 packed 4-bit digits
-      this.psgWave = {
-        enabled: false, triggerCycles: 0, lastSampleCycles: 0,
-        freqRaw: 0, freqCur: 0,
-        lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
-        outputLevel: 0, forceVolume: false,
-        phase: 0,
-      };
-      // PSG Noise (ch 3): pseudorandom LFSR bitstream, envelope like the Square channels but
-      // no frequency/duty — pitch is a clock divider+shift pair, width is 15-bit or 7-bit.
-      this.psgNoise = {
-        enabled: false, triggerCycles: 0, lastSampleCycles: 0,
-        volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
-        envTimer: 0, envActive: false,
-        lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
-        divRatio: 0, widthMode: 0, shiftFreq: 0,
-        periodCycles: 32,
-        lfsr: 0x7fff, phaseCycles: 0,
-      };
       this.noiseTriggerLog = []; // first 8 + last 8 Noise trigger snapshots (gap/div/shift/width)
       this._noiseTriggerCount = 0;
     }
+
+    // Compatibility views onto the shared PsgDmg module's live channel-state objects, so
+    // existing bus-side code (and white-box tests) can keep reading/writing e.g. bus.psg[0].freqRaw.
+    get psg() { return this._psg.square; }
+    get psgWave() { return this._psg.wave; }
+    get psgNoise() { return this._psg.noise; }
+    get psgSampleCacheCycles() { return this._psg.sampleCacheCycles; }
+    set psgSampleCacheCycles(v) { this._psg.sampleCacheCycles = v; }
 
     region(addr) {
       addr >>>= 0;
@@ -535,6 +536,13 @@
       r.data[r.off] = value;
       if (addr >= 0x04000100 && addr < 0x04000110) this._refreshTimerCache();
       this._logIoWrite(addr, loggedValue, 1);
+      // Mirror PSG register bytes into the shared PsgDmg module's canonical register file
+      // before any of the trigger/update logic below runs (that logic reads from the module,
+      // not from this.io, so the mirror must land first).
+      if (addr >= 0x04000060 && addr < 0x04000080) {
+        const canonicalOffset = PSG_CANONICAL_OFFSET[addr - 0x04000060];
+        if (canonicalOffset >= 0) this._psg.pokeReg(canonicalOffset, value);
+      }
       // PSG frequency register (SOUND1CNT_X for ch0, SOUND2CNT_H for ch1): the live frequency
       // takes effect immediately on every write, not just on Trigger — games commonly rewrite
       // just the frequency bits (no Trigger bit) to do real-time pitch bends/vibrato without
@@ -547,7 +555,7 @@
         const prevFreq = st.freqRaw;
         const wasEnabled = st.enabled;
         const prevTriggerCycles = st.triggerCycles;
-        this._psgUpdateFreq(ch);
+        this._psg._updateSquareFreq(ch);
         const isTrigger = !!(value & 0x80);
         if (isTrigger) {
           const stats = this.psgTriggerStats[ch];
@@ -577,12 +585,12 @@
       // Wave (SOUND3CNT_X high byte, 0x75): same live-frequency + Trigger split as Square.
       if (addr === 0x04000070 && !(value & 0x80)) this.psgWave.enabled = false;
       if (addr === 0x04000075) {
-        this._waveUpdateFreq();
-        if (value & 0x80) this._waveTrigger();
+        this._psg._updateWaveFreq();
+        if (value & 0x80) this._psg._triggerWave(this.cycles);
       }
       // Noise NR43 (0x7c) live-updates the LFSR clock divider/shift/width; NR44 trigger
       // restarts envelope/length/LFSR state.
-      if (addr === 0x0400007c) this._noiseUpdateControl();
+      if (addr === 0x0400007c) this._psg._updateNoiseControl();
       if (addr === 0x0400007d) {
         this.psgNoise.lengthEnabled = !!(this.read16(0x0400007c) & 0x4000);
         if (value & 0x80) this._noiseTrigger();
@@ -1129,173 +1137,25 @@
     }
 
     _soundCntXRead() {
-      this._clockPsgFrameSequencer(this.cycles);
-      return (this.io[0x84] & 0x80)
-        | (this.psg[0]?.enabled ? 0x01 : 0)
-        | (this.psg[1]?.enabled ? 0x02 : 0)
-        | (this.psgWave?.enabled ? 0x04 : 0)
-        | (this.psgNoise?.enabled ? 0x08 : 0);
+      this._psg._clockFrameSequencer(this.cycles);
+      return (this.io[0x84] & 0x80) | this._psg.channelStatusBits();
     }
 
     _setSoundMasterEnabled(enabled) {
       const wasEnabled = !!(this.io[0x84] & 0x80);
       this.io[0x84] = enabled ? 0x80 : 0;
-      this.psgSampleCacheCycles = -1;
+      this._psg.sampleCacheCycles = -1;
       if (enabled || !wasEnabled) return;
       this.io.fill(0, 0x60, 0x84);
-      for (const st of this.psg) {
-        st.enabled = false;
-        st.envActive = false;
-        st.sweepEnabled = false;
-        st.volume = 0;
-        st.lengthCounter = 0;
-      }
-      this.psgWave.enabled = false;
-      this.psgWave.lengthCounter = 0;
-      this.psgNoise.enabled = false;
-      this.psgNoise.envActive = false;
-      this.psgNoise.volume = 0;
-      this.psgNoise.lengthCounter = 0;
+      this._psg.powerOff();
     }
 
-    // Live PSG frequency/length-enable update: called on EVERY write to SOUND1CNT_X (ch0) or
-    // SOUND2CNT_H (ch1), regardless of the Trigger bit. On real hardware the frequency
-    // register feeds the channel's timer reload continuously — a write without Trigger takes
-    // effect immediately as a pitch bend, it doesn't just get cached for the next note.
-    _psgUpdateFreq(ch) {
-      const st = this.psg[ch];
-      const freqReg = ch === 0 ? this.read16(0x04000064) : this.read16(0x0400006c);
-      st.freqRaw = freqReg & 0x7ff;
-      st.freqCur = st.freqRaw;
-      st.lengthEnabled = !!(freqReg & 0x4000);
-      if (!st.lengthEnabled && st.lengthCounter <= 0) st.lengthCounter = 64;
-    }
-
-    // PSG trigger ("Initial"/restart): relatch duty/envelope/volume, length, and (Square1
-    // only) sweep from the channel's control registers, and reset phase. Called when the high
-    // byte of SOUND1CNT_X (ch 0) or SOUND2CNT_H (ch 1) is written with the trigger bit set —
-    // frequency itself is already current via _psgUpdateFreq, called unconditionally above.
-    _psgTrigger(ch) {
-      const st = this.psg[ch];
-      const envReg = ch === 0 ? this.read16(0x04000062) : this.read16(0x04000068);
-      let triggerEnabled = true;
-      const dutyBits = (envReg >>> 6) & 3;
-      st.dutyFraction = [0.125, 0.25, 0.5, 0.75][dutyBits];
-      st.dutyStep = [1, 2, 4, 6][dutyBits];
-      st.volInit = (envReg >>> 12) & 0xf;
-      st.volume = st.volInit;
-      if (st.volInit === 0) triggerEnabled = false;
-      st.envDir = (envReg >>> 11) & 1; // 0=decrease, 1=increase
-      st.envStep = (envReg >>> 8) & 7;
-      st.envStepsApplied = 0;
-      st.envTimer = st.envStep || 8;
-      st.envActive = st.envStep > 0;
-      const lengthData = envReg & 0x3f;
-      st.lengthCounter = 64 - lengthData;
-      st.lengthCyclesTotal = st.lengthEnabled ? (64 - lengthData) * (GBA_CPU_HZ / 256) : Infinity;
-      if (ch === 0) {
-        const sweepReg = this.read16(0x04000060);
-        st.sweepShift = sweepReg & 7;
-        st.sweepDir = (sweepReg >>> 3) & 1; // 0=increase, 1=decrease
-        st.sweepPeriod = (sweepReg >>> 4) & 7;
-        st.sweepStepsApplied = 0;
-        st.sweepTimer = st.sweepPeriod || 8;
-        st.sweepShadow = st.freqCur;
-        st.sweepEnabled = !!(st.sweepPeriod || st.sweepShift);
-        if (st.sweepShift && this._psgSweepCalc(st, false) > 2047) triggerEnabled = false;
-      }
-      // Real hardware does NOT reset a pulse channel's duty-cycle position on Trigger if the
-      // channel is already playing — only the frequency-timer reload, envelope, and volume
-      // reset (this is the opposite of Wave, whose position genuinely resets to 0, and Noise,
-      // whose LFSR genuinely resets to all-1s — both handled separately, correctly, below).
-      // Sappy-derived engines commonly re-poke Trigger every few frames on an already-sounding
-      // note just to keep it from decaying, without meaning to restart the wave; unconditionally
-      // resetting phase here produced an audible click/warble on every one of those re-pokes.
-      if (!st.enabled) st.phase = 0;
-      st.triggerCycles = this.cycles;
-      st.lastSampleCycles = this.cycles;
-      st.enabled = triggerEnabled;
-    }
-
-    _clockPsgLength(st) {
-      if (!st || !st.enabled || !st.lengthEnabled || !(st.lengthCounter > 0)) return;
-      st.lengthCounter--;
-      if (st.lengthCounter <= 0) st.enabled = false;
-    }
-
-    _clockPsgEnvelope(st) {
-      if (!st || !st.enabled || !st.envActive || !(st.envStep > 0)) return;
-      st.envTimer--;
-      if (st.envTimer > 0) return;
-      st.envTimer = st.envStep || 8;
-      const next = st.volume + (st.envDir ? 1 : -1);
-      if (next >= 0 && next <= 15) {
-        st.volume = next;
-        st.envStepsApplied++;
-      } else {
-        st.envActive = false;
-      }
-    }
-
-    _psgSweepCalc(st, commit) {
-      const delta = st.sweepShadow >> st.sweepShift;
-      const next = st.sweepDir ? (st.sweepShadow - delta) : (st.sweepShadow + delta);
-      if (next > 2047 || next < 0) {
-        if (commit) st.enabled = false;
-        return next;
-      }
-      if (commit && st.sweepShift > 0) {
-        st.sweepShadow = next;
-        st.freqCur = next;
-        st.freqRaw = next;
-      }
-      return next;
-    }
-
-    _clockPsgSweep() {
-      const st = this.psg[0];
-      if (!st?.enabled || !st.sweepEnabled) return;
-      st.sweepTimer--;
-      if (st.sweepTimer > 0) return;
-      st.sweepTimer = st.sweepPeriod || 8;
-      st.sweepStepsApplied++;
-      if (st.sweepPeriod > 0) {
-        const next = this._psgSweepCalc(st, true);
-        if (st.enabled && st.sweepShift > 0 && next <= 2047 && this._psgSweepCalc(st, false) > 2047) {
-          st.enabled = false;
-        }
-      }
-    }
-
-    _clockPsgFrameSequencer(nowCycles) {
-      if (nowCycles < this.psgFrameSeqCycles) this.psgFrameSeqCycles = nowCycles;
-      while (this.psgFrameSeqCycles + PSG_FRAME_SEQ_CYCLES <= nowCycles) {
-        this.psgFrameSeqCycles += PSG_FRAME_SEQ_CYCLES;
-        const step = this.psgFrameSeqStep & 7;
-        if ((step & 1) === 0) {
-          this._clockPsgLength(this.psg[0]);
-          this._clockPsgLength(this.psg[1]);
-          this._clockPsgLength(this.psgWave);
-          this._clockPsgLength(this.psgNoise);
-        }
-        if (step === 2 || step === 6) this._clockPsgSweep();
-        if (step === 7) {
-          this._clockPsgEnvelope(this.psg[0]);
-          this._clockPsgEnvelope(this.psg[1]);
-          this._clockPsgEnvelope(this.psgNoise);
-        }
-        this.psgFrameSeqStep = (this.psgFrameSeqStep + 1) & 7;
-      }
-    }
-
-    _waveUpdateFreq() {
-      const st = this.psgWave;
-      const freqReg = this.read16(0x04000074);
-      st.freqRaw = freqReg & 0x7ff;
-      st.freqCur = st.freqRaw;
-      st.lengthEnabled = !!(freqReg & 0x4000);
-      if (!st.lengthEnabled && st.lengthCounter <= 0) st.lengthCounter = 256;
-    }
+    // Chip-level PSG logic (frequency/trigger relatching, envelope, sweep, length, frame
+    // sequencer, noise LFSR) lives in the shared PsgDmg module (psg_dmg.js). These two wrappers
+    // exist only because test/smoke.js calls them directly as white-box checks and because
+    // write8's dispatch needs to pass in the bus's own cycle counter for timestamping.
+    _psgTrigger(ch) { this._psg._triggerSquare(ch, this.cycles); }
+    _noiseTrigger() { this._psg._triggerNoise(this.cycles); }
 
     _wavePlaybackBank() {
       return (this.read8(0x04000070) & 0x40) ? 1 : 0;
@@ -1319,24 +1179,6 @@
 
     _wavePlaybackLength() {
       return (this.read8(0x04000070) & 0x20) ? 64 : 32;
-    }
-
-    _waveTrigger() {
-      const st = this.psgWave;
-      const cntL = this.read8(0x04000070);
-      const cntH = this.read16(0x04000072);
-      // NR30 bit7: DAC power. If off, the channel produces no output regardless of Trigger.
-      const dacOn = !!(cntL & 0x80);
-      const levelBits = (cntH >>> 13) & 3;
-      st.outputLevel = [0, 1, 0.5, 0.25][levelBits];
-      st.forceVolume = !!(cntH & 0x8000);
-      const lengthData = cntH & 0xff;
-      st.lengthCounter = 256 - lengthData;
-      st.lengthCyclesTotal = st.lengthEnabled ? (256 - lengthData) * (GBA_CPU_HZ / 256) : Infinity;
-      st.phase = 0;
-      st.triggerCycles = this.cycles;
-      st.lastSampleCycles = this.cycles;
-      st.enabled = dacOn;
     }
 
     // Wave RAM is two 32-digit banks (16 packed bytes each), MSB-first per byte. In 32-digit
@@ -1387,136 +1229,22 @@
       return weighted / len;
     }
 
-    _noiseTrigger() {
-      const st = this.psgNoise;
-      const envReg = this.read16(0x04000078);
-      const freqReg = this.read16(0x0400007c);
-      const prevTriggerCycles = st.triggerCycles;
-      const wasEnabled = st.enabled;
-      st.volInit = (envReg >>> 12) & 0xf;
-      st.volume = st.volInit;
-      const triggerEnabled = st.volInit > 0;
-      st.envDir = (envReg >>> 11) & 1;
-      st.envStep = (envReg >>> 8) & 7;
-      st.envStepsApplied = 0;
-      st.envTimer = st.envStep || 8;
-      st.envActive = st.envStep > 0;
-      st.lengthEnabled = !!(freqReg & 0x4000);
-      const lengthData = envReg & 0x3f;
-      st.lengthCounter = 64 - lengthData;
-      st.lengthCyclesTotal = st.lengthEnabled ? (64 - lengthData) * (GBA_CPU_HZ / 256) : Infinity;
-      this._noiseUpdateControl(freqReg);
-      st.lfsr = 0x7fff;
-      st.phaseCycles = 0;
-      st.triggerCycles = this.cycles;
-      st.lastSampleCycles = this.cycles;
-      st.enabled = triggerEnabled;
-      // Trigger log: unlike Square's phase, Noise's LFSR IS reset to the same seed on every
-      // trigger per real hardware. If this channel is retriggered very frequently (like
-      // Sappy's sustain-via-retrigger pattern seen on Square), the LFSR would keep replaying
-      // the same short pseudo-random sequence from scratch each time instead of running freely
-      // — turning broadband noise into an audible repeating buzz/tone. Log gap + settings per
-      // trigger so we can see whether that's actually happening here.
-      const gapCycles = wasEnabled ? this.cycles - prevTriggerCycles : null;
-      const entry = { volInit: st.volInit, div: st.divRatio, width: st.widthMode, shift: st.shiftFreq, gapMs: gapCycles !== null ? Math.round((gapCycles / GBA_CPU_HZ) * 1000) : null, cycles: this.cycles };
-      if (!this.noiseTriggerLog) this.noiseTriggerLog = [];
-      const n = ++this._noiseTriggerCount;
-      if (n <= 8) this.noiseTriggerLog.push(entry);
-      else { if (this.noiseTriggerLog.length < 16) this.noiseTriggerLog.push(entry); else { this.noiseTriggerLog.splice(8, 1); this.noiseTriggerLog.push(entry); } }
-    }
+    _psgAdvance(ch, nowCycles) { return this._psg._advanceSquare(ch, nowCycles); }
+    _noiseAdvance(nowCycles) { return this._psg._noiseAdvance(nowCycles); }
 
-    _noiseUpdateControl(freqReg = this.read16(0x0400007c)) {
-      const st = this.psgNoise;
-      st.divRatio = freqReg & 7;
-      st.widthMode = (freqReg >>> 3) & 1; // 0=15-bit, 1=7-bit
-      st.shiftFreq = (freqReg >>> 4) & 0xf;
-      // GBATEK: frequency = 524288 / r / 2^(s+1), with r=0 treated as 0.5.
-      // In CPU cycles this is exactly 64*r*2^s, or 32*2^s for r=0.
-      st.periodCycles = (st.divRatio ? 64 * st.divRatio : 32) * Math.pow(2, st.shiftFreq);
-      this.psgSampleCacheCycles = -1;
-    }
-
-    _noiseAdvance(nowCycles) {
-      const st = this.psgNoise;
-      if (!st.enabled) return 0;
-      const dCycles = nowCycles - st.lastSampleCycles;
-      st.lastSampleCycles = nowCycles;
-      if (!(dCycles > 0)) return this._noiseOutput(st);
-      // Shift periods are integer CPU-cycle counts. Cap iterations defensively so a huge
-      // dt (e.g. after a long halt) cannot spin here for an unbounded amount of work.
-      const period = Math.max(1, st.periodCycles || 32);
-      let remaining = dCycles;
-      let weighted = 0;
-      let segments = 0;
-      while (remaining > 0 && segments++ < 4096) {
-        const untilShift = Math.max(0, period - st.phaseCycles);
-        const span = Math.min(remaining, untilShift || period);
-        weighted += this._noiseOutput(st) * span;
-        st.phaseCycles += span;
-        remaining -= span;
-        if (st.phaseCycles >= period) {
-          st.phaseCycles -= period;
-          this._noiseShift(st);
-        }
-      }
-      if (remaining > 0) weighted += this._noiseOutput(st) * remaining;
-      return weighted / dCycles;
-    }
-
-    _noiseOutput(st) {
-      return (st.lfsr & 1) ? -st.volume : st.volume;
-    }
-
-    _noiseShift(st) {
-      // GB/CGB noise uses xor feedback from bits 0 and 1, shifts right, writes feedback to
-      // bit14, and mirrors it into bit6 in 7-bit mode. The DAC output is the inverted low bit.
-      const feedback = (st.lfsr ^ (st.lfsr >>> 1)) & 1;
-      st.lfsr = (st.lfsr >>> 1) | (feedback << 14);
-      if (st.widthMode) st.lfsr = (st.lfsr & ~0x40) | (feedback << 6);
-    }
-
-    // Advance envelope/length/(ch0)sweep timing to `nowCycles` and return this channel's
-    // current waveform sample. Idempotent w.r.t. nowCycles, so it's safe to call once per
-    // stereo output channel even if both land on the same cycle.
-    _psgAdvance(ch, nowCycles) {
-      const st = this.psg[ch];
-      if (!st.enabled) return 0;
-      const stepRate = 1048576 / (2048 - st.freqCur);
-      const dt = (nowCycles - st.lastSampleCycles) / GBA_CPU_HZ;
-      st.lastSampleCycles = nowCycles;
-      const stepStart = st.phase;
-      const stepInc = stepRate * dt;
-      st.phase = ((stepStart + stepInc) % 8 + 8) % 8;
-      // Average the 8-step hardware duty sequencer over this output sample. The old normalized
-      // cycle oscillator had the right nominal pitch, but expressing this as a 1048576Hz-derived
-      // step clock matches GB/GBA square-channel timing and makes duty/sweep edge cases clearer.
-      const fractionHigh = this._squareStepAreaHigh(stepStart, stepInc, st.dutyStep);
-      return st.volume * (2 * fractionHigh - 1);
-    }
-
-    // Fraction of the interval [start, start+len) (wrapping mod 8) spent in the high duty steps.
-    _squareStepAreaHigh(start, len, highSteps) {
-      highSteps = Math.max(0, Math.min(8, highSteps | 0));
-      if (len <= 0) return (((start % 8) + 8) % 8) < highSteps ? 1 : 0;
-      if (len >= 8) return highSteps / 8;
-      const s = ((start % 8) + 8) % 8;
-      const end = s + len;
-      const segments = end <= 8 ? [[s, end]] : [[s, 8], [0, end - 8]];
-      let highTime = 0;
-      for (const [a, b] of segments) highTime += Math.max(0, Math.min(b, highSteps) - a);
-      return highTime / len;
-    }
-
+    // Hybrid: frame-sequencer timing, square, and noise all come from the shared module;
+    // wave sampling stays bus-owned since it needs GBA's bank-swap addressing (_waveAdvance
+    // above), so this can't be a pure delegation to module.outputsAt().
     _psgOutputsAt(nowCycles) {
-      if (this.psgSampleCacheCycles === nowCycles) return this.psgSampleCache;
-      this._clockPsgFrameSequencer(nowCycles);
-      const out = this.psgSampleCache || [0, 0, 0, 0];
-      out[0] = this._psgAdvance(0, nowCycles);
-      out[1] = this._psgAdvance(1, nowCycles);
+      if (this._psg.sampleCacheCycles === nowCycles) return this._psg.sampleCache;
+      this._psg._clockFrameSequencer(nowCycles);
+      const out = this._psg.sampleCache || [0, 0, 0, 0];
+      out[0] = this._psg._advanceSquare(0, nowCycles);
+      out[1] = this._psg._advanceSquare(1, nowCycles);
       out[2] = this._waveAdvance(nowCycles);
       out[3] = this._noiseAdvance(nowCycles);
-      this.psgSampleCache = out;
-      this.psgSampleCacheCycles = nowCycles;
+      this._psg.sampleCache = out;
+      this._psg.sampleCacheCycles = nowCycles;
       return out;
     }
 
@@ -4754,40 +4482,11 @@
       this.bus.reloadEffectLog = [];
       this.bus.dmaReloadBranchLog = [];
       this.bus.psgRegWrites = new Map();
-      this.bus.psgFrameSeqCycles = 0;
-      this.bus.psgFrameSeqStep = 0;
-      this.bus.psg = [0, 1].map(() => ({
-        enabled: false, triggerCycles: 0, lastSampleCycles: 0,
-        freqRaw: 0, freqCur: 0, dutyFraction: 0.5, dutyStep: 4,
-        volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
-        envTimer: 0, envActive: false,
-        lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
-        sweepShift: 0, sweepDir: 0, sweepPeriod: 0, sweepStepsApplied: 0,
-        sweepTimer: 0, sweepEnabled: false, sweepShadow: 0,
-        phase: 0,
-      }));
+      this.bus._psg.reset();
       this.bus.psgTriggerStats = [0, 1].map(() => ({
         total: 0, sameFreq: 0, minGapCycles: Infinity, sumGapCycles: 0, gapSamples: 0,
       }));
       this.bus.psgFreqLog = [[], []];
-      this.bus.psgSampleCacheCycles = -1;
-      this.bus.psgSampleCache = [0, 0, 0, 0];
-      this.bus.psgWave = {
-        enabled: false, triggerCycles: 0, lastSampleCycles: 0,
-        freqRaw: 0, freqCur: 0,
-        lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
-        outputLevel: 0, forceVolume: false,
-        phase: 0,
-      };
-      this.bus.psgNoise = {
-        enabled: false, triggerCycles: 0, lastSampleCycles: 0,
-        volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
-        envTimer: 0, envActive: false,
-        lengthEnabled: false, lengthCounter: 0, lengthCyclesTotal: Infinity,
-        divRatio: 0, widthMode: 0, shiftFreq: 0,
-        periodCycles: 32,
-        lfsr: 0x7fff, phaseCycles: 0,
-      };
       this.bus.noiseTriggerLog = [];
       this.bus._noiseTriggerCount = 0;
 

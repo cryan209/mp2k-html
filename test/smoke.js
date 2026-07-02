@@ -12,6 +12,7 @@ window.GsfTools = {
 };
 var console = { warn: function (m) { print('WARN: ' + m); }, log: function (m) { print(m); } };
 
+load('psg_dmg.js');
 load('gsf_emulator.js'); // run from the repo root: npm test
 
 var E = window.GsfEmulator;

@@ -4684,14 +4684,24 @@
       if (typeof AudioContext === 'undefined') return this.diagnostics;
 
       // --- Audio graph + streaming pump ---
+      // Run the AudioContext at the DEVICE's native rate and resample the GBA stream
+      // ourselves with a continuous fractional cursor. Asking the browser for an
+      // AudioContext at the game's exotic source rate (e.g. Golden Sun's 21024 Hz)
+      // left the final resample-to-device step to the browser/OS, which audibly
+      // warbled; a continuous-phase linear interpolator here is time-invariant, so
+      // it cannot warble by construction. (Verified: the same PCM rendered to a WAV
+      // sounded clean — the defect was purely in the playback-rate conversion.)
       let ctx;
       try {
-        ctx = new AudioContext({ sampleRate: playbackRate });
+        ctx = new AudioContext();
         await ctx.resume();
       } catch (err) {
         console.warn('[GsfEngine] Audio init failed:', err);
         return this.diagnostics;
       }
+      const outRate = ctx.sampleRate;
+      const ratio = playbackRate / outRate; // source samples per output sample
+      this.diagnostics.render.outputRate = outRate;
 
       const stream = {
         ctx,
@@ -4700,7 +4710,8 @@
         ended: false,
         timer: null,
         nextTime: ctx.currentTime + 0.15, // priming latency before the first chunk plays
-        consumed: 0,    // total samples scheduled to the audio graph
+        srcPos: 0,      // continuous fractional read cursor into the source stream (absolute)
+        consumed: 0,    // whole source samples consumed = floor(srcPos); drives trimming
         trimOffset: 0,  // samples spliced off the front of the live arrays
         underruns: 0,
       };
@@ -4708,7 +4719,9 @@
 
       const engine = this;
       const bus = this.bus;
-      const CHUNK_SAMPLES = Math.max(256, Math.round(playbackRate * 0.15));
+      const OUT_CHUNK = Math.max(256, Math.round(outRate * 0.15));
+      // Source samples a full output chunk needs, plus the interpolation neighbor.
+      const SRC_NEEDED = Math.ceil(OUT_CHUNK * ratio) + 2;
       // Runway of scheduled-but-unplayed audio. Production is gated on this draining,
       // so a bigger runway costs no steady-state CPU — it only buys tolerance for
       // main-thread stalls (GC, extensions, layout) before an audible underrun.
@@ -4717,19 +4730,32 @@
 
       const producedTotal = () => stream.trimOffset + Math.max(bus.fifoSamplesA.length, bus.fifoSamplesB.length);
       const reachedEnd = () => engine.cpu.halted || (bus.cycles - cyclesAtStart) / GBA_CPU_HZ >= maxSeconds;
-      const sampleFrom = (arr, idx) => arr.length ? (arr[Math.min(idx, arr.length - 1)] || 0) : 0;
+      const sampleFrom = (arr, idx) => {
+        if (!arr.length) return 0;
+        return arr[idx < 0 ? 0 : idx >= arr.length ? arr.length - 1 : idx] || 0;
+      };
 
-      const scheduleChunk = (n) => {
-        const startIdx = stream.consumed - stream.trimOffset;
-        const buffer = ctx.createBuffer(2, n, stream.rate);
+      const scheduleChunk = (outN) => {
+        const buffer = ctx.createBuffer(2, outN, outRate);
         // SOUNDCNT_H convention used throughout: Sound A → right, Sound B → left.
         const left = buffer.getChannelData(0);
         const right = buffer.getChannelData(1);
-        for (let i = 0; i < n; i++) {
+        let pos = stream.srcPos;
+        for (let i = 0; i < outN; i++) {
+          const idxAbs = Math.floor(pos);
+          const frac = pos - idxAbs;
+          const idx = idxAbs - stream.trimOffset;
           // Mixed samples span the hardware ±511 range; normalize by 512 for Web Audio.
-          right[i] = sampleFrom(bus.fifoSamplesA, startIdx + i) / 512;
-          left[i] = sampleFrom(bus.fifoSamplesB, startIdx + i) / 512;
+          const a0 = sampleFrom(bus.fifoSamplesA, idx);
+          const a1 = sampleFrom(bus.fifoSamplesA, idx + 1);
+          const b0 = sampleFrom(bus.fifoSamplesB, idx);
+          const b1 = sampleFrom(bus.fifoSamplesB, idx + 1);
+          right[i] = (a0 + (a1 - a0) * frac) / 512;
+          left[i] = (b0 + (b1 - b0) * frac) / 512;
+          pos += ratio;
         }
+        stream.srcPos = pos;
+        stream.consumed = Math.floor(pos);
         if (stream.nextTime < ctx.currentTime + 0.02) {
           if (stream.consumed > 0) {
             stream.underruns++;
@@ -4743,8 +4769,7 @@
         src.buffer = buffer;
         src.connect(ctx.destination);
         src.start(stream.nextTime);
-        stream.nextTime += n / stream.rate;
-        stream.consumed += n;
+        stream.nextTime += outN / outRate;
       };
 
       // Endless streams must not grow the sample arrays forever: splice off the played
@@ -4776,17 +4801,19 @@
           // Emulate until a chunk's worth of new samples exists, bounded by a
           // wall-clock slice so the UI thread stays responsive.
           const deadline = now() + 12;
-          while (!reachedEnd() && producedTotal() - stream.consumed < CHUNK_SAMPLES && now() < deadline) {
+          while (!reachedEnd() && producedTotal() - stream.consumed < SRC_NEEDED && now() < deadline) {
             if (fastPlayback) {
               for (let i = 0; i < 512; i++) engine.cpu._stepFast();
             } else {
               for (let i = 0; i < 512; i++) engine.cpu.step();
             }
           }
-          while (producedTotal() - stream.consumed >= CHUNK_SAMPLES) scheduleChunk(CHUNK_SAMPLES);
+          while (producedTotal() - stream.consumed >= SRC_NEEDED) scheduleChunk(OUT_CHUNK);
           if (reachedEnd()) {
-            const tail = producedTotal() - stream.consumed;
-            if (tail > 0) scheduleChunk(tail);
+            // Flush whatever full source samples remain as one final (shorter) chunk.
+            const tailSrc = producedTotal() - stream.consumed;
+            const tailOut = Math.floor(Math.max(0, tailSrc - 2) / ratio);
+            if (tailOut > 0) scheduleChunk(tailOut);
             stream.ended = true;
             if (engine.cpu.halted) console.warn('[GsfEngine] Stream ended: CPU halted:', engine.cpu.reason);
             // Let the final scheduled buffer play out, then release the audio context.

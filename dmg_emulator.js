@@ -25,6 +25,18 @@
       this.error = null;
     }
 
+    // Clears any loaded song, matching StandardGsfEngine.reset()'s role: called when the UI
+    // switches away to a non-GBS file so a stale bus/cpu/header can't be played by mistake.
+    reset() {
+      this.stop();
+      this.state = 'idle';
+      this.header = null;
+      this.romImage = null;
+      this.bus = null;
+      this.cpu = null;
+      this.error = null;
+    }
+
     loadBuffer(buf) {
       this.state = 'loading';
       try {

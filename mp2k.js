@@ -6368,36 +6368,98 @@ function updateInfoText() {
   document.getElementById('info').textContent = [...sourceParts, engine, gsfEngine, compare].join('\n');
 }
 
+// Loads a raw GBS buffer into the UI as a fully separate playback mode via
+// StandardGbsEngine (GBS files are a standalone Z80/DMG program, not an MP2K ROM — they
+// have no song table, voice group, or track data for the tracker pipeline to parse). Shared
+// between a bare .gbs drop and a .gbs found inside a ZIP/7z archive.
+function loadGbsIntoUi(buf) {
+  if (!standardGbsEngine) throw new Error('GBS support is unavailable (dmg_emulator.js failed to load)');
+  const header = standardGbsEngine.loadBuffer(buf);
+  if (!standardGbsEngine.canPlay()) throw new Error(standardGbsEngine.error || 'failed to parse GBS file');
+  standardGsfEngine?.reset(); // clear out any stale GSF LLE state so its UI bits don't linger
+  document.getElementById('engineSelect').value = 'gbs-lle';
+  document.getElementById('dropmsg').style.display = 'none';
+  document.getElementById('btnPlay').disabled = false;
+  const gbsSel = document.getElementById('songSelect');
+  gbsSel.innerHTML = '';
+  for (let i = 0; i < header.songCount; i++) {
+    const opt = document.createElement('option');
+    opt.value = i; // StandardGbsEngine.play() takes a 0-based song index
+    opt.textContent = `Song ${header.firstSong + i}`;
+    gbsSel.appendChild(opt);
+  }
+  gbsSel.selectedIndex = 0;
+  gbsSel.disabled = header.songCount <= 1;
+  currentSongListIdx = 0;
+  setStatus(`GBS loaded: "${header.title}" by ${header.author} (${header.songCount} song${header.songCount === 1 ? '' : 's'}) — press ▶`);
+  return header;
+}
+
+// Given an archive's extracted { filename: ArrayBuffer } map, figures out what kind of
+// content it holds so a dropped ZIP/7z isn't assumed to always be a GSF library set —
+// it might just as well contain a single .gbs, a bare GBA ROM, or a standalone .gsf.
+function classifyArchiveContents(files) {
+  const names = Object.keys(files);
+  const find = (re) => names.find(n => re.test(n));
+  return {
+    gsflibKey: find(/\.gsflib$/i),
+    gbsKey: find(/\.gbs$/i),
+    gsfKey: find(/\.gsf$/i),
+    romKey: find(/\.(gba|bin)$/i),
+    names,
+  };
+}
+
 async function initWithBuffer(buf, source = {}) {
   try {
     // GBS files are a standalone Z80/DMG program, not an MP2K ROM — they have no song
     // table, voice group, or track data for the tracker pipeline below to parse, so handle
     // them as a fully separate playback mode via StandardGbsEngine instead.
     if (window.GbsTools?.isValid?.(buf)) {
-      if (!standardGbsEngine) throw new Error('GBS support is unavailable (dmg_emulator.js failed to load)');
-      const header = standardGbsEngine.loadBuffer(buf);
-      if (!standardGbsEngine.canPlay()) throw new Error(standardGbsEngine.error || 'failed to parse GBS file');
-      document.getElementById('engineSelect').value = 'gbs-lle';
-      document.getElementById('dropmsg').style.display = 'none';
-      document.getElementById('btnPlay').disabled = false;
-      const gbsSel = document.getElementById('songSelect');
-      gbsSel.innerHTML = '';
-      for (let i = 0; i < header.songCount; i++) {
-        const opt = document.createElement('option');
-        opt.value = i; // StandardGbsEngine.play() takes a 0-based song index
-        opt.textContent = `Song ${header.firstSong + i}`;
-        gbsSel.appendChild(opt);
-      }
-      gbsSel.selectedIndex = 0;
-      gbsSel.disabled = header.songCount <= 1;
-      currentSongListIdx = 0;
-      setStatus(`GBS loaded: "${header.title}" by ${header.author} (${header.songCount} song${header.songCount === 1 ? '' : 's'}) — press ▶`);
+      loadGbsIntoUi(buf);
       return;
     }
     const isZip = window.GsfTools?.isZip?.(buf) || false;
     const isSevenZip = window.GsfTools?.isSevenZip?.(buf) || false;
     const isArchive = isZip || isSevenZip;
     const isGsf = window.GsfTools?.isValid?.(buf) || false;
+
+    // A dropped archive isn't necessarily a GSF library set — peek at its contents first
+    // and route .gbs/bare-ROM/single-.gsf archives to the right loader instead of assuming
+    // every ZIP/7z has a .gsflib in it.
+    if (isArchive && window.GsfTools?.archiveFiles) {
+      setStatus(isSevenZip ? 'Reading 7z…' : 'Reading ZIP…');
+      const files = await window.GsfTools.archiveFiles(buf);
+      const kinds = files ? classifyArchiveContents(files) : { names: [] };
+      if (files && !kinds.gsflibKey) {
+        if (kinds.gbsKey) {
+          loadGbsIntoUi(files[kinds.gbsKey]);
+          return;
+        }
+        if (kinds.romKey) {
+          standardGsfEngine?.reset();
+          setStatus('Parsing ROM from archive…');
+          const count = await player.loadROM(files[kinds.romKey], { kind: 'ROM', name: kinds.romKey });
+          await finishNonGbsLoad(count);
+          return;
+        }
+        if (kinds.gsfKey) {
+          setStatus('GSF found in archive, decompressing…');
+          const gsfBytes = files[kinds.gsfKey];
+          const gsfTags = parseGsfTags(gsfBytes);
+          const gsfProgram = await parseGsfProgramInfo(gsfBytes);
+          const gsfRom = await parseGsfBuffer(gsfBytes);
+          if (standardGsfEngine) await standardGsfEngine.loadBuffer(gsfBytes, { name: kinds.gsfKey });
+          const count = await player.loadROM(gsfRom || gsfBytes, gsfRom
+            ? { kind: 'GSF', name: kinds.gsfKey, gsfTags, ...(gsfProgram || {}) }
+            : { kind: 'ROM', name: kinds.gsfKey });
+          await finishNonGbsLoad(count);
+          return;
+        }
+        throw new Error(`Archive has no recognized .gsflib/.gbs/.gba/.bin/.gsf file (found: ${kinds.names.join(', ') || 'nothing'})`);
+      }
+    }
+
     if (standardGsfEngine) {
       if (isArchive || isGsf) {
         await standardGsfEngine.loadBuffer(buf, source);
@@ -6419,36 +6481,44 @@ async function initWithBuffer(buf, source = {}) {
         ? { kind: 'GSF', name: source.name || 'Dropped GSF', gsfTags, ...(gsfProgram || {}) }
         : { kind: 'ROM', name: source.name || 'Dropped ROM' });
     }
-
-    // Populate table selector if multiple tables found
-    const tableRow = document.getElementById('tableRow');
-    const tableSel = document.getElementById('tableSelect');
-    tableSel.innerHTML = '';
-    if (player.songTables.length > 1) {
-      player.songTables.forEach((t, i) => {
-        const avgTc = (t.avgTc).toFixed(1);
-        const label = t.avgTc >= 3
-          ? `ROM ${hex(t.addr, 6)} — ${t.songs.length} songs, avg ${avgTc} tracks (music)`
-          : `ROM ${hex(t.addr, 6)} — ${t.songs.length} entries, avg ${avgTc} tracks (sfx?)`;
-        const opt = new Option(label, i);
-        opt.selected = t.addr === player.songTableAddr;
-        tableSel.appendChild(opt);
-      });
-      tableRow.style.display = '';
-    } else {
-      tableRow.style.display = 'none';
-    }
-
-    populateVoicePoolSelect();
-    populateSongList(player.songs);
-    player._debugEvent({ type:'load', trackIdx:-1, tick:0, message:`loaded ${count} songs, ${player.voiceGroup.length} instruments` });
-    setStatus(`${count} songs loaded — select one and press ▶`);
-    document.getElementById('dropmsg').style.display = 'none';
-    updateInfoText();
+    await finishNonGbsLoad(count);
   } catch (err) {
     setStatus('Error: ' + err.message);
     console.error(err);
   }
+}
+
+// Shared tail of the MP2K/GSF-ROM loading path: populates the table/voice-pool/song
+// selectors from whatever player.loadROM() just parsed. Not used by the GBS path (see
+// loadGbsIntoUi), which has no song table/voice group data to populate these from.
+async function finishNonGbsLoad(count) {
+  standardGbsEngine?.reset(); // clear out any stale GBS LLE state so it can't be played by mistake
+  const engineSel = document.getElementById('engineSelect');
+  if (engineSel?.value === 'gbs-lle') engineSel.value = 'mp2k-hle';
+  const tableRow = document.getElementById('tableRow');
+  const tableSel = document.getElementById('tableSelect');
+  tableSel.innerHTML = '';
+  if (player.songTables.length > 1) {
+    player.songTables.forEach((t, i) => {
+      const avgTc = (t.avgTc).toFixed(1);
+      const label = t.avgTc >= 3
+        ? `ROM ${hex(t.addr, 6)} — ${t.songs.length} songs, avg ${avgTc} tracks (music)`
+        : `ROM ${hex(t.addr, 6)} — ${t.songs.length} entries, avg ${avgTc} tracks (sfx?)`;
+      const opt = new Option(label, i);
+      opt.selected = t.addr === player.songTableAddr;
+      tableSel.appendChild(opt);
+    });
+    tableRow.style.display = '';
+  } else {
+    tableRow.style.display = 'none';
+  }
+
+  populateVoicePoolSelect();
+  populateSongList(player.songs);
+  player._debugEvent({ type: 'load', trackIdx: -1, tick: 0, message: `loaded ${count} songs, ${player.voiceGroup.length} instruments` });
+  setStatus(`${count} songs loaded — select one and press ▶`);
+  document.getElementById('dropmsg').style.display = 'none';
+  updateInfoText();
 }
 
 function populateVoicePoolSelect() {

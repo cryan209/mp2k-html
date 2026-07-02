@@ -228,6 +228,7 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
     bus.psg[0].freqRaw = 1024;
     bus.psg[0].freqCur = 1024;
     bus.psg[0].dutyFraction = duty == null ? 0.5 : duty;
+    bus.psg[0].dutyStep = Math.round((duty == null ? 0.5 : duty) * 8);
     bus.psg[0].volume = 15;
     bus.psg[0].lengthEnabled = false;
     bus.psg[0].phase = 0;
@@ -255,12 +256,45 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   check(right === left, 'same-cycle PSG sample is reused for left/right (' + right + '/' + left + ')');
 
   bus = freshBus();
+  armSquare(bus, 0.5, 0);
+  bus.psg[0].enabled = true;
+  bus._psgAdvance(0, 16384); // 16777216 / (1048576 / (2048 - 1024))
+  check(Math.floor(bus.psg[0].phase) === 1, 'square PSG advances at 1048576-derived duty-step rate (phase ' + bus.psg[0].phase + ')');
+
+  bus = freshBus();
   bus.write16(0x04000078, 0xf000);
   bus.write16(0x0400007c, 0x0000);
   bus._noiseTrigger();
   check(bus.psgNoise.lfsr === 0x7fff, 'noise trigger seeds all-one LFSR');
   bus._noiseAdvance(32);
   check(bus.psgNoise.lfsr === 0x3fff, 'noise LFSR uses xor feedback after one shift (got 0x' + bus.psgNoise.lfsr.toString(16) + ')');
+})();
+
+// --- 10c. GBA wave-channel bank/digit-rate behavior ---
+(function () {
+  var bus = freshBus();
+  bus.write8(0x04000070, 0x00); // play bank 0, CPU accesses bank 1
+  bus.write8(0x04000090, 0x12);
+  check(bus.waveRam[16] === 0x12 && bus._waveSample(0) === -8, 'wave RAM write targets non-playback bank');
+  bus.write8(0x04000070, 0x40); // play bank 1, CPU accesses bank 0
+  check(bus.read8(0x04000090) === 0 && bus._waveSample(0) === -7, 'wave bank select swaps playback/access banks');
+
+  bus.waveRam[0] = 0x10;
+  bus.waveRam[16] = 0xf0;
+  bus.write8(0x04000070, 0x20); // 64-digit mode, start on bank 0
+  check(bus._waveSample(0) === -7 && bus._waveSample(32) === 7, '64-digit wave mode plays selected bank then other bank');
+
+  bus = freshBus();
+  bus.waveRam[0] = 0x12;
+  bus.write8(0x04000070, 0x80); // playback on, bank 0, 32-digit mode
+  bus.psgWave.enabled = true;
+  bus.psgWave.triggerCycles = 0;
+  bus.psgWave.lastSampleCycles = 0;
+  bus.psgWave.freqCur = 1024;
+  bus.psgWave.outputLevel = 1;
+  var oneDigitCycles = 8192; // 16777216 / (2097152 / (2048 - 1024))
+  var sample = bus._waveAdvance(oneDigitCycles);
+  check(sample === -6 && Math.floor(bus.psgWave.phase) === 1, 'wave channel advances at GBA digit rate (sample ' + sample + ', phase ' + bus.psgWave.phase + ')');
 })();
 
 // --- 11. HuffUnComp (8-bit symbols) ---

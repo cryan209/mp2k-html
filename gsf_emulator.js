@@ -299,6 +299,7 @@
         lastSampleCycles: 0,
         freqRaw: 0, freqCur: 0,
         dutyFraction: 0.5,
+        dutyStep: 4,
         volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
         lengthEnabled: false, lengthCyclesTotal: Infinity,
         sweepShift: 0, sweepDir: 0, sweepPeriod: 0, sweepStepsApplied: 0,
@@ -314,7 +315,8 @@
       this.psgSampleCacheCycles = -1;
       this.psgSampleCache = [0, 0, 0, 0];
       // PSG Wave (ch 2): plays back the 32x4-bit sample table at WAVE_RAM (0x04000090-9F)
-      // at the programmed frequency, scaled by a fixed output-level select (no envelope).
+      // at the programmed digit rate, scaled by a fixed output-level select (no envelope).
+      this.waveRam = new Uint8Array(32); // two 16-byte banks, each 32 packed 4-bit digits
       this.psgWave = {
         enabled: false, triggerCycles: 0, lastSampleCycles: 0,
         freqRaw: 0, freqCur: 0,
@@ -402,6 +404,7 @@
         const vMatch = line === this.io[5] ? 4 : 0;
         return (base & ~7) | inVBlank | inHBlank | vMatch;
       }
+      if (addr >= 0x04000090 && addr < 0x040000a0) return this._waveRamRead(addr);
       const r = this.region(addr);
       if (!r || r.off >= r.data.length) {
         this.unmappedReads++;
@@ -466,6 +469,11 @@
         if (!this.psgRegWrites) this.psgRegWrites = new Map();
         const name = ioName(addr & ~1);
         this.psgRegWrites.set(name, (this.psgRegWrites.get(name) || 0) + 1);
+      }
+      if (addr >= 0x04000090 && addr < 0x040000a0) {
+        this._waveRamWrite(addr, value);
+        this._logIoWrite(addr, value, 1);
+        return;
       }
       // IF is write-one-to-clear. Hardware IRQ sources set these bits internally;
       // CPU-visible writes acknowledge requests instead of storing the written value.
@@ -1122,6 +1130,7 @@
       const envReg = ch === 0 ? this.read16(0x04000062) : this.read16(0x04000068);
       const dutyBits = (envReg >>> 6) & 3;
       st.dutyFraction = [0.125, 0.25, 0.5, 0.75][dutyBits];
+      st.dutyStep = [1, 2, 4, 6][dutyBits];
       st.volInit = (envReg >>> 12) & 0xf;
       st.volume = st.volInit;
       st.envDir = (envReg >>> 11) & 1; // 0=decrease, 1=increase
@@ -1157,6 +1166,30 @@
       st.lengthEnabled = !!(freqReg & 0x4000);
     }
 
+    _wavePlaybackBank() {
+      return (this.read8(0x04000070) & 0x40) ? 1 : 0;
+    }
+
+    _waveAccessBank() {
+      return this._wavePlaybackBank() ^ 1;
+    }
+
+    _waveRamRead(addr) {
+      const off = (addr - 0x04000090) & 0xf;
+      return this.waveRam[this._waveAccessBank() * 16 + off] || 0;
+    }
+
+    _waveRamWrite(addr, value) {
+      const off = (addr - 0x04000090) & 0xf;
+      this.waveRam[this._waveAccessBank() * 16 + off] = value & 0xff;
+      this.io[addr - 0x04000000] = value & 0xff;
+      this.psgSampleCacheCycles = -1;
+    }
+
+    _wavePlaybackLength() {
+      return (this.read8(0x04000070) & 0x20) ? 64 : 32;
+    }
+
     _waveTrigger() {
       const st = this.psgWave;
       const cntL = this.read8(0x04000070);
@@ -1174,11 +1207,16 @@
       st.enabled = dacOn;
     }
 
-    // Wave RAM is 32 packed 4-bit samples (16 bytes) at 0x04000090-0x0400009F, MSB-first per
-    // byte. We don't track the bank-select bit (SOUND3CNT_L bit6) separately — games that
-    // ping-pong between the two banks while playing are rare enough to accept as a gap.
+    // Wave RAM is two 32-digit banks (16 packed bytes each), MSB-first per byte. In 32-digit
+    // mode the selected bank loops; in 64-digit mode playback starts at the selected bank and
+    // continues through the other bank. CPU reads/writes address the non-selected bank.
     _waveSample(index) {
-      const byte = this.read8((0x04000090 + (index >>> 1)) >>> 0);
+      const len = this._wavePlaybackLength();
+      const sample = ((index % len) + len) % len;
+      const baseBank = this._wavePlaybackBank();
+      const bank = len === 64 && sample >= 32 ? (baseBank ^ 1) : baseBank;
+      const bankIndex = sample & 31;
+      const byte = this.waveRam[bank * 16 + (bankIndex >>> 1)] || 0;
       const nibble = (index & 1) === 0 ? (byte >>> 4) & 0xf : byte & 0xf;
       return nibble - 8; // center to roughly -8..7
     }
@@ -1188,15 +1226,12 @@
       if (!st.enabled) return 0;
       const elapsed = nowCycles - st.triggerCycles;
       if (st.lengthEnabled && elapsed >= st.lengthCyclesTotal) { st.enabled = false; return 0; }
-      const freqHz = 131072 / (2048 - st.freqCur);
+      const digitRate = 2097152 / (2048 - st.freqCur);
+      const waveLength = this._wavePlaybackLength();
       const dt = (nowCycles - st.lastSampleCycles) / GBA_CPU_HZ;
       st.lastSampleCycles = nowCycles;
-      // freqHz*dt is the fraction of ONE FULL PERIOD elapsed (0..1) — a full period is all 32
-      // samples, so the sample-index increment needs an explicit ×32. Without it the wave
-      // advanced through its table 32x too slowly, playing every note two octaves-plus flat
-      // (a ~294Hz tone here came out around ~9Hz) — audible as noise/buzz, not a musical pitch.
-      st.phase = ((st.phase + freqHz * dt) % 1 + 1) % 1;
-      const index = Math.min(31, Math.floor(st.phase * 32));
+      st.phase = ((st.phase + digitRate * dt) % waveLength + waveLength) % waveLength;
+      const index = Math.floor(st.phase) % waveLength;
       const raw = this._waveSample(index);
       const level = st.forceVolume ? 0.75 : st.outputLevel;
       return raw * level;
@@ -1298,29 +1333,29 @@
           if (st.freqCur > 2047 || st.freqCur < 0) { st.enabled = false; return 0; }
         }
       }
-      const freqHz = 131072 / (2048 - st.freqCur);
+      const stepRate = 1048576 / (2048 - st.freqCur);
       const dt = (nowCycles - st.lastSampleCycles) / GBA_CPU_HZ;
       st.lastSampleCycles = nowCycles;
-      const phaseStart = st.phase;
-      const phaseInc = freqHz * dt;
-      st.phase = ((phaseStart + phaseInc) % 1 + 1) % 1;
-      // Average the square wave over this sample's whole time window instead of point-sampling
-      // a single instant. A naive instantaneous sample aliases the square wave's harmonics
-      // above Nyquist (half the ~13kHz output rate) back down as audible noise — this is the
-      // standard band-limiting fix (a box filter matched to the sample period).
-      const fractionHigh = this._squareAreaHigh(phaseStart, phaseInc, st.dutyFraction);
+      const stepStart = st.phase;
+      const stepInc = stepRate * dt;
+      st.phase = ((stepStart + stepInc) % 8 + 8) % 8;
+      // Average the 8-step hardware duty sequencer over this output sample. The old normalized
+      // cycle oscillator had the right nominal pitch, but expressing this as a 1048576Hz-derived
+      // step clock matches GB/GBA square-channel timing and makes duty/sweep edge cases clearer.
+      const fractionHigh = this._squareStepAreaHigh(stepStart, stepInc, st.dutyStep);
       return st.volume * (2 * fractionHigh - 1);
     }
 
-    // Fraction of the interval [start, start+len) (wrapping mod 1) where phase < duty.
-    _squareAreaHigh(start, len, duty) {
-      if (len <= 0) return start < duty ? 1 : 0;
-      if (len >= 1) return duty;
-      const s = ((start % 1) + 1) % 1;
+    // Fraction of the interval [start, start+len) (wrapping mod 8) spent in the high duty steps.
+    _squareStepAreaHigh(start, len, highSteps) {
+      highSteps = Math.max(0, Math.min(8, highSteps | 0));
+      if (len <= 0) return (((start % 8) + 8) % 8) < highSteps ? 1 : 0;
+      if (len >= 8) return highSteps / 8;
+      const s = ((start % 8) + 8) % 8;
       const end = s + len;
-      const segments = end <= 1 ? [[s, end]] : [[s, 1], [0, end - 1]];
+      const segments = end <= 8 ? [[s, end]] : [[s, 8], [0, end - 8]];
       let highTime = 0;
-      for (const [a, b] of segments) highTime += Math.max(0, Math.min(b, duty) - a);
+      for (const [a, b] of segments) highTime += Math.max(0, Math.min(b, highSteps) - a);
       return highTime / len;
     }
 
@@ -4572,7 +4607,7 @@
       this.bus.psgRegWrites = new Map();
       this.bus.psg = [0, 1].map(() => ({
         enabled: false, triggerCycles: 0, lastSampleCycles: 0,
-        freqRaw: 0, freqCur: 0, dutyFraction: 0.5,
+        freqRaw: 0, freqCur: 0, dutyFraction: 0.5, dutyStep: 4,
         volInit: 0, volume: 0, envDir: 0, envStep: 0, envStepsApplied: 0,
         lengthEnabled: false, lengthCyclesTotal: Infinity,
         sweepShift: 0, sweepDir: 0, sweepPeriod: 0, sweepStepsApplied: 0,
@@ -5079,10 +5114,9 @@
             const st = this.bus.psgWave;
             return { enabled: st.enabled, freq: st.freqCur, outputLevel: st.outputLevel, forceVolume: st.forceVolume };
           })(),
-          // Raw WAVE_RAM bytes (16 bytes = 32 packed 4-bit samples). We don't track the bank-
-          // select bit (SOUND3CNT_L bit6) separately, so if this game ping-pongs between banks
-          // this could be garbage/stale data rather than the real waveform — check by eye.
+          // CPU-visible WAVE_RAM bytes: hardware exposes the non-playback bank here.
           waveRamHex: Array.from({ length: 16 }, (_, i) => tools.hex(this.bus.read8((0x04000090 + i) >>> 0), 2)),
+          waveRamBanksHex: [0, 1].map(bank => Array.from({ length: 16 }, (_, i) => tools.hex(this.bus.waveRam[bank * 16 + i] || 0, 2))),
           soundCnt3LHex: tools.hex(this.bus.read8(0x04000070), 2),
           psgNoiseState: (() => {
             const st = this.bus.psgNoise;

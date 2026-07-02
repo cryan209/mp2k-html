@@ -4535,6 +4535,7 @@
           for (let i = 0; i < count; i++) this.cpu.step();
         }
       };
+      let firstSampleCycles = -1;
       await new Promise(resolve => {
         const slice = () => {
           const deadline = now() + 12;
@@ -4542,6 +4543,7 @@
           while (now() < deadline) {
             runCpuBatch(256);
             const produced = Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length);
+            if (firstSampleCycles < 0 && produced > 0) firstSampleCycles = this.bus.cycles;
             if (this.cpu.halted || produced >= WARMUP_TARGET_SAMPLES
                 || this.bus.cycles - cyclesAtStart >= WARMUP_MAX_CYCLES) { done = true; break; }
           }
@@ -4552,14 +4554,29 @@
       });
       const warmupWallMs = Math.max(1, now() - warmupWallStart);
 
-      const sourceRate = this._directSoundSampleRate(FALLBACK_SAMPLE_RATE);
+      const sourceRate = this._directSoundSampleRate(0);
       const biasOutput = this._soundBiasOutput();
       const warmCycles = this.bus.cycles - cyclesAtStart;
       const warmSeconds = warmCycles / GBA_CPU_HZ;
       const sourceSamples = Math.max(this.bus.fifoSamplesA.length, this.bus.fifoSamplesB.length);
-      const observedSourceRate = (warmSeconds > 0.05 && sourceSamples > 256)
-        ? Math.round(sourceSamples / warmSeconds) : sourceRate;
-      const playbackRate = Math.max(3000, Math.min(96000, observedSourceRate || sourceRate || FALLBACK_SAMPLE_RATE));
+      // Observed production rate measured from the FIRST sample onward — dividing by the
+      // whole warmup window (which includes driver-init silence) understated the rate,
+      // and the AudioContext then played slow and pitched down by the same ratio. Golden
+      // Sun's high-rate mixer (21kHz) lost ~22% this way while stock-mp2k games (init
+      // finishes almost immediately, so tiny error) sounded normal.
+      const postInitSeconds = firstSampleCycles >= 0 ? (this.bus.cycles - firstSampleCycles) / GBA_CPU_HZ : 0;
+      const observedSourceRate = (postInitSeconds > 0.02 && sourceSamples > 256)
+        ? Math.round(sourceSamples / postInitSeconds) : 0;
+      // The timer-derived rate is exact (computed from the TM reload feeding the FIFO),
+      // so prefer it whenever it roughly agrees with what we actually saw produced; the
+      // observed rate covers the case where the timer heuristic picked the wrong channel.
+      let playbackRate;
+      if (sourceRate && (!observedSourceRate || Math.abs(sourceRate - observedSourceRate) / sourceRate < 0.1)) {
+        playbackRate = sourceRate;
+      } else {
+        playbackRate = observedSourceRate || sourceRate || FALLBACK_SAMPLE_RATE;
+      }
+      playbackRate = Math.max(3000, Math.min(96000, playbackRate));
       // Emulated seconds per wall second over the warmup; below ~1.0 the stream cannot
       // keep up with real time and will underrun (audible gaps).
       const realtimeFactor = Math.round((warmSeconds / (warmupWallMs / 1000)) * 100) / 100;
@@ -4590,9 +4607,9 @@
         mode: 'stream',
         requestedSeconds: renderSeconds > 0 ? renderSeconds : null,
         sampleRate: playbackRate,
-        sourceRate: observedSourceRate,
-        fifoFillRate: observedSourceRate,
-        timerSourceRate: sourceRate,
+        sourceRate: observedSourceRate || playbackRate,
+        fifoFillRate: observedSourceRate || playbackRate,
+        timerSourceRate: sourceRate || null,
         outputRate: playbackRate,
         biasOutputRate: biasOutput.outputRate,
         dacBits: biasOutput.dacBits,

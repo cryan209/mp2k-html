@@ -221,13 +221,20 @@
       this.fifoDmaPhase = [0, 0]; // overflow counter for timer 0 and 1; DMA fires every 16
       this.wordWrites = new Map();
       this.fastMode = false;
+      this.diagnosticProbes = false;
       this.fifoQueueA = [];
       this.fifoQueueB = [];
+      this.fifoHeadA = 0;
+      this.fifoHeadB = 0;
+      this.fifoLenA = 0;
+      this.fifoLenB = 0;
       // Parallel to fifoQueueA/B: per-byte provenance (source addr + who last wrote it + the
       // cycle DMA actually read it), pushed/shifted in lockstep. Lets us trace a specific played
       // sample back to exactly which memory write produced it and how stale that read was.
       this.fifoQueueMetaA = [];
       this.fifoQueueMetaB = [];
+      this.fifoMetaHeadA = 0;
+      this.fifoMetaHeadB = 0;
       this.fifoSamplesA = []; // signed 8-bit DAC values consumed from FIFO A
       this.fifoSamplesB = []; // signed 8-bit DAC values consumed from FIFO B
       this.dsOnlySamplesA = []; // fifoSamplesA before PSG gets mixed in, for isolating which part is wrong
@@ -798,43 +805,97 @@
       if (timerSelB === timerCh) this._consumeFifoChannel('B');
     }
 
-    _consumeFifoChannel(channel) {
-      const queue = channel === 'A' ? this.fifoQueueA : this.fifoQueueB;
+    _fifoLength(channel) {
+      return channel === 'A' ? this.fifoLenA : this.fifoLenB;
+    }
+
+    _fifoPush(channel, value) {
+      if (channel === 'A') {
+        if (this.fifoLenA >= 32) return false;
+        this.fifoQueueA[(this.fifoHeadA + this.fifoLenA) & 31] = value;
+        this.fifoLenA++;
+        return true;
+      }
+      if (this.fifoLenB >= 32) return false;
+      this.fifoQueueB[(this.fifoHeadB + this.fifoLenB) & 31] = value;
+      this.fifoLenB++;
+      return true;
+    }
+
+    _fifoShift(channel) {
+      if (channel === 'A') {
+        if (!this.fifoLenA) return null;
+        const value = this.fifoQueueA[this.fifoHeadA] || 0;
+        this.fifoHeadA = (this.fifoHeadA + 1) & 31;
+        this.fifoLenA--;
+        return value;
+      }
+      if (!this.fifoLenB) return null;
+      const value = this.fifoQueueB[this.fifoHeadB] || 0;
+      this.fifoHeadB = (this.fifoHeadB + 1) & 31;
+      this.fifoLenB--;
+      return value;
+    }
+
+    _fifoMetaPush(channel, meta) {
       const metaQueue = channel === 'A' ? this.fifoQueueMetaA : this.fifoQueueMetaB;
-      const wasEmpty = !queue.length;
-      const value = queue.length ? queue.shift() : (channel === 'A' ? this.fifoLastA : this.fifoLastB);
-      const meta = wasEmpty ? null : metaQueue.shift();
+      const head = channel === 'A' ? this.fifoMetaHeadA : this.fifoMetaHeadB;
+      const len = this._fifoLength(channel);
+      metaQueue[(head + len - 1) & 31] = meta;
+    }
+
+    _fifoMetaShift(channel) {
+      const metaQueue = channel === 'A' ? this.fifoQueueMetaA : this.fifoQueueMetaB;
+      if (channel === 'A') {
+        const value = metaQueue[this.fifoMetaHeadA] || null;
+        this.fifoMetaHeadA = (this.fifoMetaHeadA + 1) & 31;
+        return value;
+      }
+      const value = metaQueue[this.fifoMetaHeadB] || null;
+      this.fifoMetaHeadB = (this.fifoMetaHeadB + 1) & 31;
+      return value;
+    }
+
+    _consumeFifoChannel(channel) {
+      const collectTrace = !this.fastMode || this.diagnosticProbes;
+      const wasEmpty = this._fifoLength(channel) === 0;
+      const shifted = wasEmpty ? null : this._fifoShift(channel);
+      const value = shifted == null ? (channel === 'A' ? this.fifoLastA : this.fifoLastB) : shifted;
+      const meta = (collectTrace && !wasEmpty) ? this._fifoMetaShift(channel) : null;
       const mixed = this._mixPsgInto(channel, value);
-      const trace = {
-        addr: meta ? meta.addr : null,
-        writeInfo: meta ? meta.writeInfo : (wasEmpty ? 'underrun-repeat' : '-'),
-        readCycles: meta ? meta.readCycles : null,
-        consumeCycles: this.cycles,
-        lagCycles: meta ? this.cycles - meta.readCycles : null,
-        // How many cycles before this byte was *read* (DMA-to-FIFO) it was last *written*
-        // by the CPU -- null means never written (uninitialized), and a value near the
-        // 14-VBlank refill-cycle length (~3.93M cycles) means DMA is consuming data left
-        // over from the previous pass rather than this pass's fresh write.
-        writeCycles: meta ? meta.writeCycles : null,
-        staleCycles: (meta && meta.writeCycles != null) ? meta.readCycles - meta.writeCycles : null,
-      };
       if (channel === 'A') {
         this.fifoLastA = value;
         this.fifoSamplesA.push(mixed);
-        this.dsOnlySamplesA.push(value);
-        this.dmaSrcTraceA.push(trace);
+        if (collectTrace) {
+          this.dsOnlySamplesA.push(value);
+          this.dmaSrcTraceA.push(this._sampleTrace(meta, wasEmpty));
+        }
       } else {
         this.fifoLastB = value;
         this.fifoSamplesB.push(mixed);
-        this.dsOnlySamplesB.push(value);
-        this.dmaSrcTraceB.push(trace);
+        if (collectTrace) {
+          this.dsOnlySamplesB.push(value);
+          this.dmaSrcTraceB.push(this._sampleTrace(meta, wasEmpty));
+        }
       }
       // Hardware is level-triggered: on each timer overflow, if the FIFO holds 16 bytes
       // or fewer and a special-timing DMA is armed, it transfers 16 more. The previous
       // edge-triggered heuristic dropped requests that landed while the game had the DMA
       // momentarily disabled for a re-arm, leaving the FIFO to underrun before refills
       // resumed — an audible click backed by a stale repeated byte.
-      if (queue.length <= 16) this._requestSoundFifoDma(channel);
+      if (this._fifoLength(channel) <= 16) this._requestSoundFifoDma(channel);
+    }
+
+    _sampleTrace(meta, wasEmpty) {
+      return {
+        addr: meta ? meta.addr : null,
+        writeInfo: meta ? meta.writeInfo : (wasEmpty ? 'underrun-repeat' : '-'),
+        readCycles: meta ? meta.readCycles : null,
+        consumeCycles: this.cycles,
+        lagCycles: meta ? this.cycles - meta.readCycles : null,
+        writeCycles: meta ? meta.writeCycles : null,
+        staleCycles: (meta && meta.writeCycles != null) ? meta.readCycles - meta.writeCycles : null,
+      };
     }
 
     // Live PSG frequency/length-enable update: called on EVERY write to SOUND1CNT_X (ch0) or
@@ -1153,12 +1214,13 @@
       }
       const src = this.dmaSourceLatch[ch] >>> 0;
       const dst = this.dmaDestLatch[ch] >>> 0; // should be FIFO address (0x040000a0 or 0x040000a4)
-      const words = [];
+      const logDma = !this.fastMode || this.diagnosticProbes;
+      const words = logDma ? [] : null;
       // Sound FIFO: always transfer 4 words (16 bytes), dst fixed, src advances
       for (let i = 0; i < 4; i++) {
         const wordAddr = (src + i * 4) >>> 0;
         const word = this.read32(wordAddr);
-        words.push(word >>> 0);
+        if (logDma) words.push(word >>> 0);
         this._writeSoundFifo(dst, word, wordAddr);
         // Direct, render-wide tally of how often the DMA source word is actually zero at the
         // moment it's read, regardless of what it held a moment earlier or later — this is the
@@ -1167,22 +1229,24 @@
         if (word === 0) this.fifoDmaZeroWords = (this.fifoDmaZeroWords || 0) + 1;
         else this.fifoDmaNonZeroWords = (this.fifoDmaNonZeroWords || 0) + 1;
       }
-      const entry = {
-        ch,
-        src,
-        srcHex: tools.hex(src),
-        canonicalSrcHex: tools.hex(this.canonicalAddr(src)),
-        dstHex: tools.hex(dst),
-        words: words.map(word => tools.hex(word)),
-        nonZeroWords: words.filter(word => word !== 0).length,
-        writers: words.map((_, i) => {
-          const write = this.soundBufferWriteMap.get(this.canonicalAddr(src + i * 4) & ~3);
-          return write ? `${write.valueHex}@${write.pcHex}/${write.kind}` : '-';
-        }),
-      };
-      if (this.fifoDmaLog.length < 8 || entry.nonZeroWords) {
-        this.fifoDmaLog.push(entry);
-        if (this.fifoDmaLog.length > 48) this.fifoDmaLog.shift();
+      if (logDma) {
+        const entry = {
+          ch,
+          src,
+          srcHex: tools.hex(src),
+          canonicalSrcHex: tools.hex(this.canonicalAddr(src)),
+          dstHex: tools.hex(dst),
+          words: words.map(word => tools.hex(word)),
+          nonZeroWords: words.filter(word => word !== 0).length,
+          writers: words.map((_, i) => {
+            const write = this.soundBufferWriteMap.get(this.canonicalAddr(src + i * 4) & ~3);
+            return write ? `${write.valueHex}@${write.pcHex}/${write.kind}` : '-';
+          }),
+        };
+        if (this.fifoDmaLog.length < 8 || entry.nonZeroWords) {
+          this.fifoDmaLog.push(entry);
+          if (this.fifoDmaLog.length > 48) this.fifoDmaLog.shift();
+        }
       }
       // Advance the internal DMA source latch. The visible DMAxSAD register is an initial value register.
       this.dmaSourceLatch[ch] = this._advanceDmaSource(ch, src, 16);
@@ -1213,9 +1277,10 @@
     _writeSoundFifo(fifoAddr, word, sourceAddr) {
       const channel = fifoAddr === 0x040000a0 ? 'A' : fifoAddr === 0x040000a4 ? 'B' : null;
       if (channel) {
+        const collectTrace = !this.fastMode || this.diagnosticProbes;
         for (let i = 0; i < 4; i++) {
           let meta = null;
-          if (sourceAddr !== undefined) {
+          if (collectTrace && sourceAddr !== undefined) {
             const byteAddr = (sourceAddr + i) >>> 0;
             const canonical = this.canonicalAddr(byteAddr);
             const write = this.soundBufferWriteMap.get(canonical & ~3);
@@ -1241,22 +1306,26 @@
     }
 
     _pushSoundFifoByte(channel, value, meta = null) {
-      const queue = channel === 'A' ? this.fifoQueueA : channel === 'B' ? this.fifoQueueB : null;
-      const metaQueue = channel === 'A' ? this.fifoQueueMetaA : channel === 'B' ? this.fifoQueueMetaB : null;
-      if (!queue || queue.length >= 32) return;
+      if (channel !== 'A' && channel !== 'B') return;
       const byte = value & 0xff;
-      queue.push(byte < 128 ? byte : byte - 256);
-      metaQueue.push(meta);
+      if (!this._fifoPush(channel, byte < 128 ? byte : byte - 256)) return;
+      if (!this.fastMode || this.diagnosticProbes) this._fifoMetaPush(channel, meta);
     }
 
     _resetSoundFifo(channel) {
       if (channel === 'A') {
         this.fifoQueueA = [];
         this.fifoQueueMetaA = [];
+        this.fifoHeadA = 0;
+        this.fifoLenA = 0;
+        this.fifoMetaHeadA = 0;
         this.fifoLastA = 0;
       } else if (channel === 'B') {
         this.fifoQueueB = [];
         this.fifoQueueMetaB = [];
+        this.fifoHeadB = 0;
+        this.fifoLenB = 0;
+        this.fifoMetaHeadB = 0;
         this.fifoLastB = 0;
       }
     }
@@ -3816,6 +3885,7 @@
 
       // Enable fast mode — skip all diagnostic tracking
       this.bus.fastMode = true;
+      this.bus.diagnosticProbes = debug;
       this.cpu.fastMode = true;
       this.cpu.diagnosticProbes = debug;
       this.bus.timerReloadLog = [];
@@ -3828,8 +3898,14 @@
       this.bus._seqCallCount = 0;
       this.bus.fifoQueueA = [];
       this.bus.fifoQueueB = [];
+      this.bus.fifoHeadA = 0;
+      this.bus.fifoHeadB = 0;
+      this.bus.fifoLenA = 0;
+      this.bus.fifoLenB = 0;
       this.bus.fifoQueueMetaA = [];
       this.bus.fifoQueueMetaB = [];
+      this.bus.fifoMetaHeadA = 0;
+      this.bus.fifoMetaHeadB = 0;
       this.bus.fifoSamplesA = [];
       this.bus.fifoSamplesB = [];
       this.bus.dsOnlySamplesA = [];
@@ -3918,6 +3994,7 @@
       // builds a large diagnostic object for the main-page debug dump.
       if (debug) {
         this.bus.fastMode = false;
+        this.bus.diagnosticProbes = true;
         this.cpu.fastMode = false;
         this.cpu.diagnosticProbes = true;
         this.cpu.pcHits = new Map();
@@ -3925,6 +4002,7 @@
         this.cpu.branches = [];
         this.runDiagnostics(0);
         this.bus.fastMode = true;
+        this.bus.diagnosticProbes = debug;
         this.cpu.fastMode = true;
         this.cpu.diagnosticProbes = debug;
       }
@@ -3961,8 +4039,8 @@
       this.diagnostics.fifo.renderSamplesB = this.bus.fifoSamplesB.length;
       this.diagnostics.fifo.fillBytesA = this.bus.fifoFillBytesA;
       this.diagnostics.fifo.fillBytesB = this.bus.fifoFillBytesB;
-      this.diagnostics.fifo.queueA = this.bus.fifoQueueA.length;
-      this.diagnostics.fifo.queueB = this.bus.fifoQueueB.length;
+      this.diagnostics.fifo.queueA = this.bus._fifoLength('A');
+      this.diagnostics.fifo.queueB = this.bus._fifoLength('B');
       this.diagnostics.fifo.dmaLog = this.bus.fifoDmaLog.slice();
 
       if (this.cpu.halted && sourceSamples === 0) return this.diagnostics;
@@ -4103,13 +4181,16 @@
       const prevDiagnosticProbes = this.cpu.diagnosticProbes;
       const prevCpuFastMode = this.cpu.fastMode;
       const prevBusFastMode = this.bus.fastMode;
+      const prevBusDiagnosticProbes = this.bus.diagnosticProbes;
       this.cpu.fastMode = false;
       this.bus.fastMode = false;
+      this.bus.diagnosticProbes = true;
       this.cpu.diagnosticProbes = true;
       const cpu = this.cpu.run(maxInstructions);
       this.cpu.diagnosticProbes = prevDiagnosticProbes;
       this.cpu.fastMode = prevCpuFastMode;
       this.bus.fastMode = prevBusFastMode;
+      this.bus.diagnosticProbes = prevBusDiagnosticProbes;
       const ranInstructions = cpu.instructions - startInstructions;
       const events = this.bus.events;
       const lastBranch = cpu.branches?.slice(-1)[0] || null;

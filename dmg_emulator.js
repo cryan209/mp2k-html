@@ -112,6 +112,7 @@
       if (typeof AudioContext === 'undefined' && typeof webkitAudioContext === 'undefined') {
         throw new Error('Web Audio is not available in this environment');
       }
+      this.stop(); // don't let a previous song's buffer keep playing underneath the new one
       this._initCpu(songIndex);
       const Ctx = typeof AudioContext !== 'undefined' ? AudioContext : webkitAudioContext;
       const ctx = this.audioCtx || (this.audioCtx = new Ctx());

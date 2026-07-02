@@ -5239,8 +5239,9 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
   if (document.getElementById('engineSelect')?.value === 'gbs-lle') {
     try {
       if (!standardGbsEngine?.canPlay()) { setStatus('Load a GBS file first.'); return; }
-      standardGbsEngine.play(0);
-      setStatus(`GBS LLE streaming: ${standardGbsEngine.header.title}`);
+      const songIdx = parseInt(document.getElementById('songSelect')?.value, 10) || 0;
+      standardGbsEngine.play(songIdx);
+      setStatus(`GBS LLE streaming: ${standardGbsEngine.header.title} (song ${songIdx + 1}/${standardGbsEngine.header.songCount})`);
     } catch (err) {
       setStatus('GBS playback failed: ' + err.message);
     }
@@ -5585,7 +5586,8 @@ document.getElementById('btnExportWav').addEventListener('click', async () => {
 });
 
 document.getElementById('btnPrev').addEventListener('click', async () => {
-  if (document.getElementById('engineSelect')?.value === 'gsf-lle') {
+  const engineVal = document.getElementById('engineSelect')?.value;
+  if (engineVal === 'gsf-lle' || engineVal === 'gbs-lle') {
     const sel = document.getElementById('songSelect');
     if (!sel?.options?.length) return;
     currentSongListIdx = Math.max(0, sel.selectedIndex - 1);
@@ -5601,7 +5603,8 @@ document.getElementById('btnPrev').addEventListener('click', async () => {
 });
 
 document.getElementById('btnNext').addEventListener('click', async () => {
-  if (document.getElementById('engineSelect')?.value === 'gsf-lle') {
+  const engineVal = document.getElementById('engineSelect')?.value;
+  if (engineVal === 'gsf-lle' || engineVal === 'gbs-lle') {
     const sel = document.getElementById('songSelect');
     if (!sel?.options?.length) return;
     currentSongListIdx = Math.min(sel.options.length - 1, sel.selectedIndex + 1);
@@ -5748,6 +5751,7 @@ document.getElementById('btnClearLog').addEventListener('click', () => {
 document.getElementById('songSelect').addEventListener('change', (e) => {
   const sel = e.target;
   currentSongListIdx = sel.selectedIndex;
+  if (document.getElementById('engineSelect')?.value === 'gbs-lle') return; // GBS songs have no MP2K voicegroup to preview
   const idx = parseInt(sel.value, 10);
   if (!player.seq && Number.isFinite(idx) && player.setVoiceGroupForSong(idx)) {
     updateSynthPanel(`Selected song ${idx} voicegroup ${hex(player.voiceGroupOff, 6)} loaded for preview.`);
@@ -6376,6 +6380,17 @@ async function initWithBuffer(buf, source = {}) {
       document.getElementById('engineSelect').value = 'gbs-lle';
       document.getElementById('dropmsg').style.display = 'none';
       document.getElementById('btnPlay').disabled = false;
+      const gbsSel = document.getElementById('songSelect');
+      gbsSel.innerHTML = '';
+      for (let i = 0; i < header.songCount; i++) {
+        const opt = document.createElement('option');
+        opt.value = i; // StandardGbsEngine.play() takes a 0-based song index
+        opt.textContent = `Song ${header.firstSong + i}`;
+        gbsSel.appendChild(opt);
+      }
+      gbsSel.selectedIndex = 0;
+      gbsSel.disabled = header.songCount <= 1;
+      currentSongListIdx = 0;
       setStatus(`GBS loaded: "${header.title}" by ${header.author} (${header.songCount} song${header.songCount === 1 ? '' : 's'}) — press ▶`);
       return;
     }

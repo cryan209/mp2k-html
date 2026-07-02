@@ -63,6 +63,16 @@
       const h = this.header;
       this.cpu.sp = h.stackPointer;
 
+      // Real hardware never runs a cartridge's own code without the boot ROM having already
+      // powered on the APU (NR52), set a working volume (NR50), and enabled panning for all
+      // 4 channels (NR51) — GBS driver code is written assuming that already happened, and
+      // generally doesn't repeat it, so without this every channel would be silently muted
+      // by NR51 defaulting to 0 (no channel routed to either speaker) even once the driver
+      // triggers them.
+      this.bus.write8(0xff26, 0x80); // NR52: power on
+      this.bus.write8(0xff24, 0x77); // NR50: max volume both sides, ignore VIN
+      this.bus.write8(0xff25, 0xff); // NR51: all 4 channels -> both left and right
+
       // Synthesize CALL playAddr; RETI in HRAM (writable, unlike ROM — GBS rips don't include
       // a real vector table since the ripping tool only extracts the driver routines) and
       // redirect whichever vector the driver expects to be ticked from at it, per the GBS

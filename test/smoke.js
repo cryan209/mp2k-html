@@ -1042,6 +1042,42 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   var finite = true;
   for (var i = 0; i < rendered.left.length; i++) if (!isFinite(rendered.left[i]) || !isFinite(rendered.right[i])) finite = false;
   check(finite, 'StandardGbsEngine.renderSamples output is finite (no NaN/Infinity)');
+
+  // Regression check: a driver that triggers a square channel via LDH writes must actually
+  // be audible. This would have caught the bug where NR50/NR51/NR52 were never bootstrapped
+  // (matching what the real DMG boot ROM does before handing control to a cartridge), which
+  // left NR51 at its power-on-default of 0 — no channel routed to either speaker, so every
+  // GBS file played completely silently regardless of what the driver did.
+  (function () {
+    var rom = [
+      0x3e, 0xf0, 0xe0, 0x12, // LD A,0xF0 ; LDH (0x12),A  -- NR12: vol 15, no envelope
+      0x3e, 0x00, 0xe0, 0x13, // LD A,0x00 ; LDH (0x13),A  -- NR13: freq lo
+      0x3e, 0x87, 0xe0, 0x14, // LD A,0x87 ; LDH (0x14),A  -- NR14: freq hi + trigger
+      0xc9,                   // RET
+    ];
+    var buf2 = new ArrayBuffer(GbsTools.HEADER_SIZE + rom.length);
+    var view2 = new DataView(buf2);
+    var u82 = new Uint8Array(buf2);
+    u82[0] = 0x47; u82[1] = 0x42; u82[2] = 0x53; u82[3] = 0x01;
+    view2.setUint8(0x04, 1); view2.setUint8(0x05, 1);
+    view2.setUint16(0x06, 0x0400, true);
+    view2.setUint16(0x08, 0x0400, true);
+    view2.setUint16(0x0a, 0x0400, true); // play == init here; only init's trigger matters for this check
+    view2.setUint16(0x0c, 0xdff0, true);
+    view2.setUint8(0x0e, 0); view2.setUint8(0x0f, 0);
+    u82.set(rom, GbsTools.HEADER_SIZE);
+
+    var eng2 = new StandardGbsEngine();
+    eng2.loadBuffer(buf2);
+    eng2._initCpu(0);
+    check(eng2.bus.io[0x24] === 0x77, '_initCpu bootstraps NR50 to audible volume (got 0x' + eng2.bus.io[0x24].toString(16) + ')');
+    check(eng2.bus.io[0x25] === 0xff, '_initCpu bootstraps NR51 to route all channels to both speakers (got 0x' + eng2.bus.io[0x25].toString(16) + ')');
+    check(eng2.bus.psg.square[0].enabled === true, 'square1 channel triggered by driver (enabled=' + eng2.bus.psg.square[0].enabled + ')');
+    var out = eng2.renderSamples(64, 44100);
+    var hasNonzero = false;
+    for (var i = 0; i < out.left.length; i++) if (out.left[i] !== 0 || out.right[i] !== 0) hasNonzero = true;
+    check(hasNonzero, 'StandardGbsEngine produces audible (nonzero) output for a triggered square channel');
+  })();
 })();
 
 print(failures === 0 ? 'ALL PASS' : failures + ' FAILURES');

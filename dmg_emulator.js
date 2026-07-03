@@ -8,6 +8,8 @@
   if (!z80) throw new Error('dmg_emulator.js requires z80_emulator.js to be loaded first');
 
   const DMG_CPU_HZ = 4194304;
+  const DMG_CYCLES_PER_FRAME = 70224;
+  const TAC_PERIOD = [1024, 16, 64, 256];
   const VBLANK_VECTOR = 0x40, TIMER_VECTOR = 0x50;
   // Scratch memory region used to synthesize interrupt-vector stub routines (CALL playAddr;
   // RETI) — GBS rips generally don't include real vector-table code, since the ripping tool
@@ -27,6 +29,9 @@
       this.sources = new Set();
       this.playTimer = null;
       this.nextStartTime = 0;
+      this.nextPlayCycle = 0;
+      this.playPeriodCycles = DMG_CYCLES_PER_FRAME;
+      this.renderCycle = 0;
     }
 
     // Clears any loaded song, matching StandardGsfEngine.reset()'s role: called when the UI
@@ -113,6 +118,37 @@
         }
       }
       this.cpu.ime = true;
+      this.playPeriodCycles = h.usesTimer ? TAC_PERIOD[h.timerControl & 0x03] : DMG_CYCLES_PER_FRAME;
+      this.nextPlayCycle = this.bus.cycles + this.playPeriodCycles;
+      this.renderCycle = this.bus.cycles;
+    }
+
+    _runPlayInterrupt(guardLimit = 200000) {
+      const returnPc = this.cpu.pc;
+      const vector = this.header.usesTimer ? TIMER_VECTOR : VBLANK_VECTOR;
+      const beforeService = this.cpu.cycles;
+      this.cpu.serviceVector(this.bus.vectorOverride[vector] ?? vector);
+      this.bus.tick(this.cpu.cycles - beforeService, this.cpu);
+      let guard = 0;
+      while (this.cpu.pc !== returnPc && guard++ < guardLimit) {
+        const before = this.cpu.cycles;
+        this.cpu.step();
+        this.bus.tick(this.cpu.cycles - before, this.cpu);
+        if (this.cpu.illegal || this.cpu.stopped) {
+          this.error = this.cpu.reason || 'GBS routine stopped unexpectedly';
+          break;
+        }
+      }
+      this.cpu.ime = true;
+    }
+
+    _advancePlaybackTo(targetCycle) {
+      while (this.nextPlayCycle && this.nextPlayCycle <= targetCycle) {
+        this.bus.tickPassive(this.nextPlayCycle - this.bus.cycles);
+        this._runPlayInterrupt();
+        this.nextPlayCycle += this.playPeriodCycles;
+      }
+      this.bus.tickPassive(targetCycle - this.bus.cycles);
     }
 
     // Pure, Web-Audio-agnostic rendering: advances the CPU/bus for enough cycles to produce
@@ -122,16 +158,9 @@
       const left = new Float32Array(count);
       const right = new Float32Array(count);
       const cyclesPerSample = DMG_CPU_HZ / sampleRate;
-      let cycleBudget = 0;
       for (let i = 0; i < count; i++) {
-        cycleBudget += cyclesPerSample;
-        while (cycleBudget > 0) {
-          const before = this.cpu.cycles;
-          this.cpu.step();
-          const delta = this.cpu.cycles - before;
-          this.bus.tick(delta, this.cpu);
-          cycleBudget -= delta;
-        }
+        this.renderCycle += cyclesPerSample;
+        this._advancePlaybackTo(this.renderCycle);
         const [l, r] = this.bus.mixSample();
         left[i] = Math.max(-1, Math.min(1, l / 15));
         right[i] = Math.max(-1, Math.min(1, r / 15));

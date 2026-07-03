@@ -577,6 +577,28 @@
 
     requestInterrupt(bit) { this.if_ |= (1 << bit); }
 
+    // Advances passive hardware time without dispatching CPU interrupts. GBS playback uses
+    // this for the common "host calls play routine periodically" model: the driver code runs
+    // only at vblank/timer cadence, while the APU continues evolving between calls.
+    tickPassive(deltaCycles) {
+      deltaCycles = Math.max(0, deltaCycles | 0);
+      this.cycles += deltaCycles;
+      this.divCounter = (this.divCounter + deltaCycles) & 0xffff;
+
+      const tac = this.io[0x07];
+      if (tac & 0x04) {
+        this.timaCounter += deltaCycles;
+        const period = TAC_PERIOD[tac & 0x03];
+        while (this.timaCounter >= period) {
+          this.timaCounter -= period;
+          const next = (this.io[0x05] + 1) & 0xff;
+          this.io[0x05] = next === 0 ? this.io[0x06] : next;
+        }
+      }
+
+      this.psg.stepCycles(this.cycles);
+    }
+
     // Advances DIV/TIMA/synthetic-vblank timing and the shared PSG's frame sequencer by
     // deltaCycles (the cycle cost of the instruction the CPU just executed). Call once per
     // cpu.step() from the host engine's run loop.

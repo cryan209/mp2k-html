@@ -6404,18 +6404,21 @@ function parseGbsM3uTrack(text, fallbackName = '') {
   if (!Number.isFinite(index) || index < 0) return null;
   let title = fields[1] || fallbackName.replace(/\.m3u$/i, '');
   title = title.replace(/\s+-\s+.*$/, '').trim() || fallbackName.replace(/\.m3u$/i, '');
-  return { index, title, length: fields[2] || '' };
+  const length = fields[2] || '';
+  const parts = length.split(':').map(n => parseInt(n, 10));
+  const durationSeconds = parts.length === 2 && parts.every(Number.isFinite) ? parts[0] * 60 + parts[1] : 0;
+  return { index, title, length, durationSeconds, orderName: fallbackName };
 }
 
 function gbsPlaylistTracks(files, gbsKey) {
   const tracks = Object.keys(files || {})
     .filter(k => /\.m3u$/i.test(k))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
     .map(k => parseGbsM3uTrack(files[k], k))
-    .filter(Boolean)
-    .sort((a, b) => a.index - b.index || a.title.localeCompare(b.title));
+    .filter(Boolean);
   const seen = new Set();
   return tracks.filter(track => {
-    const key = String(track.index);
+    const key = `${track.orderName}:${track.index}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -6445,9 +6448,14 @@ function loadGbsIntoUi(buf, playlistTracks = []) {
     opt.textContent = track.length ? `${track.title} (${track.length})` : track.title;
     gbsSel.appendChild(opt);
   }
-  gbsSel.selectedIndex = 0;
+  const defaultTrack = playlistTracks.length && /^opening\b/i.test(tracks[0]?.title || '')
+    ? tracks.findIndex(track => track.durationSeconds >= 20 && !/^opening\b/i.test(track.title || ''))
+    : playlistTracks.length && tracks[0]?.durationSeconds > 0 && tracks[0].durationSeconds < 15
+      ? tracks.findIndex(track => track.durationSeconds >= 20)
+    : -1;
+  gbsSel.selectedIndex = defaultTrack >= 0 ? defaultTrack : 0;
   gbsSel.disabled = tracks.length <= 1;
-  currentSongListIdx = 0;
+  currentSongListIdx = gbsSel.selectedIndex;
   const trackCount = tracks.length || header.songCount;
   setStatus(`GBS loaded: "${header.title}" by ${header.author} (${trackCount} track${trackCount === 1 ? '' : 's'}) — press ▶`);
   return header;

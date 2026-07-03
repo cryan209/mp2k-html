@@ -23,6 +23,10 @@
       this.bus = null;
       this.cpu = null;
       this.error = null;
+      this.source = null;
+      this.sources = new Set();
+      this.playTimer = null;
+      this.nextStartTime = 0;
     }
 
     // Clears any loaded song, matching StandardGsfEngine.reset()'s role: called when the UI
@@ -135,9 +139,27 @@
       return { left, right };
     }
 
-    // Browser playback: renders into a Web Audio buffer and starts it. Kept minimal (no
-    // FIFO-rate-detection warmup like StandardGsfEngine needs, since GBS has no Direct Sound
-    // channel to derive a rate from — we simply choose the AudioContext's own sample rate).
+    _scheduleChunk(ctx, count) {
+      if (!this.cpu || !this.bus) return 0;
+      const { left, right } = this.renderSamples(count, ctx.sampleRate);
+      const buffer = ctx.createBuffer(2, count, ctx.sampleRate);
+      buffer.getChannelData(0).set(left);
+      buffer.getChannelData(1).set(right);
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(ctx.destination);
+      this.sources.add(src);
+      src.onended = () => this.sources.delete(src);
+      const startAt = Math.max(ctx.currentTime + 0.02, this.nextStartTime || 0);
+      src.start(startAt);
+      this.nextStartTime = startAt + buffer.duration;
+      this.source = src;
+      return buffer.duration;
+    }
+
+    // Browser playback: continuously schedules small Web Audio buffers. Rendering a whole
+    // song-sized block on click stalls the browser badly for GBS files, since every sample
+    // advances the SM83/APU; chunking keeps the UI responsive and avoids one-shot blips.
     async play(songIndex = 0) {
       if (typeof AudioContext === 'undefined' && typeof webkitAudioContext === 'undefined') {
         throw new Error('Web Audio is not available in this environment');
@@ -147,22 +169,24 @@
       const Ctx = typeof AudioContext !== 'undefined' ? AudioContext : webkitAudioContext;
       const ctx = this.audioCtx || (this.audioCtx = new Ctx());
       if (ctx.state === 'suspended') await ctx.resume();
-      const seconds = 4; // one streaming chunk; caller/UI is expected to re-invoke for longer playback
-      const count = Math.floor(ctx.sampleRate * seconds);
-      const { left, right } = this.renderSamples(count, ctx.sampleRate);
-      const buffer = ctx.createBuffer(2, count, ctx.sampleRate);
-      buffer.getChannelData(0).set(left);
-      buffer.getChannelData(1).set(right);
-      const src = ctx.createBufferSource();
-      src.buffer = buffer;
-      src.connect(ctx.destination);
-      src.start();
-      this.source = src;
-      return src;
+      const chunkSamples = Math.max(1024, Math.floor(ctx.sampleRate * 0.10));
+      this.nextStartTime = ctx.currentTime + 0.03;
+      const pump = () => {
+        if (!this.cpu || !this.bus) return;
+        while (this.nextStartTime < ctx.currentTime + 0.25) this._scheduleChunk(ctx, chunkSamples);
+        this.playTimer = setTimeout(pump, 60);
+      };
+      pump();
+      return this.source;
     }
 
     stop() {
-      if (this.source) { try { this.source.stop(); } catch (_) {} this.source = null; }
+      if (this.playTimer) { clearTimeout(this.playTimer); this.playTimer = null; }
+      if (this.sources) {
+        for (const src of this.sources) { try { src.stop(); } catch (_) {} }
+        this.sources.clear();
+      }
+      this.source = null;
     }
 
     summary() {

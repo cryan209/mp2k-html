@@ -31,6 +31,9 @@
       this.a = 0; this.f = 0; this.b = 0; this.c = 0; this.d = 0; this.e = 0; this.h = 0; this.l = 0;
       this.sp = 0xfffe; this.pc = 0;
       this.ime = false;
+      this._eiArmed = false;
+      this._eiRequested = false;
+      this._haltBugPending = false;
       this.halted = false;
       this.stopped = false;
       this.illegal = false;
@@ -253,8 +256,25 @@
 
     step() {
       if (this.halted || this.stopped || this.illegal) { this.cycles += 4; return; }
-      const opcode = this._fetch8();
+      // EI's IME-enable takes effect only after the instruction following EI has fully
+      // executed (real hardware quirk that lets `EI \ RET` atomically re-enable interrupts
+      // and return without the interrupt preempting the RET). _eiArmed carries that one-step
+      // delay: EI sets it, and it's committed to `ime` at the top of the step *after* the one
+      // where it was set (i.e. after the delay instruction has already executed via the
+      // fetch/exec below).
+      if (this._eiArmed) { this.ime = true; this._eiArmed = false; }
+      let opcode;
+      if (this._haltBugPending) {
+        // HALT bug: if HALT executes with IME=0 while an interrupt is already pending, real
+        // hardware fails to halt but also fails to advance PC past the *next* fetch — so the
+        // byte right after HALT gets fetched and executed twice.
+        opcode = this._rd(this.pc);
+        this._haltBugPending = false;
+      } else {
+        opcode = this._fetch8();
+      }
       this._exec(opcode);
+      if (this._eiRequested) { this._eiArmed = true; this._eiRequested = false; }
     }
     _stepFast(count) { for (let i = 0; i < count; i++) this.step(); }
 
@@ -275,7 +295,13 @@
       const z = opcode & 7;
 
       if (x === 1) { // LD r,r' (0x76 = HALT)
-        if (y === 6 && z === 6) { this.halted = true; this.cycles += 4; return; }
+        if (y === 6 && z === 6) {
+          const pending = (this.bus.ie & this.bus.if_ & 0x1f) !== 0;
+          if (!this.ime && pending) this._haltBugPending = true; // HALT bug: see step()
+          else this.halted = true;
+          this.cycles += 4;
+          return;
+        }
         this._writeR(y, this._readR(z));
         this.cycles += (y === 6 || z === 6) ? 8 : 4;
         return;
@@ -293,7 +319,7 @@
       if (z === 0) {
         if (y === 0) { this.cycles += 4; return; } // NOP
         if (y === 1) { const nn = this._fetch16(); const v = this.sp; this._wr(nn, v & 0xff); this._wr(u16(nn + 1), (v >>> 8) & 0xff); this.cycles += 20; return; } // LD (nn),SP
-        if (y === 2) { this._fetch8(); this.stopped = true; this.cycles += 4; return; } // STOP (2-byte; not really implemented, GBS drivers don't rely on it)
+        if (y === 2) { this.stopped = true; this.cycles += 4; return; } // STOP -- does not consume the conventional 0x00 padding byte that follows it
         if (y === 3) { const e = signed8(this._fetch8()); this.pc = u16(this.pc + e); this.cycles += 12; return; } // JR e
         const e = signed8(this._fetch8()); // JR cc,e (cc = NZ,Z,NC,C)
         if (this._checkCond(y - 4)) { this.pc = u16(this.pc + e); this.cycles += 12; } else this.cycles += 8;
@@ -382,7 +408,7 @@
         if (y === 0) { this.pc = this._fetch16(); this.cycles += 16; return; } // JP nn
         if (y === 1) { this._execCb(); return; } // unreachable: 0xcb intercepted earlier
         if (y === 6) { this.ime = false; this.cycles += 4; return; } // DI
-        if (y === 7) { this.ime = true; this.cycles += 4; return; } // EI
+        if (y === 7) { this._eiRequested = true; this.cycles += 4; return; } // EI (see step() for its 1-instruction delay)
         this._illegalOpcode(); return; // y=2,3,4,5: OUT/IN/EX(SP),HL/EX DE,HL don't exist on GB
       }
       if (z === 4) { // CALL cc,nn (only NZ,Z,NC,C exist)
@@ -453,6 +479,11 @@
       this.rom.set(bytes.subarray(0, Math.min(bytes.length, this.rom.length)));
       this.romBank = 1; // MBC5-style single bank-select register (0x2000-0x3FFF), per the
                          // simple bank-switching convention real .gbs rips assume
+      this.vram = new Uint8Array(0x2000);  // 8KB, 0x8000-0x9FFF -- unused by a headless player
+                                            // (no PPU), but must still behave like real RAM
+      this.eram = new Uint8Array(0x2000);  // 8KB, 0xA000-0xBFFF cartridge RAM -- some drivers
+                                            // (e.g. Pokemon's, which has battery-backed cart RAM)
+                                            // use this as scratch/work RAM, not just save data
       this.wram = new Uint8Array(0x2000); // 8KB, 0xC000-0xDFFF, mirrored at 0xE000-0xFDFF
       this.hram = new Uint8Array(0x7f);   // 0xFF80-0xFFFE
       this.io = new Uint8Array(0x80);     // 0xFF00-0xFF7F, for registers PsgDmg/timer don't own
@@ -476,6 +507,8 @@
       addr &= 0xffff;
       if (addr < 0x4000) return this.rom[addr] || 0; // fixed bank 0
       if (addr < 0x8000) return this.rom[this._bankOffset(addr) % this.rom.length] || 0; // switchable bank
+      if (addr < 0xa000) return this.vram[addr - 0x8000];
+      if (addr < 0xc000) return this.eram[addr - 0xa000];
       if (addr >= 0xc000 && addr < 0xe000) return this.wram[addr - 0xc000];
       if (addr >= 0xe000 && addr < 0xfe00) return this.wram[addr - 0xe000]; // echo RAM
       if (addr >= 0xff10 && addr <= 0xff23) return this.psg.readReg(addr - 0xff10);
@@ -493,8 +526,18 @@
 
     write8(addr, value) {
       addr &= 0xffff; value &= 0xff;
-      if (addr >= 0x2000 && addr < 0x4000) { this.romBank = value % this.bankCount; return; } // MBC5-style bank select (unlike MBC1, bank 0 is a valid switchable-window value)
+      if (addr >= 0x2000 && addr < 0x4000) {
+        // MBC1/MBC3-style bank select: bank 0 can never be mapped into the switchable window
+        // (0x4000-0x7FFF), so a write of 0 aliases to bank 1 -- this is the convention the
+        // vast majority of real cartridges use (MBC5, which allows literal bank 0 here, is
+        // the exception, mostly limited to later GBC-enhanced titles).
+        const bank = value % this.bankCount;
+        this.romBank = bank === 0 ? 1 : bank;
+        return;
+      }
       if (addr < 0x8000) return; // other ROM-area writes are bank-control regs this simple loader doesn't need
+      if (addr < 0xa000) { this.vram[addr - 0x8000] = value; return; }
+      if (addr < 0xc000) { this.eram[addr - 0xa000] = value; return; }
       if (addr >= 0xc000 && addr < 0xe000) { this.wram[addr - 0xc000] = value; return; }
       if (addr >= 0xe000 && addr < 0xfe00) { this.wram[addr - 0xe000] = value; return; }
       if (addr >= 0xff10 && addr <= 0xff23) { this.psg.writeReg(addr - 0xff10, value, this.cycles); return; }

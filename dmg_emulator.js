@@ -99,7 +99,11 @@
       this.cpu.pc = h.initAddr;
       this.cpu._push16(SENTINEL);
       let guard = 0;
-      while (this.cpu.pc !== SENTINEL && guard++ < 2_000_000) this.cpu.step();
+      while (this.cpu.pc !== SENTINEL && guard++ < 2_000_000) {
+        const before = this.cpu.cycles;
+        this.cpu.step();
+        this.bus.tick(this.cpu.cycles - before, this.cpu);
+      }
       this.cpu.ime = true;
     }
 

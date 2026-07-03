@@ -689,6 +689,7 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
     var bus = {
       read8: function (a) { return mem[a & 0xffff]; },
       write8: function (a, v) { mem[a & 0xffff] = v & 0xff; },
+      ie: 0, if_: 0, // real DMG interrupt-controller fields, settable by tests that need them (e.g. HALT bug)
     };
     var cpu = new Sm83Cpu(bus);
     cpu.pc = org;
@@ -815,12 +816,15 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
       0x31, 0x00, 0x90, // LD SP,0x9000
       0xf3,             // DI
       0xfb,             // EI
+      0x00,             // NOP -- real hardware delays EI's effect until after this instruction
       0xc3, 0x00, 0x00, // JP 0x0000 (would loop; we stop before executing it)
     ]);
     runSm83(cpu, 2); // LD SP,nn ; DI
     check(cpu.ime === false, 'SM83 DI clears IME');
     runSm83(cpu, 1); // EI
-    check(cpu.ime === true, 'SM83 EI sets IME');
+    check(cpu.ime === false, 'SM83 EI does not take effect until after the following instruction (real hardware delay)');
+    runSm83(cpu, 1); // NOP (the delay-slot instruction)
+    check(cpu.ime === true, 'SM83 EI takes effect once the instruction after it has executed');
   })();
 
   (function () {
@@ -852,6 +856,23 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
     runSm83(cpu, 1);
     check(cpu.illegal === true && cpu.halted === true, 'SM83 treats Z80-only prefix byte 0xDD as illegal/lockup');
   })();
+
+  (function () {
+    // HALT bug: if HALT executes with IME=0 while an interrupt is already pending (IE&IF
+    // nonzero), real hardware fails to actually halt, and additionally fails to advance PC
+    // past the very next fetch -- so the byte right after HALT executes twice. Program:
+    // LD A,0 ; HALT ; INC A ; INC A ; HALT(again, so we can stop cleanly). Under the bug,
+    // INC A's opcode (0x3c) is fetched and executed twice before PC finally advances past it.
+    var cpu = freshSm83([0x3e, 0x00, 0x76, 0x3c, 0x76]);
+    cpu.bus.ie = 0x01; cpu.bus.if_ = 0x01; // interrupt already pending, but IME is 0 (default)
+    runSm83(cpu, 1); // LD A,0
+    runSm83(cpu, 1); // HALT -- bug triggers, does not actually halt
+    check(cpu.halted === false, 'SM83 HALT bug: does not actually halt when IME=0 and an interrupt is already pending');
+    runSm83(cpu, 1); // first (buggy) fetch of INC A at pc=3, but PC does not advance past it
+    check(cpu.a === 1 && cpu.pc === 3, 'SM83 HALT bug: PC does not advance after the first post-HALT fetch (a=' + cpu.a + ' pc=0x' + cpu.pc.toString(16) + ')');
+    runSm83(cpu, 1); // INC A fetched again, now PC advances normally
+    check(cpu.a === 2 && cpu.pc === 4, 'SM83 HALT bug: the instruction after HALT executes twice (a=' + cpu.a + ' pc=0x' + cpu.pc.toString(16) + ')');
+  })();
 })();
 
 // --- 22. DmgMemoryBus (banking, timer, synthetic vblank IRQ, native PSG wiring) ---
@@ -872,7 +893,7 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
     bus.write8(0x2000, 2);
     check(bus.read8(0x4000) === 2, 'DmgMemoryBus bank-select write switches 0x4000 window (got ' + bus.read8(0x4000) + ')');
     bus.write8(0x2000, 0);
-    check(bus.romBank === 0 && bus.read8(0x4000) === 0, 'DmgMemoryBus bank-select allows bank 0 (MBC5-style, got bank ' + bus.romBank + ')');
+    check(bus.romBank === 1 && bus.read8(0x4000) === 1, 'DmgMemoryBus bank-select write of 0 aliases to bank 1 (MBC1/MBC3-style, got bank ' + bus.romBank + ')');
   })();
 
   (function () {

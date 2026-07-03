@@ -103,6 +103,10 @@
         const before = this.cpu.cycles;
         this.cpu.step();
         this.bus.tick(this.cpu.cycles - before, this.cpu);
+        if (this.cpu.illegal || this.cpu.stopped) {
+          this.error = this.cpu.reason || 'GBS init stopped unexpectedly';
+          break;
+        }
       }
       this.cpu.ime = true;
     }

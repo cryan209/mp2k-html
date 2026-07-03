@@ -850,11 +850,38 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   })();
 
   (function () {
+    // Enabled pending interrupts are dispatched before fetching the next opcode, not after
+    // executing one extra instruction. That matters for driver routines that arm IME with an
+    // interrupt already pending.
+    var DmgMemoryBus = window.Z80Emulator.DmgMemoryBus;
+    var rom = new Uint8Array(0x8000);
+    rom[0x0100] = 0x3c; // INC A -- must not execute before the ISR
+    var bus = new DmgMemoryBus(rom);
+    var cpu = new Sm83Cpu(bus);
+    cpu.pc = 0x0100;
+    cpu.sp = 0xfffe;
+    cpu.ime = true;
+    bus.ie = 0x01;
+    bus.if_ = 0x01;
+    cpu.step();
+    check(cpu.a === 0 && cpu.pc === 0x0040 && cpu.sp === 0xfffc && (bus.if_ & 0x01) === 0,
+      'SM83 dispatches pending IME interrupt before next opcode fetch (a=' + cpu.a + ' pc=0x' + cpu.pc.toString(16) + ')');
+  })();
+
+  (function () {
+    var cpu = freshSm83([0x10, 0x00, 0x3c]); // STOP padding byte, then INC A if execution ever resumes
+    runSm83(cpu, 1);
+    check(cpu.stopped === true && cpu.pc === 2 && cpu.reason === 'STOP',
+      'SM83 STOP consumes its padding byte and reports a stopped reason (pc=0x' + cpu.pc.toString(16) + ')');
+  })();
+
+  (function () {
     // Opcodes that don't exist on GB (Z80's DD/ED/FD prefixes) should be treated as an
     // illegal-opcode lockup rather than silently misdecoded.
     var cpu = freshSm83([0xdd, 0x00, 0x00]);
     runSm83(cpu, 1);
-    check(cpu.illegal === true && cpu.halted === true, 'SM83 treats Z80-only prefix byte 0xDD as illegal/lockup');
+    check(cpu.illegal === true && cpu.halted === true && cpu.reason.indexOf('0xdd') >= 0,
+      'SM83 treats Z80-only prefix byte 0xDD as illegal/lockup with reason (' + cpu.reason + ')');
   })();
 
   (function () {

@@ -37,6 +37,9 @@
       this.halted = false;
       this.stopped = false;
       this.illegal = false;
+      this.reason = '';
+      this.lastOpcode = 0;
+      this.lastOpcodePc = 0;
       this.cycles = 0;
       this.instructions = 0;
     }
@@ -254,8 +257,24 @@
     // call this once IE&IF becomes nonzero); it does not by itself dispatch the handler.
     wake() { this.halted = false; }
 
+    _pendingInterruptMask() {
+      return ((this.bus.ie || 0) & (this.bus.if_ || 0) & 0x1f) >>> 0;
+    }
+
+    _serviceInterruptsBeforeFetch() {
+      if (!this.bus || typeof this.bus.serviceInterrupts !== 'function') return false;
+      const beforeCycles = this.cycles;
+      this.bus.serviceInterrupts(this);
+      return this.cycles !== beforeCycles;
+    }
+
     step() {
-      if (this.halted || this.stopped || this.illegal) { this.cycles += 4; return; }
+      if (this.illegal || this.stopped) { this.cycles += 4; return; }
+      // Interrupt dispatch happens before the next opcode fetch. The host still calls
+      // bus.tick() after each step to advance timers/APU, but if IE&IF is already pending at
+      // the start of a step we must not execute one extra instruction before entering the ISR.
+      if (this._serviceInterruptsBeforeFetch()) return;
+      if (this.halted) { this.cycles += 4; return; }
       // EI's IME-enable takes effect only after the instruction following EI has fully
       // executed (real hardware quirk that lets `EI \ RET` atomically re-enable interrupts
       // and return without the interrupt preempting the RET). _eiArmed carries that one-step
@@ -264,6 +283,7 @@
       // fetch/exec below).
       if (this._eiArmed) { this.ime = true; this._eiArmed = false; }
       let opcode;
+      let opcodePc = this.pc;
       if (this._haltBugPending) {
         // HALT bug: if HALT executes with IME=0 while an interrupt is already pending, real
         // hardware fails to halt but also fails to advance PC past the *next* fetch — so the
@@ -273,6 +293,8 @@
       } else {
         opcode = this._fetch8();
       }
+      this.lastOpcode = opcode;
+      this.lastOpcodePc = opcodePc;
       this._exec(opcode);
       if (this._eiRequested) { this._eiArmed = true; this._eiRequested = false; }
     }
@@ -283,6 +305,7 @@
       // decoder bugs in this emulator visible instead of producing subtly-wrong playback.
       this.illegal = true;
       this.halted = true;
+      this.reason = `illegal opcode 0x${this.lastOpcode.toString(16).padStart(2, '0')} at 0x${this.lastOpcodePc.toString(16).padStart(4, '0')}`;
       this.cycles += 4;
     }
 
@@ -296,7 +319,7 @@
 
       if (x === 1) { // LD r,r' (0x76 = HALT)
         if (y === 6 && z === 6) {
-          const pending = (this.bus.ie & this.bus.if_ & 0x1f) !== 0;
+          const pending = this._pendingInterruptMask() !== 0;
           if (!this.ime && pending) this._haltBugPending = true; // HALT bug: see step()
           else this.halted = true;
           this.cycles += 4;
@@ -319,7 +342,7 @@
       if (z === 0) {
         if (y === 0) { this.cycles += 4; return; } // NOP
         if (y === 1) { const nn = this._fetch16(); const v = this.sp; this._wr(nn, v & 0xff); this._wr(u16(nn + 1), (v >>> 8) & 0xff); this.cycles += 20; return; } // LD (nn),SP
-        if (y === 2) { this.stopped = true; this.cycles += 4; return; } // STOP -- does not consume the conventional 0x00 padding byte that follows it
+        if (y === 2) { this._fetch8(); this.stopped = true; this.reason = 'STOP'; this.cycles += 4; return; } // STOP consumes its conventional padding byte
         if (y === 3) { const e = signed8(this._fetch8()); this.pc = u16(this.pc + e); this.cycles += 12; return; } // JR e
         const e = signed8(this._fetch8()); // JR cc,e (cc = NZ,Z,NC,C)
         if (this._checkCond(y - 4)) { this.pc = u16(this.pc + e); this.cycles += 12; } else this.cycles += 8;

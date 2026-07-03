@@ -5240,7 +5240,7 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
     try {
       if (!standardGbsEngine?.canPlay()) { setStatus('Load a GBS file first.'); return; }
       const songIdx = parseInt(document.getElementById('songSelect')?.value, 10) || 0;
-      standardGbsEngine.play(songIdx);
+      await standardGbsEngine.play(songIdx);
       setStatus(`GBS LLE streaming: ${standardGbsEngine.header.title} (song ${songIdx + 1}/${standardGbsEngine.header.songCount})`);
     } catch (err) {
       setStatus('GBS playback failed: ' + err.message);
@@ -6368,11 +6368,65 @@ function updateInfoText() {
   document.getElementById('info').textContent = [...sourceParts, engine, gsfEngine, compare].join('\n');
 }
 
+function decodeArchiveText(buf) {
+  if (!buf) return '';
+  try { return new TextDecoder('utf-8').decode(buf); }
+  catch (_) {
+    const u8 = new Uint8Array(buf);
+    let out = '';
+    for (let i = 0; i < u8.length; i++) out += String.fromCharCode(u8[i]);
+    return out;
+  }
+}
+
+function splitEscapedCsv(line) {
+  const fields = [];
+  let cur = '';
+  let escaped = false;
+  for (const ch of line) {
+    if (escaped) { cur += ch; escaped = false; continue; }
+    if (ch === '\\') { escaped = true; continue; }
+    if (ch === ',') { fields.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
+  }
+  fields.push(cur.trim());
+  return fields;
+}
+
+function parseGbsM3uTrack(text, fallbackName = '') {
+  const line = decodeArchiveText(text).split(/\r?\n/).map(s => s.trim()).find(s => s && !s.startsWith('#'));
+  if (!line) return null;
+  const marker = '::GBS,';
+  const markerAt = line.indexOf(marker);
+  if (markerAt < 0) return null;
+  const fields = splitEscapedCsv(line.slice(markerAt + marker.length));
+  const index = parseInt(fields[0], 10);
+  if (!Number.isFinite(index) || index < 0) return null;
+  let title = fields[1] || fallbackName.replace(/\.m3u$/i, '');
+  title = title.replace(/\s+-\s+.*$/, '').trim() || fallbackName.replace(/\.m3u$/i, '');
+  return { index, title, length: fields[2] || '' };
+}
+
+function gbsPlaylistTracks(files, gbsKey) {
+  const tracks = Object.keys(files || {})
+    .filter(k => /\.m3u$/i.test(k))
+    .map(k => parseGbsM3uTrack(files[k], k))
+    .filter(Boolean)
+    .sort((a, b) => a.index - b.index || a.title.localeCompare(b.title));
+  const seen = new Set();
+  return tracks.filter(track => {
+    const key = String(track.index);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 // Loads a raw GBS buffer into the UI as a fully separate playback mode via
 // StandardGbsEngine (GBS files are a standalone Z80/DMG program, not an MP2K ROM — they
 // have no song table, voice group, or track data for the tracker pipeline to parse). Shared
 // between a bare .gbs drop and a .gbs found inside a ZIP/7z archive.
-function loadGbsIntoUi(buf) {
+function loadGbsIntoUi(buf, playlistTracks = []) {
   if (!standardGbsEngine) throw new Error('GBS support is unavailable (dmg_emulator.js failed to load)');
   const header = standardGbsEngine.loadBuffer(buf);
   if (!standardGbsEngine.canPlay()) throw new Error(standardGbsEngine.error || 'failed to parse GBS file');
@@ -6382,16 +6436,20 @@ function loadGbsIntoUi(buf) {
   document.getElementById('btnPlay').disabled = false;
   const gbsSel = document.getElementById('songSelect');
   gbsSel.innerHTML = '';
-  for (let i = 0; i < header.songCount; i++) {
+  const tracks = playlistTracks.length
+    ? playlistTracks.filter(track => track.index >= 0 && track.index < header.songCount)
+    : Array.from({ length: header.songCount }, (_, i) => ({ index: i, title: `Song ${header.firstSong + i}` }));
+  for (const track of tracks) {
     const opt = document.createElement('option');
-    opt.value = i; // StandardGbsEngine.play() takes a 0-based song index
-    opt.textContent = `Song ${header.firstSong + i}`;
+    opt.value = track.index; // StandardGbsEngine.play() takes a 0-based song index
+    opt.textContent = track.length ? `${track.title} (${track.length})` : track.title;
     gbsSel.appendChild(opt);
   }
   gbsSel.selectedIndex = 0;
-  gbsSel.disabled = header.songCount <= 1;
+  gbsSel.disabled = tracks.length <= 1;
   currentSongListIdx = 0;
-  setStatus(`GBS loaded: "${header.title}" by ${header.author} (${header.songCount} song${header.songCount === 1 ? '' : 's'}) — press ▶`);
+  const trackCount = tracks.length || header.songCount;
+  setStatus(`GBS loaded: "${header.title}" by ${header.author} (${trackCount} track${trackCount === 1 ? '' : 's'}) — press ▶`);
   return header;
 }
 
@@ -6406,6 +6464,7 @@ function classifyArchiveContents(files) {
     gbsKey: find(/\.gbs$/i),
     gsfKey: find(/\.gsf$/i),
     romKey: find(/\.(gba|bin)$/i),
+    m3uKeys: names.filter(n => /\.m3u$/i.test(n)),
     names,
   };
 }
@@ -6433,7 +6492,7 @@ async function initWithBuffer(buf, source = {}) {
       const kinds = files ? classifyArchiveContents(files) : { names: [] };
       if (files && !kinds.gsflibKey) {
         if (kinds.gbsKey) {
-          loadGbsIntoUi(files[kinds.gbsKey]);
+          loadGbsIntoUi(files[kinds.gbsKey], gbsPlaylistTracks(files, kinds.gbsKey));
           return;
         }
         if (kinds.romKey) {

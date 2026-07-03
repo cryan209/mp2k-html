@@ -1123,8 +1123,13 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
     check(eng2.bus.psg.square[0].enabled === true, 'square1 channel triggered by driver (enabled=' + eng2.bus.psg.square[0].enabled + ')');
     var out = eng2.renderSamples(64, 44100);
     var hasNonzero = false;
-    for (var i = 0; i < out.left.length; i++) if (out.left[i] !== 0 || out.right[i] !== 0) hasNonzero = true;
+    var peak = 0;
+    for (var i = 0; i < out.left.length; i++) {
+      if (out.left[i] !== 0 || out.right[i] !== 0) hasNonzero = true;
+      peak = Math.max(peak, Math.abs(out.left[i]), Math.abs(out.right[i]));
+    }
     check(hasNonzero, 'StandardGbsEngine produces audible (nonzero) output for a triggered square channel');
+    check(peak > 0.1, 'StandardGbsEngine DMG mix is normalized to audible Web Audio range (peak=' + peak + ')');
   })();
 })();
 

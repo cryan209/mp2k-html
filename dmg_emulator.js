@@ -129,8 +129,8 @@
           cycleBudget -= delta;
         }
         const [l, r] = this.bus.mixSample();
-        left[i] = Math.max(-1, Math.min(1, l / 128));
-        right[i] = Math.max(-1, Math.min(1, r / 128));
+        left[i] = Math.max(-1, Math.min(1, l / 15));
+        right[i] = Math.max(-1, Math.min(1, r / 15));
       }
       return { left, right };
     }
@@ -138,7 +138,7 @@
     // Browser playback: renders into a Web Audio buffer and starts it. Kept minimal (no
     // FIFO-rate-detection warmup like StandardGsfEngine needs, since GBS has no Direct Sound
     // channel to derive a rate from — we simply choose the AudioContext's own sample rate).
-    play(songIndex = 0) {
+    async play(songIndex = 0) {
       if (typeof AudioContext === 'undefined' && typeof webkitAudioContext === 'undefined') {
         throw new Error('Web Audio is not available in this environment');
       }
@@ -146,6 +146,7 @@
       this._initCpu(songIndex);
       const Ctx = typeof AudioContext !== 'undefined' ? AudioContext : webkitAudioContext;
       const ctx = this.audioCtx || (this.audioCtx = new Ctx());
+      if (ctx.state === 'suspended') await ctx.resume();
       const seconds = 4; // one streaming chunk; caller/UI is expected to re-invoke for longer playback
       const count = Math.floor(ctx.sampleRate * seconds);
       const { left, right } = this.renderSamples(count, ctx.sampleRate);

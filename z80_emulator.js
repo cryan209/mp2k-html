@@ -494,8 +494,9 @@
   // module (psg_dmg.js) in at its native 0xFF10-0xFF3F addressing, unlike gsf_emulator.js's
   // GbaMemoryBus which has to translate a differently-laid-out register map.
   class DmgMemoryBus {
-    constructor(romBytes, { cpuHz = 4194304 } = {}) {
+    constructor(romBytes, { cpuHz = 4194304, cpuSpeed = 1 } = {}) {
       this.cpuHz = cpuHz;
+      this.cpuSpeed = cpuSpeed === 2 ? 2 : 1;
       const bytes = romBytes instanceof Uint8Array ? romBytes : new Uint8Array(romBytes || 0);
       this.bankCount = Math.max(2, Math.ceil(bytes.length / 0x4000));
       this.rom = new Uint8Array(this.bankCount * 0x4000);
@@ -580,12 +581,8 @@
 
     requestInterrupt(bit) { this.if_ |= (1 << bit); }
 
-    // Advances passive hardware time without dispatching CPU interrupts. GBS playback uses
-    // this for the common "host calls play routine periodically" model: the driver code runs
-    // only at vblank/timer cadence, while the APU continues evolving between calls.
-    tickPassive(deltaCycles) {
+    _advanceTimers(deltaCycles, requestTimerInterrupt) {
       deltaCycles = Math.max(0, deltaCycles | 0);
-      this.cycles += deltaCycles;
       this.divCounter = (this.divCounter + deltaCycles) & 0xffff;
 
       const tac = this.io[0x07];
@@ -595,9 +592,23 @@
         while (this.timaCounter >= period) {
           this.timaCounter -= period;
           const next = (this.io[0x05] + 1) & 0xff;
-          this.io[0x05] = next === 0 ? this.io[0x06] : next;
+          if (next === 0) {
+            this.io[0x05] = this.io[0x06];
+            if (requestTimerInterrupt) this.requestInterrupt(IF_TIMER);
+          } else this.io[0x05] = next;
         }
       }
+    }
+
+    // Advances passive hardware time without dispatching CPU interrupts. GBS playback uses
+    // this for the common "host calls play routine periodically" model: the driver code runs
+    // only at vblank/timer cadence, while the APU continues evolving between calls. The input
+    // is wall/APU cycles; in CGB double-speed mode TIMA/DIV tick twice as fast in that same
+    // wall time, while the APU itself keeps normal DMG timing.
+    tickPassive(deltaCycles) {
+      deltaCycles = Math.max(0, deltaCycles | 0);
+      this.cycles += deltaCycles;
+      this._advanceTimers(deltaCycles * this.cpuSpeed, false);
 
       this.psg.stepCycles(this.cycles);
     }
@@ -606,22 +617,12 @@
     // deltaCycles (the cycle cost of the instruction the CPU just executed). Call once per
     // cpu.step() from the host engine's run loop.
     tick(deltaCycles, cpu) {
-      this.cycles += deltaCycles;
-      this.divCounter = (this.divCounter + deltaCycles) & 0xffff;
+      const cpuCycles = Math.max(0, deltaCycles | 0);
+      const wallCycles = cpuCycles / this.cpuSpeed;
+      this.cycles += wallCycles;
+      this._advanceTimers(cpuCycles, true);
 
-      const tac = this.io[0x07];
-      if (tac & 0x04) {
-        this.timaCounter += deltaCycles;
-        const period = TAC_PERIOD[tac & 0x03];
-        while (this.timaCounter >= period) {
-          this.timaCounter -= period;
-          const next = (this.io[0x05] + 1) & 0xff;
-          if (next === 0) { this.io[0x05] = this.io[0x06]; this.requestInterrupt(IF_TIMER); }
-          else this.io[0x05] = next;
-        }
-      }
-
-      this.frameCounter += deltaCycles;
+      this.frameCounter += wallCycles;
       while (this.frameCounter >= DMG_CYCLES_PER_FRAME) {
         this.frameCounter -= DMG_CYCLES_PER_FRAME;
         this.requestInterrupt(IF_VBLANK);

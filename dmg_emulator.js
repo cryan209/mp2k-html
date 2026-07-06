@@ -73,7 +73,8 @@
     // 0-based (GBS convention: init is called with A = 0..songCount-1).
     _initCpu(songIndex = 0) {
       this._isr = null; // a song switch mid-ISR must not resume the old CPU's interrupt
-      this.bus = new z80.DmgMemoryBus(this.romImage, { cpuHz: DMG_CPU_HZ });
+      const doubleSpeed = !!(this.header.timerControl & 0x80);
+      this.bus = new z80.DmgMemoryBus(this.romImage, { cpuHz: DMG_CPU_HZ, cpuSpeed: doubleSpeed ? 2 : 1 });
       this.bus.channelMask8 = (this.channelMask & 0xf) * 0x11; // reapply host mute/solo to the fresh bus
       this.scopeRing = [new Float32Array(1024), new Float32Array(1024), new Float32Array(1024), new Float32Array(1024)];
       this.scopeRingPos = 0;
@@ -354,7 +355,7 @@
     summary() {
       if (!this.canPlay()) return `GBS engine: ${this.state}${this.error ? ' (' + this.error + ')' : ''}`;
       const h = this.header;
-      return `GBS: "${h.title}" by ${h.author} | songs: ${h.songCount} | ${h.usesTimer ? 'timer' : 'vblank'}-driven | PSG mix via shared PsgDmg module`;
+      return `GBS: "${h.title}" by ${h.author} | songs: ${h.songCount} | ${h.usesTimer ? 'timer' : 'vblank'}-driven${h.timerControl & 0x80 ? ' | CGB 2x CPU' : ''} | PSG mix via shared PsgDmg module`;
     }
   }
 

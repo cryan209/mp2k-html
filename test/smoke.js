@@ -944,6 +944,17 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   })();
 
   (function () {
+    var bus = new DmgMemoryBus(freshDmgRom(2), { cpuSpeed: 2 });
+    bus.write8(0xff05, 0xfe); // TIMA starts 2 ticks from overflow
+    bus.write8(0xff07, 0x05); // TAC: enabled, clock select 01 (16 CPU cycles/tick)
+    bus.tick(16, null);
+    check(bus.cycles === 8, 'DmgMemoryBus CGB 2x CPU cycles consume half wall/APU time (cycles=' + bus.cycles + ')');
+    check(bus.read8(0xff05) === 0xff, 'DmgMemoryBus CGB 2x TIMA still ticks from CPU cycles');
+    bus.tickPassive(8);
+    check(bus.read8(0xff05) === 0x00, 'DmgMemoryBus CGB 2x passive timer advances twice per wall cycle');
+  })();
+
+  (function () {
     var bus = new DmgMemoryBus(freshDmgRom(2));
     bus.tick(70223, null);
     check((bus.if_ & 0x01) === 0, 'DmgMemoryBus vblank not yet requested before one frame elapses');
@@ -1259,6 +1270,8 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
     engT._initCpu(0);
     check(engT.playPeriodCycles === (16 * 128) / 2,
       'CGB double-speed bit (TAC bit 7) halves the timer play period (got ' + engT.playPeriodCycles + ')');
+    check(engT.bus.cpuSpeed === 2,
+      'CGB double-speed bit (TAC bit 7) also enables 2x CPU timing in the GBS bus');
   })();
 })();
 

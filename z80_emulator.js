@@ -522,6 +522,9 @@
       // vector addresses (e.g. StandardGbsEngine, since GBS rips don't include a real vector
       // table) can point the vector at a stub it wrote into writable HRAM instead.
       this.vectorOverride = {};
+      // Host mute/solo mask ANDed onto NR51 at mix time (both L/R nibbles). Mix-only: the
+      // PSG channels keep running so scopes/diagnostics still see a muted channel.
+      this.channelMask8 = 0xff;
     }
 
     _bankOffset(addr) { return this.romBank * 0x4000 + (addr - 0x4000); }
@@ -651,7 +654,7 @@
     // analogous to gsf_emulator.js's _mixPsgInto but for real DMG's simpler additive mixer
     // (no separate Direct Sound path to blend against, since GBS has no PCM/FIFO channels).
     mixSample() {
-      const nr50 = this.io[0x24] || 0, nr51 = this.io[0x25] || 0;
+      const nr50 = this.io[0x24] || 0, nr51 = (this.io[0x25] || 0) & this.channelMask8;
       const rightVol = (nr50 & 0x07) + 1, leftVol = ((nr50 >>> 4) & 0x07) + 1;
       const out = this.psg.outputsAt(this.cycles);
       let right = 0, left = 0;

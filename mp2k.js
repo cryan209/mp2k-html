@@ -4670,6 +4670,17 @@ class GS1Player {
   }
 
   _drawScopes() {
+    if (this.gbsRollActive && this.gbsScopeOwners) {
+      // GBS mode: scope owners are register-model snapshots built by gbsPianoRoll from the
+      // engine's per-channel output rings; sourceKind picks the HLE scope color scheme.
+      const kinds = ['psg1', 'psg2', 'gbc:wave', 'psg4-noise'];
+      document.querySelectorAll('canvas[data-scope-gbs]').forEach(canvas => {
+        const ch = Number(canvas.dataset.scopeGbs);
+        const owner = this.gbsScopeOwners[ch];
+        if (owner) this._drawScope(canvas, owner, kinds[ch], true);
+      });
+      return;
+    }
     if (!this.seq) return;
     document.querySelectorAll('canvas[data-scope-track]').forEach(canvas => {
       const idx = Number(canvas.dataset.scopeTrack);
@@ -4719,6 +4730,48 @@ class GS1Player {
         : seq
           ? seq.tracks.map((t, i) => `<span title="Track ${i}${t.lastSourceKind ? ` ${t.lastSourceKind}` : ''}"><i style="background:${this._trackColor(i, 1)}"></i>T${i}</span>`).join('')
           : '';
+    }
+
+    // GBS mode: 4 fixed hardware channels, diagnostics straight from the PSG registers
+    // (via gbsPianoRoll's channelNotes polling). Columns are mapped onto the HLE header:
+    // Inst=duty/level/width, Vel=trigger volume, Bend=envelope, LFO=CH1 sweep, Rate=freq.
+    if (this.gbsRollActive && this.gbsChannelDiag) {
+      tracksEl.innerHTML = this.gbsChannelDiag.map((d, i) => {
+        const midi = d.kind === 'noise' ? null : Math.round(d.midi);
+        const env = d.envStep ? `${d.envDir ? '+' : '-'}${d.envStep}` : '—';
+        const sweep = d.sweep?.enabled ? `${d.sweep.dir ? '-' : '+'}p${d.sweep.period}s${d.sweep.shift}` : '—';
+        const inst = d.kind === 'noise' ? `${d.width}-bit` : d.kind === 'wave' ? d.level : `duty ${Math.round(d.duty * 100)}%`;
+        const rate = d.kind === 'noise' ? `${(d.rateHz / 1000).toFixed(1)}kHz` : `${d.hz.toFixed(1)}Hz`;
+        return `<tr style="border-left:2px solid ${this._trackColor(i, 1)}">
+          <td style="color:${this._trackColor(i, 1)}">${gbsPianoRoll.KINDS[i]}</td>
+          <td>${d.on ? 'on' : 'off'}</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td>${inst}</td>
+          <td>${d.kind}</td>
+          <td class="scope-cell">
+            <div class="scope-stack">
+              <canvas class="scope-canvas" width="172" height="30" data-scope-gbs="${i}" title="${d.kind} raw channel output (pre-NR51)"></canvas>
+            </div>
+          </td>
+          <td>${Math.round(d.vol * 15)}</td>
+          <td>${Math.round(d.triggerVol * 15)}</td>
+          <td>${d.pan || '—'}</td>
+          <td>${d.kind === 'noise' ? '—' : d.midi.toFixed(2)}</td>
+          <td>${env}</td>
+          <td>${sweep}</td>
+          <td>${d.on && Number.isFinite(midi) ? noteName(midi) : '—'}</td>
+          <td>${rate}</td>
+          <td>${d.on ? 1 : 0}</td>
+        </tr>`;
+      }).join('');
+      this._drawPianoRoll();
+      this._drawScopes();
+      logEl.textContent = this.debugEvents.slice(-80).map(ev => `${String(ev.tick).padStart(5, ' ')} -- ${ev.type.padEnd(5)} ${ev.message || ''}`).join('\n');
+      logEl.scrollTop = logEl.scrollHeight;
+      infoEl.textContent = `${standardGbsEngine?.summary?.() || 'GBS LLE'}\nScopes show each channel's raw PSG output (pre-NR51 routing), so muted channels still trace. Columns: Inst=duty/wave level/LFSR width, Vel=trigger volume, Bend=envelope dir+period, LFO=CH1 sweep, Rate=frequency.`;
+      return;
     }
 
     tracksEl.innerHTML = seq ? seq.tracks.map((t, i) => {
@@ -5009,6 +5062,9 @@ let currentSongListIdx = 0;
 const gbsPianoRoll = {
   timer: null,
   channels: [],
+  cells: null,
+  muted: [false, false, false, false],
+  solo: [false, false, false, false],
   KINDS: ['CH1', 'CH2', 'WAVE', 'NOISE'],
   active() { return !!this.timer; },
   start() {
@@ -5016,8 +5072,10 @@ const gbsPianoRoll = {
     player.pianoRollEvents = [];
     player.pianoRollPitchEvents = [];
     player.pianoRollLastTick = 0;
-    player.gbsRollActive = true; // player methods key display clock/legend off this flag
+    player.gbsRollActive = true; // player methods key display clock/legend/scopes off this flag
     this.channels = this.KINDS.map(() => ({ open: null, lastTrigger: -1, lastPitchOff: 0 }));
+    this._buildCells();
+    this._applyMask(); // reassert host mute/solo onto the freshly built bus
     this.timer = setInterval(() => this._poll(), 33);
   },
   stop() {
@@ -5029,7 +5087,86 @@ const gbsPianoRoll = {
       st.open = null;
     }
     player.gbsRollActive = false;
+    player.gbsChannelDiag = null;
+    player.gbsScopeOwners = null;
     player.updateDebugPanel(true);
+  },
+  // Main-panel channel cells (the GBS counterpart of _buildTrackUI's per-track cells),
+  // with working mute/solo: the mask only touches the mix, so a muted channel still
+  // shows its scope, notes, and diagnostics.
+  _buildCells() {
+    const grid = document.getElementById('tracksGrid');
+    grid.innerHTML = '';
+    player.trackCells = [];
+    this.cells = this.KINDS.map((k, i) => {
+      const cell = document.createElement('div');
+      cell.className = 'track-cell';
+      cell.style.setProperty('--track-color', player._trackColor(i, 1));
+      cell.style.setProperty('--track-color-soft', player._trackColor(i, 0.18));
+      cell.innerHTML = `
+        <div class="track-top">
+          <div class="track-label">${k}</div>
+          <div class="track-buttons">
+            <button class="track-toggle mute" title="Mute ${k}">M</button>
+            <button class="track-toggle solo" title="Solo ${k}">S</button>
+          </div>
+        </div>
+        <div class="track-inst"></div>
+        <div class="track-meter"><div class="track-meter-fill"></div></div>
+        <div class="track-note"></div>`;
+      const [muteBtn, soloBtn] = cell.querySelectorAll('button');
+      muteBtn.addEventListener('click', e => { e.stopPropagation(); this.muted[i] = !this.muted[i]; this._applyMask(); });
+      soloBtn.addEventListener('click', e => { e.stopPropagation(); this.solo[i] = !this.solo[i]; this._applyMask(); });
+      grid.appendChild(cell);
+      return cell;
+    });
+  },
+  _applyMask() {
+    const anySolo = this.solo.some(Boolean);
+    let mask = 0;
+    for (let i = 0; i < 4; i++) if (anySolo ? this.solo[i] : !this.muted[i]) mask |= 1 << i;
+    standardGbsEngine?.setChannelMask(mask);
+    this.cells?.forEach((cell, i) => {
+      const [muteBtn, soloBtn] = cell.querySelectorAll('button');
+      muteBtn.classList.toggle('active', this.muted[i]);
+      soloBtn.classList.toggle('active', this.solo[i]);
+      cell.classList.toggle('muted', anySolo ? !this.solo[i] : this.muted[i]);
+      cell.classList.toggle('solo', this.solo[i]);
+    });
+  },
+  _updateCells(snap) {
+    this.cells?.forEach((cell, i) => {
+      const d = snap[i];
+      const midi = d.kind === 'noise' ? null : Math.round(d.midi);
+      cell.classList.toggle('active', d.on);
+      cell.querySelector('.track-meter-fill').style.width = Math.round(d.vol * 100) + '%';
+      cell.querySelector('.track-note').textContent =
+        d.on ? (d.kind === 'noise' ? `${(d.rateHz / 1000).toFixed(1)}kHz` : Number.isFinite(midi) ? noteName(midi) : '') : '';
+      cell.querySelector('.track-inst').textContent =
+        d.kind === 'noise' ? `${d.width}-bit lfsr` :
+        d.kind === 'wave' ? `wave ${d.level}` :
+        `duty ${Math.round(d.duty * 100)}%`;
+    });
+  },
+  // Fake scope owners in _readScopeNode's shape (scopeData bytes centered on 128), built
+  // from the engine's per-channel output rings so _drawScope renders them unchanged.
+  _updateScopes() {
+    player.gbsScopeOwners = this.KINDS.map((k, i) => {
+      const ring = standardGbsEngine.channelScope(i);
+      if (!ring) return null;
+      const N = 256;
+      const step = ring.length / N;
+      const scopeData = new Uint8Array(N);
+      let peak = 0, sumSq = 0;
+      for (let x = 0; x < N; x++) {
+        const v = Math.max(-1, Math.min(1, ring[Math.floor(x * step)]));
+        const a = Math.abs(v);
+        if (a > peak) peak = a;
+        sumSq += v * v;
+        scopeData[x] = 128 + Math.round(v * 127);
+      }
+      return { scopeData, scopePeak: peak, scopeRms: Math.sqrt(sumSq / N) };
+    });
   },
   // Noise has no pitch; place it on a fixed high lane ranked by LFSR shift rate so drum
   // patterns read as distinct rows above the melody instead of rescaling the whole roll.
@@ -5089,6 +5226,9 @@ const gbsPianoRoll = {
       }
     });
     player.pianoRollLastTick = Math.max(player.pianoRollLastTick, tick);
+    player.gbsChannelDiag = snap;
+    this._updateCells(snap);
+    this._updateScopes();
     player._drawLiveKeyboard();
     player.updateDebugPanel();
   },

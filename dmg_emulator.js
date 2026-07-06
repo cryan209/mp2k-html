@@ -33,6 +33,9 @@
       this.playPeriodCycles = DMG_CYCLES_PER_FRAME;
       this.renderCycle = 0;
       this._isr = null; // in-flight play interrupt, executed incrementally by _advancePlaybackTo
+      this.channelMask = 0xf; // host mute/solo mask (bit per channel), survives song switches
+      this.scopeRing = null; // per-channel output history for oscilloscope views
+      this.scopeRingPos = 0;
     }
 
     // Clears any loaded song, matching StandardGsfEngine.reset()'s role: called when the UI
@@ -71,6 +74,9 @@
     _initCpu(songIndex = 0) {
       this._isr = null; // a song switch mid-ISR must not resume the old CPU's interrupt
       this.bus = new z80.DmgMemoryBus(this.romImage, { cpuHz: DMG_CPU_HZ });
+      this.bus.channelMask8 = (this.channelMask & 0xf) * 0x11; // reapply host mute/solo to the fresh bus
+      this.scopeRing = [new Float32Array(1024), new Float32Array(1024), new Float32Array(1024), new Float32Array(1024)];
+      this.scopeRingPos = 0;
       this.cpu = new z80.Sm83Cpu(this.bus);
       const h = this.header;
       this.cpu.sp = h.stackPointer;
@@ -199,6 +205,17 @@
         const [l, r] = this.bus.mixSample();
         left[i] = Math.max(-1, Math.min(1, l / 15));
         right[i] = Math.max(-1, Math.min(1, r / 15));
+        if (this.scopeRing) {
+          // outputsAt is memoized per cycle, so this reuses the per-channel samples the
+          // mix above already computed — pre-NR51, so a host-muted channel still scopes.
+          const chOut = this.bus.psg.outputsAt(this.bus.cycles);
+          const pos = this.scopeRingPos;
+          this.scopeRing[0][pos] = chOut[0] / 15;
+          this.scopeRing[1][pos] = chOut[1] / 15;
+          this.scopeRing[2][pos] = chOut[2] / 15;
+          this.scopeRing[3][pos] = chOut[3] / 15;
+          this.scopeRingPos = (pos + 1) & 1023;
+        }
       }
       return { left, right };
     }
@@ -253,39 +270,52 @@
       this.source = null;
     }
 
-    // Register-level channel snapshot for UI visualization (piano roll / live keyboard).
-    // GBS has no sequencer to emit note events, but the PSG registers ARE the notes: the
-    // tonal channels' live frequency registers convert to a (fractional) MIDI note, the
-    // trigger timestamps give exact note onsets, and the envelope volume distinguishes
-    // sounding from silent. Noise has no pitch, so it reports its LFSR shift rate instead.
+    // Register-level channel snapshot for UI visualization (piano roll / live keyboard /
+    // channel diagnostics). GBS has no sequencer to emit note events, but the PSG registers
+    // ARE the notes: the tonal channels' live frequency registers convert to a (fractional)
+    // MIDI note, the trigger timestamps give exact note onsets, and the envelope volume
+    // distinguishes sounding from silent. Noise has no pitch, so it reports its LFSR shift
+    // rate instead. `pan` reflects the game's own NR51 routing (not the host mute mask).
     channelNotes() {
       if (!this.bus) return null;
       const p = this.bus.psg;
       const nr51 = this.bus.io[0x25] | 0;
       const midiFromHz = (hz) => 69 + 12 * Math.log2(hz / 440);
+      const pan = (ch) => ((nr51 & (0x10 << ch)) ? 'L' : '') + ((nr51 & (1 << ch)) ? 'R' : '');
       const sq = (i) => {
         const st = p.square[i];
+        const hz = 131072 / Math.max(1, 2048 - st.freqCur);
         return {
           kind: i ? 'sq2' : 'sq1',
           on: !!(st.enabled && st.volume > 0 && (nr51 & (0x11 << i))), // routed to either speaker
-          midi: midiFromHz(131072 / Math.max(1, 2048 - st.freqCur)),
+          hz,
+          midi: midiFromHz(hz),
           vol: st.volume / 15,
           triggerVol: st.volInit / 15,
           triggerCycles: st.triggerCycles,
+          pan: pan(i),
+          duty: st.dutyFraction,
+          envDir: st.envDir,
+          envStep: st.envStep,
+          sweep: i === 0 ? { period: st.sweepPeriod, shift: st.sweepShift, dir: st.sweepDir, enabled: st.sweepEnabled } : null,
         };
       };
       const w = p.wave;
       const n = p.noise;
+      const waveHz = 65536 / Math.max(1, 2048 - w.freqCur);
       return [
         sq(0),
         sq(1),
         {
           kind: 'wave',
           on: !!(w.enabled && (w.forceVolume || w.outputLevel > 0) && (nr51 & 0x44)),
-          midi: midiFromHz(65536 / Math.max(1, 2048 - w.freqCur)),
+          hz: waveHz,
+          midi: midiFromHz(waveHz),
           vol: w.forceVolume ? 0.75 : w.outputLevel,
           triggerVol: w.forceVolume ? 0.75 : w.outputLevel,
           triggerCycles: w.triggerCycles,
+          pan: pan(2),
+          level: w.forceVolume ? 'force75%' : ['mute', '100%', '50%', '25%'][[0, 1, 0.5, 0.25].indexOf(w.outputLevel)] || `${w.outputLevel}`,
         },
         {
           kind: 'noise',
@@ -294,8 +324,31 @@
           vol: n.volume / 15,
           triggerVol: n.volInit / 15,
           triggerCycles: n.triggerCycles,
+          pan: pan(3),
+          width: n.widthMode ? 7 : 15,
+          envDir: n.envDir,
+          envStep: n.envStep,
         },
       ];
+    }
+
+    // Chronological copy of one channel's recent raw output (normalized -1..1), for
+    // oscilloscope views. Captured pre-NR51 during renderSamples.
+    channelScope(ch) {
+      const ring = this.scopeRing?.[ch];
+      if (!ring) return null;
+      const out = new Float32Array(ring.length);
+      const pos = this.scopeRingPos;
+      out.set(ring.subarray(pos));
+      out.set(ring.subarray(0, pos), ring.length - pos);
+      return out;
+    }
+
+    // Host-side mute/solo: a 4-bit channel mask ANDed onto NR51 at mix time only — the
+    // driver and PSG keep running normally, exactly like the HLE path's track mute.
+    setChannelMask(mask4) {
+      this.channelMask = mask4 & 0xf;
+      if (this.bus) this.bus.channelMask8 = this.channelMask * 0x11;
     }
 
     summary() {

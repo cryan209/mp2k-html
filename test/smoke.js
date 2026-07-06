@@ -1146,6 +1146,31 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
       'channelNotes reports untriggered channels as off');
     check(typeof notes[0].triggerCycles === 'number' && typeof notes[3].rateHz === 'number',
       'channelNotes exposes trigger timestamps and a noise shift rate');
+    check(notes[0].pan === 'LR' && typeof notes[0].duty === 'number' && notes[3].width === 15,
+      'channelNotes exposes pan routing, square duty, and noise LFSR width');
+
+    // channelScope: per-channel output rings captured during renderSamples (pre-NR51).
+    var scope0 = eng2.channelScope(0);
+    var scope1 = eng2.channelScope(1);
+    check(scope0 && scope0.length === 1024 && scope0.some(function (v) { return v !== 0; }),
+      'channelScope captures the triggered square channel waveform');
+    check(scope1 && scope1.every(function (v) { return v === 0; }),
+      'channelScope shows silence for untriggered channels');
+
+    // setChannelMask: host mute is mix-only — output silences but the channel keeps
+    // running (still enabled, still scoping).
+    eng2.setChannelMask(0xe); // mute CH1, the only sounding channel
+    var mutedOut = eng2.renderSamples(64, 44100);
+    var mutedSilent = true;
+    for (var i = 0; i < 64; i++) if (mutedOut.left[i] !== 0 || mutedOut.right[i] !== 0) mutedSilent = false;
+    check(mutedSilent, 'setChannelMask mutes a channel at mix time');
+    check(eng2.bus.psg.square[0].enabled === true && eng2.channelScope(0).some(function (v) { return v !== 0; }),
+      'host-muted channel keeps running and scoping');
+    eng2.setChannelMask(0xf);
+    var unmutedOut = eng2.renderSamples(64, 44100);
+    var loudAgain = false;
+    for (var i = 0; i < 64; i++) if (unmutedOut.left[i] !== 0) loudAgain = true;
+    check(loudAgain, 'clearing the channel mask restores output');
   })();
 
   // Regression check: the play routine must be called at EXACTLY the vblank rate (59.7275Hz),

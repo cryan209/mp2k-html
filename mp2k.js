@@ -6682,13 +6682,20 @@ function loadGbsIntoUi(buf, playlistTracks = []) {
   document.getElementById('btnPlay').disabled = false;
   const gbsSel = document.getElementById('songSelect');
   gbsSel.innerHTML = '';
-  const tracks = playlistTracks.length
-    ? playlistTracks.filter(track => track.index >= 0 && track.index < header.songCount)
-    : Array.from({ length: header.songCount }, (_, i) => ({ index: i, title: `Song ${header.firstSong + i}` }));
+  // The m3u playlist is a curated subset — the header's songCount is the real track list.
+  // Keep the playlist's order and titles first, then append every untagged header index
+  // (often SFX/jingles the ripper skipped, but sometimes real music) so nothing is hidden.
+  const tagged = playlistTracks.filter(track => track.index >= 0 && track.index < header.songCount);
+  const taggedIdx = new Set(tagged.map(track => track.index));
+  const untagged = [];
+  for (let i = 0; i < header.songCount; i++) {
+    if (!taggedIdx.has(i)) untagged.push({ index: i, title: `Song ${header.firstSong + i}`, untagged: tagged.length > 0 });
+  }
+  const tracks = [...tagged, ...untagged];
   for (const track of tracks) {
     const opt = document.createElement('option');
     opt.value = track.index; // StandardGbsEngine.play() takes a 0-based song index
-    opt.textContent = track.length ? `${track.title} (${track.length})` : track.title;
+    opt.textContent = (track.length ? `${track.title} (${track.length})` : track.title) + (track.untagged ? ' — untagged' : '');
     gbsSel.appendChild(opt);
   }
   const defaultTrack = playlistTracks.length && /^opening\b/i.test(tracks[0]?.title || '')

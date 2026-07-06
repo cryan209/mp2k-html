@@ -4389,8 +4389,9 @@ class GS1Player {
   }
 
   _activeKeyboardNotes() {
-    if (!this.seq) return new Map();
-    const nowTick = this.seq.tickCount;
+    if (!this.seq && !this.gbsRollActive) return new Map();
+    // GBS mode has no sequencer clock; the PSG poller advances pianoRollLastTick instead.
+    const nowTick = this.gbsRollActive ? this.pianoRollLastTick : this.seq.tickCount;
     const active = new Map();
     for (const ev of this.pianoRollEvents) {
       const midi = ev.noteMidi | 0;
@@ -4493,7 +4494,9 @@ class GS1Player {
     g.fillRect(0, 0, w, h);
 
     const seq = this.seq;
-    const nowTick = seq ? seq.tickCount : this.pianoRollLastTick;
+    // In GBS mode a stale sequencer from a previously loaded ROM may still exist; the PSG
+    // poller's vblank-frame clock (pianoRollLastTick) is the one that matches the events.
+    const nowTick = !this.gbsRollActive && seq ? seq.tickCount : this.pianoRollLastTick;
     const windowTicks = 168;
     const startTick = Math.max(0, nowTick - windowTicks);
     const notes = this.pianoRollEvents.filter(ev =>
@@ -4711,9 +4714,11 @@ class GS1Player {
     ].map(([k, v]) => `<div class="debug-stat"><span>${k}</span><b>${v}</b></div>`).join('');
 
     if (rollLegendEl) {
-      rollLegendEl.innerHTML = seq
-        ? seq.tracks.map((t, i) => `<span title="Track ${i}${t.lastSourceKind ? ` ${t.lastSourceKind}` : ''}"><i style="background:${this._trackColor(i, 1)}"></i>T${i}</span>`).join('')
-        : '';
+      rollLegendEl.innerHTML = this.gbsRollActive
+        ? ['CH1', 'CH2', 'WAVE', 'NOISE'].map((k, i) => `<span title="GBS PSG ${k}"><i style="background:${this._trackColor(i, 1)}"></i>${k}</span>`).join('')
+        : seq
+          ? seq.tracks.map((t, i) => `<span title="Track ${i}${t.lastSourceKind ? ` ${t.lastSourceKind}` : ''}"><i style="background:${this._trackColor(i, 1)}"></i>T${i}</span>`).join('')
+          : '';
     }
 
     tracksEl.innerHTML = seq ? seq.tracks.map((t, i) => {
@@ -4994,6 +4999,101 @@ const standardGbsEngine = window.DmgEmulator ? new window.DmgEmulator.StandardGb
 player._drawLiveKeyboard();
 let currentSongListIdx = 0;
 
+// Feeds the debug piano roll and live keyboard from the GBS engine's PSG register state.
+// The MP2K HLE path gets note events from its sequencer; GBS has no sequencer, so this
+// polls StandardGbsEngine.channelNotes() (frequency registers -> MIDI, PSG trigger
+// timestamps -> exact onsets, envelope volume -> note-off) and translates the four
+// hardware channels into the same pianoRollEvents shape the roll already renders, using
+// vblank frames as the tick unit. Caveat: the engine renders ahead of the audible stream
+// (up to ~250ms of scheduled Web Audio buffers), so the roll leads the speakers slightly.
+const gbsPianoRoll = {
+  timer: null,
+  channels: [],
+  KINDS: ['CH1', 'CH2', 'WAVE', 'NOISE'],
+  active() { return !!this.timer; },
+  start() {
+    this.stop();
+    player.pianoRollEvents = [];
+    player.pianoRollPitchEvents = [];
+    player.pianoRollLastTick = 0;
+    player.gbsRollActive = true; // player methods key display clock/legend off this flag
+    this.channels = this.KINDS.map(() => ({ open: null, lastTrigger: -1, lastPitchOff: 0 }));
+    this.timer = setInterval(() => this._poll(), 33);
+  },
+  stop() {
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = null;
+    for (const st of this.channels) {
+      if (st.open) st.open.activeUntilTick = player.pianoRollLastTick;
+      st.open = null;
+    }
+    player.gbsRollActive = false;
+    player.updateDebugPanel(true);
+  },
+  // Noise has no pitch; place it on a fixed high lane ranked by LFSR shift rate so drum
+  // patterns read as distinct rows above the melody instead of rescaling the whole roll.
+  _noiseLane(rateHz) {
+    return Math.max(84, Math.min(106, Math.round(76 + (Math.log2(Math.max(4, rateHz)) - 2) * 30 / 17)));
+  },
+  _pushNote(i, tick, noteMidi, endTick) {
+    const st = this.channels[i];
+    if (st.open) {
+      // same truncation _debugEvent applies per hardwareType: the old bar ends where the new starts
+      if ((st.open.activeUntilTick ?? st.open.tick) > tick) st.open.activeUntilTick = tick;
+      st.open = null;
+    }
+    const evt = { type: 'note', trackIdx: i, hardwareType: i + 1, tick, noteMidi, durationTicks: 1, activeUntilTick: endTick };
+    player.pianoRollEvents.push(evt);
+    if (player.pianoRollEvents.length > 900) player.pianoRollEvents.splice(0, player.pianoRollEvents.length - 900);
+    st.lastPitchOff = 0;
+    return evt;
+  },
+  _poll() {
+    const eng = standardGbsEngine;
+    if (!eng?.cpu || !eng.bus) return;
+    const snap = eng.channelNotes();
+    if (!snap) return;
+    const tick = Math.floor(eng.bus.cycles / 70224);
+    snap.forEach((ch, i) => {
+      const st = this.channels[i];
+      const midi = ch.kind === 'noise' ? this._noiseLane(ch.rateHz) : Math.round(ch.midi);
+      const retriggered = ch.triggerCycles !== st.lastTrigger;
+      if (retriggered) st.lastTrigger = ch.triggerCycles;
+      if (!ch.on) {
+        if (st.open) { st.open.activeUntilTick = Math.max(st.open.tick + 1, tick); st.open = null; }
+        // A note can trigger AND decay to silence entirely between polls (short percussion
+        // hits); the trigger timestamp still proves it happened, so draw a brief blip.
+        if (retriggered && ch.triggerVol > 0 && Number.isFinite(midi)) {
+          const onTick = Math.max(0, Math.floor(ch.triggerCycles / 70224));
+          this._pushNote(i, onTick, midi, onTick + 2);
+        }
+        return;
+      }
+      if (!Number.isFinite(midi)) return;
+      if (!st.open || retriggered || midi !== st.open.noteMidi) {
+        // Retriggers get their exact onset frame from the PSG trigger timestamp; pitch
+        // slides that cross a semitone (no retrigger) just start a new bar at poll time.
+        const startTick = retriggered ? Math.max(0, Math.floor(ch.triggerCycles / 70224)) : tick;
+        st.open = this._pushNote(i, startTick, midi, tick + 1);
+      } else {
+        st.open.activeUntilTick = tick + 1;
+        if (ch.kind !== 'noise') {
+          const off = ch.midi - st.open.noteMidi;
+          if (Math.abs(off - st.lastPitchOff) >= 0.03) {
+            player.pianoRollPitchEvents.push({ type: 'pitch', trackIdx: i, tick, pitchOffsetSemis: off });
+            if (player.pianoRollPitchEvents.length > 1200) player.pianoRollPitchEvents.splice(0, player.pianoRollPitchEvents.length - 1200);
+            st.lastPitchOff = off;
+          }
+        }
+      }
+    });
+    player.pianoRollLastTick = Math.max(player.pianoRollLastTick, tick);
+    player._drawLiveKeyboard();
+    player.updateDebugPanel();
+  },
+};
+
 function setStatus(msg) {
   document.getElementById('status').textContent = msg;
 }
@@ -5241,12 +5341,14 @@ document.getElementById('btnPlay').addEventListener('click', async () => {
       if (!standardGbsEngine?.canPlay()) { setStatus('Load a GBS file first.'); return; }
       const songIdx = parseInt(document.getElementById('songSelect')?.value, 10) || 0;
       await standardGbsEngine.play(songIdx);
+      gbsPianoRoll.start();
       setStatus(`GBS LLE streaming: ${standardGbsEngine.header.title} (song ${songIdx + 1}/${standardGbsEngine.header.songCount})`);
     } catch (err) {
       setStatus('GBS playback failed: ' + err.message);
     }
     return;
   }
+  gbsPianoRoll.stop(); // non-GBS playback takes over the piano roll from here
   if (document.getElementById('engineSelect')?.value === 'gsf-lle') {
     try {
       const debugEnabled = player.isDebugEnabled();
@@ -5546,6 +5648,7 @@ document.getElementById('btnStop').addEventListener('click', () => {
   player.stop();
   standardGsfEngine?.stop(); // also halt any live GSF LLE stream
   standardGbsEngine?.stop(); // also halt any live GBS LLE stream
+  gbsPianoRoll.stop();
   setStatus('Stopped');
 });
 
@@ -6559,6 +6662,7 @@ async function initWithBuffer(buf, source = {}) {
 // selectors from whatever player.loadROM() just parsed. Not used by the GBS path (see
 // loadGbsIntoUi), which has no song table/voice group data to populate these from.
 async function finishNonGbsLoad(count) {
+  gbsPianoRoll.stop();
   standardGbsEngine?.reset(); // clear out any stale GBS LLE state so it can't be played by mistake
   const engineSel = document.getElementById('engineSelect');
   if (engineSel?.value === 'gbs-lle') engineSel.value = 'mp2k-hle';

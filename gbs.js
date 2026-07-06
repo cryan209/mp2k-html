@@ -11,7 +11,7 @@
 //   0x0A  play address (2 bytes)           called periodically (vblank or timer, see below)
 //   0x0C  stack pointer (2 bytes)
 //   0x0E  timer modulo / TMA (1 byte)
-//   0x0F  timer control / TAC (1 byte)     both 0 => driver expects vblank-driven play calls
+//   0x0F  timer control / TAC (1 byte)     bit 2 clear => vblank-driven play calls
 //   0x10  title (32 bytes, null-padded ASCII)
 //   0x30  author (32 bytes)
 //   0x50  copyright (32 bytes)
@@ -51,8 +51,9 @@
       author: decodeCString(u8, 0x30, 32),
       copyright: decodeCString(u8, 0x50, 32),
       // Whether the driver expects to be ticked via the timer interrupt (0x50) rather than
-      // vblank (0x40) — GBS convention: nonzero TMA/TAC means "use the timer".
-      usesTimer: view.getUint8(0x0e) !== 0 || view.getUint8(0x0f) !== 0,
+      // vblank (0x40) — GBS convention: TAC bit 2 (the hardware timer-enable bit) decides;
+      // a nonzero TMA with the timer disabled still means vblank.
+      usesTimer: (view.getUint8(0x0f) & 0x04) !== 0,
     };
   }
 

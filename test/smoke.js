@@ -1026,7 +1026,12 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   (function () {
     var buf = buildGbs({ timerModulo: 0x80, timerControl: 0x05 });
     var h = GbsTools.decodeHeader(buf);
-    check(h.usesTimer === true, 'GbsTools.decodeHeader: nonzero TMA/TAC means timer-driven (usesTimer=true)');
+    check(h.usesTimer === true, 'GbsTools.decodeHeader: TAC bit 2 set means timer-driven (usesTimer=true)');
+    // TAC bit 2 is the decider per the GBS spec — a stray nonzero TMA with the timer
+    // disabled must still be vblank-driven.
+    var bufVbl = buildGbs({ timerModulo: 0x80, timerControl: 0x00 });
+    check(GbsTools.decodeHeader(bufVbl).usesTimer === false,
+      'GbsTools.decodeHeader: nonzero TMA with TAC bit 2 clear stays vblank-driven');
   })();
 
   (function () {
@@ -1130,6 +1135,105 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
     }
     check(hasNonzero, 'StandardGbsEngine produces audible (nonzero) output for a triggered square channel');
     check(peak > 0.1, 'StandardGbsEngine DMG mix is normalized to audible Web Audio range (peak=' + peak + ')');
+
+    // channelNotes: register-level note snapshot for the piano roll / live keyboard.
+    // NR13=0x00 + NR14 freq bits 0x07 => freq 0x700 = 1792 => 131072/256 = 512Hz ~= B4+0.37.
+    var notes = eng2.channelNotes();
+    check(notes && notes.length === 4, 'channelNotes reports all 4 PSG channels');
+    check(notes[0].on === true && Math.abs(notes[0].midi - 71.6) < 0.1,
+      'channelNotes square1 is on at the register-derived MIDI pitch (midi=' + (notes[0] && notes[0].midi.toFixed(2)) + ')');
+    check(notes[1].on === false && notes[2].on === false && notes[3].on === false,
+      'channelNotes reports untriggered channels as off');
+    check(typeof notes[0].triggerCycles === 'number' && typeof notes[3].rateHz === 'number',
+      'channelNotes exposes trigger timestamps and a noise shift rate');
+  })();
+
+  // Regression check: the play routine must be called at EXACTLY the vblank rate (59.7275Hz),
+  // even when the routine itself is expensive. Previously the routine's own execution time
+  // accumulated in the bus's synthetic vblank counter and, the moment the HRAM stub's RETI
+  // re-enabled IME, dispatched a bonus play call — every song ran measurably fast (~4% on
+  // Pokemon Blue, proportional to the routine's cycle cost).
+  (function () {
+    // init: RET. play: increment a WRAM counter, then burn ~33k cycles in a nested loop.
+    var rom = new Uint8Array(0x40);
+    rom[0] = 0xc9; // init at 0x0400: RET
+    var play = [
+      0xfa, 0x01, 0xc0, // LD A,(0xC001)
+      0x3c,             // INC A
+      0xea, 0x01, 0xc0, // LD (0xC001),A
+      0x0e, 0x08,       // LD C,8
+      0x06, 0xff,       //   outer: LD B,0xFF
+      0x05,             //   inner: DEC B
+      0x20, 0xfd,       //   JR NZ,inner
+      0x0d,             //   DEC C
+      0x20, 0xf8,       //   JR NZ,outer
+      0xc9,             // RET
+    ];
+    rom.set(play, 8); // playAddr = 0x0408
+    var buf3 = new ArrayBuffer(GbsTools.HEADER_SIZE + rom.length);
+    var view3 = new DataView(buf3);
+    var u83 = new Uint8Array(buf3);
+    u83[0] = 0x47; u83[1] = 0x42; u83[2] = 0x53; u83[3] = 0x01;
+    view3.setUint8(0x04, 1); view3.setUint8(0x05, 1);
+    view3.setUint16(0x06, 0x0400, true);
+    view3.setUint16(0x08, 0x0400, true);
+    view3.setUint16(0x0a, 0x0408, true);
+    view3.setUint16(0x0c, 0xdff0, true);
+    view3.setUint8(0x0e, 0); view3.setUint8(0x0f, 0); // vblank-driven
+    u83.set(rom, GbsTools.HEADER_SIZE);
+
+    var eng3 = new StandardGbsEngine();
+    eng3.loadBuffer(buf3);
+    eng3._initCpu(0);
+    // Regression check: the play ISR must execute interleaved with the sample clock, not
+    // run to completion at one instant. Previously bus.cycles jumped the routine's whole
+    // cost (~2k+ cycles) past renderCycle at each vblank, freezing the output waveform for
+    // ~25 samples and producing an audible ~60Hz buzz. Max legal overshoot is one
+    // instruction (<= 24 cycles) plus the sub-cycle render fraction.
+    var maxOvershoot = 0;
+    for (var s = 0; s < 2; s++) { // 2 emulated seconds
+      var CHUNK = 250;
+      for (var c = 0; c < 8000 / CHUNK; c++) {
+        eng3.renderSamples(CHUNK, 8000);
+        maxOvershoot = Math.max(maxOvershoot, eng3.bus.cycles - eng3.renderCycle);
+      }
+    }
+    var calls = eng3.bus.wram[1];
+    check(calls >= 118 && calls <= 121,
+      'expensive play routine is still called at exactly vblank rate over 2s (got ' + calls + ', expected ~119)');
+    check(maxOvershoot <= 24,
+      'play ISR execution stays interleaved with the sample clock (max overshoot ' + Math.round(maxOvershoot) + ' cycles)');
+  })();
+
+  // Timer-driven cadence: the play-call period is TAC_PERIOD * (256 - TMA) cycles (TIMA
+  // counts up from TMA and interrupts on overflow), halved again in CGB double-speed
+  // (TAC bit 7). Previously the (256 - TMA) factor was missing, so timer-driven rips
+  // played their song data up to 256x too fast.
+  (function () {
+    function timerGbs(tma, tac) {
+      var rom = [0xc9]; // init/play: RET
+      var buf4 = new ArrayBuffer(GbsTools.HEADER_SIZE + rom.length);
+      var view4 = new DataView(buf4);
+      var u84 = new Uint8Array(buf4);
+      u84[0] = 0x47; u84[1] = 0x42; u84[2] = 0x53; u84[3] = 0x01;
+      view4.setUint8(0x04, 1); view4.setUint8(0x05, 1);
+      view4.setUint16(0x06, 0x0400, true);
+      view4.setUint16(0x08, 0x0400, true);
+      view4.setUint16(0x0a, 0x0400, true);
+      view4.setUint16(0x0c, 0xdff0, true);
+      view4.setUint8(0x0e, tma); view4.setUint8(0x0f, tac);
+      u84.set(rom, GbsTools.HEADER_SIZE);
+      return buf4;
+    }
+    var engT = new StandardGbsEngine();
+    engT.loadBuffer(timerGbs(0x80, 0x05)); // TAC clock 01 = 16 cycles/tick, 128 ticks to overflow
+    engT._initCpu(0);
+    check(engT.playPeriodCycles === 16 * 128,
+      'timer-driven play period includes the (256 - TMA) overflow factor (got ' + engT.playPeriodCycles + ')');
+    engT.loadBuffer(timerGbs(0x80, 0x85)); // same but CGB double-speed bit set
+    engT._initCpu(0);
+    check(engT.playPeriodCycles === (16 * 128) / 2,
+      'CGB double-speed bit (TAC bit 7) halves the timer play period (got ' + engT.playPeriodCycles + ')');
   })();
 })();
 

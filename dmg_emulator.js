@@ -32,6 +32,7 @@
       this.nextPlayCycle = 0;
       this.playPeriodCycles = DMG_CYCLES_PER_FRAME;
       this.renderCycle = 0;
+      this._isr = null; // in-flight play interrupt, executed incrementally by _advancePlaybackTo
     }
 
     // Clears any loaded song, matching StandardGsfEngine.reset()'s role: called when the UI
@@ -44,6 +45,7 @@
       this.bus = null;
       this.cpu = null;
       this.error = null;
+      this._isr = null;
     }
 
     loadBuffer(buf) {
@@ -67,6 +69,7 @@
     // Builds the bus+CPU and runs the song's init routine to completion. `songIndex` is
     // 0-based (GBS convention: init is called with A = 0..songCount-1).
     _initCpu(songIndex = 0) {
+      this._isr = null; // a song switch mid-ISR must not resume the old CPU's interrupt
       this.bus = new z80.DmgMemoryBus(this.romImage, { cpuHz: DMG_CPU_HZ });
       this.cpu = new z80.Sm83Cpu(this.bus);
       const h = this.header;
@@ -118,37 +121,69 @@
         }
       }
       this.cpu.ime = true;
-      this.playPeriodCycles = h.usesTimer ? TAC_PERIOD[h.timerControl & 0x03] : DMG_CYCLES_PER_FRAME;
+      // Timer cadence: TIMA counts up from TMA at TAC_PERIOD cycles per tick and interrupts
+      // on overflow, so the play-call period is (256 - TMA) ticks — not one. TAC bit 7 is
+      // the GBS convention for CGB double-speed, which doubles the call rate.
+      this.playPeriodCycles = h.usesTimer
+        ? Math.max(1, (TAC_PERIOD[h.timerControl & 0x03] * (256 - h.timerModulo)) >> (h.timerControl & 0x80 ? 1 : 0))
+        : DMG_CYCLES_PER_FRAME;
       this.nextPlayCycle = this.bus.cycles + this.playPeriodCycles;
       this.renderCycle = this.bus.cycles;
     }
 
-    _runPlayInterrupt(guardLimit = 200000) {
-      const returnPc = this.cpu.pc;
+    // Enters the play interrupt WITHOUT running it to completion: the ISR body is executed
+    // incrementally by _advancePlaybackTo as the sample clock advances, so its cycle cost
+    // lands on the audio timeline exactly where it executes, like real hardware. Running it
+    // to completion at one instant jumped bus.cycles ~2k+ cycles past the sample clock,
+    // freezing the output waveform for ~25 samples every vblank — an audible ~60Hz buzz.
+    _beginPlayInterrupt() {
       const vector = this.header.usesTimer ? TIMER_VECTOR : VBLANK_VECTOR;
-      const beforeService = this.cpu.cycles;
+      this._isr = { returnPc: this.cpu.pc, guard: 0 };
+      const before = this.cpu.cycles;
       this.cpu.serviceVector(this.bus.vectorOverride[vector] ?? vector);
-      this.bus.tick(this.cpu.cycles - beforeService, this.cpu);
-      let guard = 0;
-      while (this.cpu.pc !== returnPc && guard++ < guardLimit) {
-        const before = this.cpu.cycles;
-        this.cpu.step();
-        this.bus.tick(this.cpu.cycles - before, this.cpu);
-        if (this.cpu.illegal || this.cpu.stopped) {
-          this.error = this.cpu.reason || 'GBS routine stopped unexpectedly';
-          break;
-        }
+      this.bus.tick(this.cpu.cycles - before);
+    }
+
+    // One CPU instruction of the active play ISR. bus.tick must NOT dispatch interrupts
+    // here: the routine's own run time accumulates in the bus's synthetic vblank/timer
+    // counters, and the stub's closing RETI re-enables IME — with dispatch enabled that
+    // immediately re-enters the stub for a bonus play call, making every song run
+    // measurably fast (~4% on Pokemon Blue). HALT wake is kept manually.
+    _stepIsr(guardLimit = 200000) {
+      const isr = this._isr;
+      const before = this.cpu.cycles;
+      this.cpu.step();
+      this.bus.tick(this.cpu.cycles - before);
+      if (this.cpu.halted && (this.bus.ie & this.bus.if_ & 0x1f)) this.cpu.wake();
+      if (this.cpu.illegal || this.cpu.stopped) {
+        this.error = this.cpu.reason || 'GBS routine stopped unexpectedly';
+        this._endPlayInterrupt();
+        return;
       }
+      if (this.cpu.pc === isr.returnPc || ++isr.guard >= guardLimit) this._endPlayInterrupt();
+    }
+
+    _endPlayInterrupt() {
+      this._isr = null;
       this.cpu.ime = true;
+      // Drop the cadence interrupt the bus raised from the routine's own run time; the
+      // engine schedules the next call itself via nextPlayCycle.
+      this.bus.if_ &= ~(this.header.usesTimer ? 0x04 : 0x01);
     }
 
     _advancePlaybackTo(targetCycle) {
-      while (this.nextPlayCycle && this.nextPlayCycle <= targetCycle) {
-        this.bus.tickPassive(this.nextPlayCycle - this.bus.cycles);
-        this._runPlayInterrupt();
-        this.nextPlayCycle += this.playPeriodCycles;
+      for (;;) {
+        while (this._isr && this.bus.cycles < targetCycle) this._stepIsr();
+        if (this._isr) return; // mid-ISR at the sample boundary; resume on the next sample
+        if (this.nextPlayCycle && this.nextPlayCycle <= targetCycle) {
+          this.bus.tickPassive(this.nextPlayCycle - this.bus.cycles);
+          this._beginPlayInterrupt();
+          this.nextPlayCycle += this.playPeriodCycles;
+        } else {
+          this.bus.tickPassive(targetCycle - this.bus.cycles);
+          return;
+        }
       }
-      this.bus.tickPassive(targetCycle - this.bus.cycles);
     }
 
     // Pure, Web-Audio-agnostic rendering: advances the CPU/bus for enough cycles to produce
@@ -216,6 +251,51 @@
         this.sources.clear();
       }
       this.source = null;
+    }
+
+    // Register-level channel snapshot for UI visualization (piano roll / live keyboard).
+    // GBS has no sequencer to emit note events, but the PSG registers ARE the notes: the
+    // tonal channels' live frequency registers convert to a (fractional) MIDI note, the
+    // trigger timestamps give exact note onsets, and the envelope volume distinguishes
+    // sounding from silent. Noise has no pitch, so it reports its LFSR shift rate instead.
+    channelNotes() {
+      if (!this.bus) return null;
+      const p = this.bus.psg;
+      const nr51 = this.bus.io[0x25] | 0;
+      const midiFromHz = (hz) => 69 + 12 * Math.log2(hz / 440);
+      const sq = (i) => {
+        const st = p.square[i];
+        return {
+          kind: i ? 'sq2' : 'sq1',
+          on: !!(st.enabled && st.volume > 0 && (nr51 & (0x11 << i))), // routed to either speaker
+          midi: midiFromHz(131072 / Math.max(1, 2048 - st.freqCur)),
+          vol: st.volume / 15,
+          triggerVol: st.volInit / 15,
+          triggerCycles: st.triggerCycles,
+        };
+      };
+      const w = p.wave;
+      const n = p.noise;
+      return [
+        sq(0),
+        sq(1),
+        {
+          kind: 'wave',
+          on: !!(w.enabled && (w.forceVolume || w.outputLevel > 0) && (nr51 & 0x44)),
+          midi: midiFromHz(65536 / Math.max(1, 2048 - w.freqCur)),
+          vol: w.forceVolume ? 0.75 : w.outputLevel,
+          triggerVol: w.forceVolume ? 0.75 : w.outputLevel,
+          triggerCycles: w.triggerCycles,
+        },
+        {
+          kind: 'noise',
+          on: !!(n.enabled && n.volume > 0 && (nr51 & 0x88)),
+          rateHz: this.bus.cpuHz / Math.max(1, n.periodCycles || 32),
+          vol: n.volume / 15,
+          triggerVol: n.volInit / 15,
+          triggerCycles: n.triggerCycles,
+        },
+      ];
     }
 
     summary() {

@@ -4196,7 +4196,11 @@ class GS1Player {
           </div>
         </div>
         <div class="track-inst" id="tc-inst-${i}">–</div>
-        <div class="track-meter"><div class="track-meter-fill" id="tc-meter-${i}"></div></div>
+        <div class="track-meter" title="Stereo energy: left of the tick = left speaker, right = right speaker">
+          <div class="track-meter-fill-l" id="tc-meter-l-${i}"></div>
+          <div class="track-meter-fill-r" id="tc-meter-r-${i}"></div>
+          <div class="track-meter-tick"></div>
+        </div>
         <div class="track-note" id="tc-note-${i}"></div>
       `;
       grid.appendChild(cell);
@@ -4268,7 +4272,8 @@ class GS1Player {
       + (t.solo ? ' solo' : '');
 
     const instEl  = document.getElementById(`tc-inst-${i}`);
-    const meterEl = document.getElementById(`tc-meter-${i}`);
+    const meterL  = document.getElementById(`tc-meter-l-${i}`);
+    const meterR  = document.getElementById(`tc-meter-r-${i}`);
     const noteEl  = document.getElementById(`tc-note-${i}`);
     const muteEl  = document.getElementById(`tc-mute-${i}`);
     const soloEl  = document.getElementById(`tc-solo-${i}`);
@@ -4280,8 +4285,16 @@ class GS1Player {
       const { typeB, keyAdj } = t.instEntry;
       instEl.textContent = `vg:${this.voiceGroup.indexOf(t.instEntry)} k${keyAdj}`;
     }
-    const vol = t.voices.length ? Math.round((t.volume / 127) * 100) : 0;
-    meterEl.style.width = vol + '%';
+    // Stereo energy split matching the audio graph's equal-power StereoPannerNode
+    // (pan = panOffset/64): show the per-side amplitude the panner actually applies,
+    // averaged over the track's live voices (falling back to the track's own pan).
+    const vol = t.voices.length ? t.volume / 127 : 0;
+    const panOff = t.voices.length
+      ? t.voices.reduce((sum, v) => sum + (v.panOffset || 0), 0) / t.voices.length
+      : (t.pan || 0);
+    const theta = (Math.max(-1, Math.min(1, panOff / 64)) + 1) * Math.PI / 4;
+    if (meterL) meterL.style.width = Math.min(50, Math.round(vol * Math.cos(theta) * 50)) + '%';
+    if (meterR) meterR.style.width = Math.min(50, Math.round(vol * Math.sin(theta) * 50)) + '%';
 
     if (t.voices.length && t.lastMidi >= 0) {
       const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
@@ -5112,7 +5125,11 @@ const gbsPianoRoll = {
           </div>
         </div>
         <div class="track-inst"></div>
-        <div class="track-meter"><div class="track-meter-fill"></div></div>
+        <div class="track-meter" title="Stereo energy: left of the tick = left speaker, right = right speaker">
+          <div class="track-meter-fill-l"></div>
+          <div class="track-meter-fill-r"></div>
+          <div class="track-meter-tick"></div>
+        </div>
         <div class="track-note"></div>`;
       const [muteBtn, soloBtn] = cell.querySelectorAll('button');
       muteBtn.addEventListener('click', e => { e.stopPropagation(); this.muted[i] = !this.muted[i]; this._applyMask(); });
@@ -5135,11 +5152,21 @@ const gbsPianoRoll = {
     });
   },
   _updateCells(snap) {
+    // Stereo energy per side: the channel's actual output RMS (from its scope ring),
+    // gated by NR51 routing and scaled by NR50's per-side master volume — with the host
+    // mute mask applied, so a muted channel's meter empties while its scope keeps tracing.
+    const bus = standardGbsEngine?.bus;
+    const nr50 = bus ? bus.io[0x24] || 0 : 0;
+    const nr51 = bus ? (bus.io[0x25] || 0) & bus.channelMask8 : 0;
     this.cells?.forEach((cell, i) => {
       const d = snap[i];
       const midi = d.kind === 'noise' ? null : Math.round(d.midi);
       cell.classList.toggle('active', d.on);
-      cell.querySelector('.track-meter-fill').style.width = Math.round(d.vol * 100) + '%';
+      const rms = player.gbsScopeOwners?.[i]?.scopeRms || 0;
+      const lGain = (nr51 & (0x10 << i)) ? (((nr50 >>> 4) & 7) + 1) / 8 : 0;
+      const rGain = (nr51 & (1 << i)) ? ((nr50 & 7) + 1) / 8 : 0;
+      cell.querySelector('.track-meter-fill-l').style.width = Math.min(50, Math.round(rms * lGain * 50)) + '%';
+      cell.querySelector('.track-meter-fill-r').style.width = Math.min(50, Math.round(rms * rGain * 50)) + '%';
       cell.querySelector('.track-note').textContent =
         d.on ? (d.kind === 'noise' ? `${(d.rateHz / 1000).toFixed(1)}kHz` : Number.isFinite(midi) ? noteName(midi) : '') : '';
       cell.querySelector('.track-inst').textContent =
@@ -5227,8 +5254,8 @@ const gbsPianoRoll = {
     });
     player.pianoRollLastTick = Math.max(player.pianoRollLastTick, tick);
     player.gbsChannelDiag = snap;
+    this._updateScopes(); // before _updateCells: the stereo meters read the fresh scope RMS
     this._updateCells(snap);
-    this._updateScopes();
     player._drawLiveKeyboard();
     player.updateDebugPanel();
   },

@@ -42,8 +42,11 @@ h1 { font-size:13px; color:#6366f1; margin-bottom:12px; letter-spacing:2px; text
 .track-toggle.active { background:#6366f1; border-color:#818cf8; color:#fff; }
 .track-toggle.solo.active { background:#f59e0b; border-color:#fbbf24; color:#111; }
 .track-inst { font-size:9px; color:#4b5563; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-height:11px; }
-.track-meter { height:4px; background:#1a1e2e; border-radius:2px; margin-top:3px; overflow:hidden; }
+.track-meter { height:4px; background:#1a1e2e; border-radius:2px; margin-top:3px; overflow:hidden; position:relative; }
 .track-meter-fill { height:100%; background:var(--track-color); border-radius:2px; width:0%; transition:width 50ms; }
+.track-meter-fill-l { position:absolute; right:50%; top:0; height:100%; background:var(--track-color); border-radius:2px 0 0 2px; width:0; transition:width 50ms; }
+.track-meter-fill-r { position:absolute; left:50%; top:0; height:100%; background:var(--track-color); border-radius:0 2px 2px 0; width:0; transition:width 50ms; }
+.track-meter-tick { position:absolute; left:50%; top:0; width:1px; height:100%; background:#334155; }
 .track-note { font-size:8px; color:var(--track-color); min-height:10px; margin-top:2px; }
 .live-keyboard { margin-top:8px; border:1px solid #1a1e2e; border-radius:4px; background:#05070d; overflow:hidden; }
 .live-keyboard-head { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:5px 6px; border-bottom:1px solid #151a2a; background:#0d1117; }

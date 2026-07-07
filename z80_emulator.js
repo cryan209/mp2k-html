@@ -545,6 +545,7 @@
       if (addr === 0xff06) return this.io[0x06]; // TMA
       if (addr === 0xff07) return this.io[0x07]; // TAC
       if (addr === 0xff0f) return this.if_ & 0x1f;
+      if (addr === 0xff26) return 0x70 | (this.io[0x26] & 0x80) | this.psg.channelStatusBits(); // NR52
       if (addr === 0xffff) return this.ie & 0x1f;
       if (addr >= 0xff80 && addr <= 0xfffe) return this.hram[addr - 0xff80];
       if (addr >= 0xff00 && addr < 0xff80) return this.io[addr - 0xff00];
@@ -574,6 +575,13 @@
       if (addr === 0xff06) { this.io[0x06] = value; return; }
       if (addr === 0xff07) { this.io[0x07] = value & 0x07; return; }
       if (addr === 0xff0f) { this.if_ = value & 0x1f; return; }
+      if (addr === 0xff26) {
+        const wasOn = !!(this.io[0x26] & 0x80);
+        const nowOn = !!(value & 0x80);
+        this.io[0x26] = nowOn ? 0x80 : 0;
+        if (wasOn && !nowOn) this.psg.powerOff();
+        return;
+      }
       if (addr === 0xffff) { this.ie = value & 0x1f; return; }
       if (addr >= 0xff80 && addr <= 0xfffe) { this.hram[addr - 0xff80] = value; return; }
       if (addr >= 0xff00 && addr < 0xff80) { this.io[addr - 0xff00] = value; return; }

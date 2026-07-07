@@ -975,6 +975,21 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
 
   (function () {
     var bus = new DmgMemoryBus(freshDmgRom(2));
+    bus.write8(0xff26, 0x87); // NR52: low channel-status bits are read-only, even if written as 1s
+    check((bus.read8(0xff26) & 0x8f) === 0x80,
+      'DmgMemoryBus NR52 ignores written channel status bits (read=0x' + bus.read8(0xff26).toString(16) + ')');
+    bus.write8(0xff1a, 0x80); // NR30: wave DAC on
+    bus.write8(0xff1c, 0x20); // NR32: 100% volume
+    bus.write8(0xff1e, 0x80); // NR34: trigger
+    check((bus.read8(0xff26) & 0x04) !== 0,
+      'DmgMemoryBus NR52 reports live wave channel status after trigger');
+    bus.write8(0xff1a, 0x00); // Oracle waits for this to clear NR52 bit 2 before loading wave RAM
+    check((bus.read8(0xff26) & 0x04) === 0,
+      'DmgMemoryBus NR52 wave status clears when NR30 DAC is disabled');
+  })();
+
+  (function () {
+    var bus = new DmgMemoryBus(freshDmgRom(2));
     bus.write8(0xff21, 0x09); // NR42: initial volume 0, envelope increases every 64Hz tick
     bus.write8(0xff23, 0x80); // NR44: trigger
     check(bus.psg.noise.enabled === true && bus.psg.noise.volume === 0,
@@ -991,6 +1006,18 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
     var bus = new DmgMemoryBus(freshDmgRom(2));
     bus.write8(0xff30, 0xab);
     check(bus.psg.readWave(0) === 0xab, 'DmgMemoryBus wave RAM (0xFF30+) reaches PsgDmg natively');
+  })();
+
+  (function () {
+    var bus = new DmgMemoryBus(freshDmgRom(2));
+    bus.write8(0xff1a, 0x80); // NR30: wave DAC on
+    bus.write8(0xff1c, 0x00); // NR32: muted at trigger time
+    bus.write8(0xff1e, 0x80); // NR34: trigger
+    check(bus.psg.wave.enabled === true && bus.psg.wave.outputLevel === 0,
+      'DmgMemoryBus wave can trigger while NR32 is muted');
+    bus.write8(0xff1c, 0x20); // Oracle updates wave volume after the trigger on some songs
+    check(bus.psg.wave.outputLevel === 1,
+      'DmgMemoryBus wave NR32 output level updates live after trigger');
   })();
 
   (function () {

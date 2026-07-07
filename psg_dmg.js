@@ -135,6 +135,9 @@
         case NR30:
           if (!(value & 0x80)) this.wave.enabled = false;
           break;
+        case NR32:
+          this._updateWaveLevel();
+          break;
         case NR34:
           this._updateWaveFreq();
           if (value & 0x80) this._triggerWave(nowCycles);
@@ -306,15 +309,21 @@
       if (!st.lengthEnabled && st.lengthCounter <= 0) st.lengthCounter = 256;
     }
 
-    _triggerWave(nowCycles = 0) {
+    _updateWaveLevel() {
       const st = this.wave;
-      const cntL = this.regs[NR30];
       const cntH = this._regPair(NR31); // NR31 (length, low byte) + NR32 (volume, high byte)
-      // NR30 bit7: DAC power. If off, the channel produces no output regardless of Trigger.
-      const dacOn = !!(cntL & 0x80);
       const levelBits = (cntH >>> 13) & 3;
       st.outputLevel = [0, 1, 0.5, 0.25][levelBits];
       st.forceVolume = !!(cntH & 0x8000);
+    }
+
+    _triggerWave(nowCycles = 0) {
+      const st = this.wave;
+      const cntL = this.regs[NR30];
+      // NR30 bit7: DAC power. If off, the channel produces no output regardless of Trigger.
+      const dacOn = !!(cntL & 0x80);
+      this._updateWaveLevel();
+      const cntH = this._regPair(NR31); // NR31 (length, low byte) + NR32 (volume, high byte)
       const lengthData = cntH & 0xff;
       st.lengthCounter = 256 - lengthData;
       st.lengthCyclesTotal = st.lengthEnabled ? (256 - lengthData) * (this.cpuHz / 256) : Infinity;

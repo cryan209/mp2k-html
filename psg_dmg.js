@@ -118,6 +118,12 @@
       this.regs[offset] = value;
       this.sampleCacheCycles = -1;
       switch (offset) {
+        case NR12:
+          if ((value & 0xf8) === 0) this.square[0].enabled = false;
+          break;
+        case NR22:
+          if ((value & 0xf8) === 0) this.square[1].enabled = false;
+          break;
         case NR14:
           this._updateSquareFreq(0);
           if (value & 0x80) this._triggerSquare(0, nowCycles);
@@ -135,6 +141,9 @@
           break;
         case NR43:
           this._updateNoiseControl();
+          break;
+        case NR42:
+          if ((value & 0xf8) === 0) this.noise.enabled = false;
           break;
         case NR44:
           this.noise.lengthEnabled = !!(this._regPair(NR43) & 0x4000);
@@ -186,13 +195,12 @@
     _triggerSquare(ch, nowCycles = 0) {
       const st = this.square[ch];
       const envReg = this._regPair(ch === 0 ? NR11 : NR21);
-      let triggerEnabled = true;
+      let triggerEnabled = ((envReg >>> 8) & 0xf8) !== 0;
       const dutyBits = (envReg >>> 6) & 3;
       st.dutyFraction = [0.125, 0.25, 0.5, 0.75][dutyBits];
       st.dutyStep = [1, 2, 4, 6][dutyBits];
       st.volInit = (envReg >>> 12) & 0xf;
       st.volume = st.volInit;
-      if (st.volInit === 0) triggerEnabled = false;
       st.envDir = (envReg >>> 11) & 1; // 0=decrease, 1=increase
       st.envStep = (envReg >>> 8) & 7;
       st.envStepsApplied = 0;
@@ -367,7 +375,7 @@
       const freqReg = this._regPair(NR43);
       st.volInit = (envReg >>> 12) & 0xf;
       st.volume = st.volInit;
-      const triggerEnabled = st.volInit > 0;
+      const triggerEnabled = ((envReg >>> 8) & 0xf8) !== 0;
       st.envDir = (envReg >>> 11) & 1;
       st.envStep = (envReg >>> 8) & 7;
       st.envStepsApplied = 0;

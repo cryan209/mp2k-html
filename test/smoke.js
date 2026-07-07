@@ -975,6 +975,20 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
 
   (function () {
     var bus = new DmgMemoryBus(freshDmgRom(2));
+    bus.write8(0xff21, 0x09); // NR42: initial volume 0, envelope increases every 64Hz tick
+    bus.write8(0xff23, 0x80); // NR44: trigger
+    check(bus.psg.noise.enabled === true && bus.psg.noise.volume === 0,
+      'DmgMemoryBus noise trigger honors DAC-on zero-volume increasing envelope');
+    bus.psg.outputsAt(65536); // eight 512Hz frame-sequencer ticks => one envelope clock
+    check(bus.psg.noise.volume === 1,
+      'DmgMemoryBus noise envelope can rise from zero volume after trigger (vol=' + bus.psg.noise.volume + ')');
+    bus.write8(0xff21, 0x00); // NR42 bits 3-7 all zero: DAC off, channel off
+    check(bus.psg.noise.enabled === false,
+      'DmgMemoryBus noise DAC-off write immediately disables channel');
+  })();
+
+  (function () {
+    var bus = new DmgMemoryBus(freshDmgRom(2));
     bus.write8(0xff30, 0xab);
     check(bus.psg.readWave(0) === 0xab, 'DmgMemoryBus wave RAM (0xFF30+) reaches PsgDmg natively');
   })();

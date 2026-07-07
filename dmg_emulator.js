@@ -11,12 +11,12 @@
   const DMG_CYCLES_PER_FRAME = 70224;
   const TAC_PERIOD = [1024, 16, 64, 256];
   const VBLANK_VECTOR = 0x40, TIMER_VECTOR = 0x50;
-  // Scratch memory region used to synthesize interrupt-vector stub routines (CALL playAddr;
-  // RETI) — GBS rips generally don't include real vector-table code, since the ripping tool
-  // only extracts the driver routines themselves, so the loader is expected to provide this
-  // glue. Placed in the middle of WRAM-mapped space isn't valid (WRAM starts at 0xC000 and
-  // isn't executable-restricted on real hardware, so it works fine as scratch code space).
-  const STUB_ADDR = 0xff80; // HRAM: unused by GBS drivers, always safe scratch space
+  // Synthetic interrupt-vector stub routine (CALL playAddr; RETI). GBS rips generally don't
+  // include real vector-table code, since the ripping tool only extracts the driver routines
+  // themselves, so the loader is expected to provide this glue. Keep it out of HRAM: some real
+  // drivers (Pokemon TCG) use FF80+ as scratch and would overwrite a visible stub after the
+  // first play call.
+  const STUB_ADDR = 0xfea0;
 
   class StandardGbsEngine {
     constructor() {
@@ -92,15 +92,14 @@
       this.bus.write8(0xff24, 0x77); // NR50: max volume both sides, ignore VIN
       this.bus.write8(0xff25, 0xff); // NR51: all 4 channels -> both left and right
 
-      // Synthesize CALL playAddr; RETI in HRAM (writable, unlike ROM — GBS rips don't include
-      // a real vector table since the ripping tool only extracts the driver routines) and
-      // redirect whichever vector the driver expects to be ticked from at it, per the GBS
-      // convention: nonzero TMA/TAC means "use the timer interrupt", otherwise vblank.
+      // Synthesize CALL playAddr; RETI as bus-owned code and redirect whichever vector the
+      // driver expects to be ticked from at it, per the GBS convention: nonzero TMA/TAC means
+      // "use the timer interrupt", otherwise vblank.
       const vector = h.usesTimer ? TIMER_VECTOR : VBLANK_VECTOR;
-      this.bus.write8(STUB_ADDR, 0xcd);              // CALL nn
-      this.bus.write8(STUB_ADDR + 1, h.playAddr & 0xff);
-      this.bus.write8(STUB_ADDR + 2, (h.playAddr >>> 8) & 0xff);
-      this.bus.write8(STUB_ADDR + 3, 0xd9);           // RETI
+      this.bus.syntheticCode[STUB_ADDR] = 0xcd;       // CALL nn
+      this.bus.syntheticCode[STUB_ADDR + 1] = h.playAddr & 0xff;
+      this.bus.syntheticCode[STUB_ADDR + 2] = (h.playAddr >>> 8) & 0xff;
+      this.bus.syntheticCode[STUB_ADDR + 3] = 0xd9;   // RETI
       this.bus.vectorOverride[vector] = STUB_ADDR;
 
       if (h.usesTimer) {

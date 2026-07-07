@@ -521,8 +521,9 @@
       // Optional per-vector-address redirect (vector address -> actual jump target). ROM is
       // read-only, so a host that can't inject real dispatch code at the fixed 0x40/0x48/...
       // vector addresses (e.g. StandardGbsEngine, since GBS rips don't include a real vector
-      // table) can point the vector at a stub it wrote into writable HRAM instead.
+      // table) can point the vector at bus-owned syntheticCode bytes instead.
       this.vectorOverride = {};
+      this.syntheticCode = {};
       // Host mute/solo mask ANDed onto NR51 at mix time (both L/R nibbles). Mix-only: the
       // PSG channels keep running so scopes/diagnostics still see a muted channel.
       this.channelMask8 = 0xff;
@@ -532,6 +533,7 @@
 
     read8(addr) {
       addr &= 0xffff;
+      if (Object.prototype.hasOwnProperty.call(this.syntheticCode, addr)) return this.syntheticCode[addr];
       if (addr < 0x4000) return this.rom[addr] || 0; // fixed bank 0
       if (addr < 0x8000) return this.rom[this._bankOffset(addr) % this.rom.length] || 0; // switchable bank
       if (addr < 0xa000) return this.vram[addr - 0x8000];

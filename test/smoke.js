@@ -1138,15 +1138,46 @@ check(st.r0 === 42 && st.r1 === 1, 'selfTest ARM basics (r0=42, r1=1)');
   check(eng.cpu.ime === true, 'StandardGbsEngine._initCpu leaves interrupts enabled for playback');
 
   // Advance far enough (via renderSamples, which ticks the bus/timer/vblank every step) for
-  // at least one synthetic vblank to fire and dispatch through the HRAM stub into play().
+  // at least one synthetic vblank to fire and dispatch through the bus-owned stub into play().
   eng.renderSamples(4096, 44100);
-  check(eng.bus.wram[1] === 0x01, 'StandardGbsEngine dispatches vblank IRQ through the HRAM stub into the play routine');
+  check(eng.bus.wram[1] === 0x01, 'StandardGbsEngine dispatches vblank IRQ through the synthetic stub into the play routine');
 
   var rendered = eng.renderSamples(256, 44100);
   check(rendered.left.length === 256 && rendered.right.length === 256, 'StandardGbsEngine.renderSamples returns requested sample count');
   var finite = true;
   for (var i = 0; i < rendered.left.length; i++) if (!isFinite(rendered.left[i]) || !isFinite(rendered.right[i])) finite = false;
   check(finite, 'StandardGbsEngine.renderSamples output is finite (no NaN/Infinity)');
+
+  // Regression check: Pokemon Trading Card Game uses FF80 as driver scratch. The synthetic
+  // CALL play; RETI glue must not occupy real HRAM, or the first play call overwrites the
+  // stub and every later vblank jumps into corrupted bytes, leaving the first note held.
+  (function () {
+    var rom = [
+      0xc9,                         // 0x0400 init: RET
+      0x3e, 0x99, 0xe0, 0x80,       // 0x0401 play: LD A,0x99 ; LDH (0x80),A
+      0xfa, 0x02, 0xc0, 0x3c,       // LD A,(0xC002) ; INC A
+      0xea, 0x02, 0xc0, 0xc9,       // LD (0xC002),A ; RET
+    ];
+    var bufH = new ArrayBuffer(GbsTools.HEADER_SIZE + rom.length);
+    var viewH = new DataView(bufH);
+    var u8H = new Uint8Array(bufH);
+    u8H[0] = 0x47; u8H[1] = 0x42; u8H[2] = 0x53; u8H[3] = 0x01;
+    viewH.setUint8(0x04, 1); viewH.setUint8(0x05, 1);
+    viewH.setUint16(0x06, 0x0400, true);
+    viewH.setUint16(0x08, 0x0400, true);
+    viewH.setUint16(0x0a, 0x0401, true);
+    viewH.setUint16(0x0c, 0xdff0, true);
+    viewH.setUint8(0x0e, 0); viewH.setUint8(0x0f, 0);
+    u8H.set(rom, GbsTools.HEADER_SIZE);
+
+    var engH = new StandardGbsEngine();
+    engH.loadBuffer(bufH);
+    engH._initCpu(0);
+    engH.renderSamples(8192, 44100);
+    check(engH.bus.hram[0] === 0x99, 'GBS play routine can use FF80 as HRAM scratch');
+    check(engH.bus.wram[2] > 1,
+      'StandardGbsEngine synthetic ISR survives driver writes to FF80 (play calls=' + engH.bus.wram[2] + ')');
+  })();
 
   // Regression check: a driver that triggers a square channel via LDH writes must actually
   // be audible. This would have caught the bug where NR50/NR51/NR52 were never bootstrapped

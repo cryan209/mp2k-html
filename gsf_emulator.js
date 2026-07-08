@@ -1683,6 +1683,11 @@
       this.halted = false;
       this.reason = '';
       this.instructions = 0;
+      // Cumulative GBA cycles spent asleep in BIOS Halt/Stop/IntrWait waiting on an IRQ
+      // (see _biosHalt/_intrWaitCore) -- lets a usage meter report the ARM7's actual duty
+      // cycle (busy / total GBA clock), like a hypervisor vCPU meter, independent of how
+      // fast this host happens to emulate it.
+      this.haltedCycles = 0;
       this.fastMode = false;
       this.r13_irq = 0x03007FA0; // GBA BIOS initializes IRQ SP here
       // Real ARM7TDMI banks r13/r14 (+ SPSR) separately per privileged mode -- User
@@ -3476,10 +3481,12 @@
       this._recordHaltEvent('before', pc);
       const MAX_SLICES = GBA_TOTAL_SCANLINES * 8; // 8 frames worth
       let slices = 0;
+      const cyclesBeforeWait = this.bus.cycles;
       while (!this.bus.haltPendingIrq() && slices < MAX_SLICES) {
         this.bus.advanceScanline();
         slices++;
       }
+      this.haltedCycles += this.bus.cycles - cyclesBeforeWait;
       this._checkAndDispatchIrq(); // internally gated on CPSR.I, IME, and nesting depth
       this._recordHaltEvent('after', pc);
       return `halted ${slices} scanline${slices === 1 ? '' : 's'}`;
@@ -3522,7 +3529,9 @@
         if (sawHwIrq && !this.bus.biosIrqFlagsWritten) {
           return `intrwait ${tools.hex(mask, 4)} if-fallback after ${slices} scanlines`;
         }
+        const cyclesBeforeAdvance = this.bus.cycles;
         this.bus.advanceScanline();
+        this.haltedCycles += this.bus.cycles - cyclesBeforeAdvance;
         if (this.bus.haltPendingIrq(mask)) sawHwIrq = true;
         this._checkAndDispatchIrq(); // internally gated on CPSR.I, IME, and nesting depth
       }
@@ -4198,28 +4207,32 @@
       this._resetCpuLoad();
     }
 
-    // ARM CPU-usage meter state: a ring buffer of (wall ms / emulated ms) ratios, one
-    // sample per CPU_LOAD_SAMPLE_CYCLES of emulated time (see _recordCpuLoadSample).
+    // ARM CPU-usage meter state: a ring buffer of (busy GBA cycles / total GBA cycles)
+    // ratios, one sample per CPU_LOAD_SAMPLE_CYCLES of emulated time (see
+    // _recordCpuLoadSample). "Busy" excludes cycles spent asleep in BIOS Halt/Stop/
+    // IntrWait (cpu.haltedCycles, see Arm7Cpu), so this reads like a hypervisor's vCPU
+    // usage meter -- e.g. "the mixing routine ran for 40% of the GBA's 16.7MHz clock,
+    // then halted for the rest" -- and is independent of host emulation speed.
     // cpuLoad is the buffer's running average, so the UI reads a stable synchronized
     // value instead of racing the audio-scheduler tick() loop directly.
     _resetCpuLoad() {
       this.cpuLoad = 0;
       this._cpuLoadSamples = [];
       this._cpuLoadSampleCycles = 0;
-      this._cpuLoadSampleWallMs = 0;
+      this._cpuLoadSampleHaltedCycles = 0;
     }
 
-    _recordCpuLoadSample(nowMs) {
+    _recordCpuLoadSample() {
       const cyclesElapsed = this.bus.cycles - this._cpuLoadSampleCycles;
       if (cyclesElapsed < CPU_LOAD_SAMPLE_CYCLES) return;
-      const emulatedMs = (cyclesElapsed / GBA_CPU_HZ) * 1000;
-      const wallMs = nowMs - this._cpuLoadSampleWallMs;
-      const ratio = emulatedMs > 0 ? wallMs / emulatedMs : 0;
-      this._cpuLoadSamples.push(Math.max(0, ratio));
+      const haltedElapsed = this.cpu.haltedCycles - this._cpuLoadSampleHaltedCycles;
+      const busyElapsed = Math.max(0, cyclesElapsed - haltedElapsed);
+      const ratio = cyclesElapsed > 0 ? busyElapsed / cyclesElapsed : 0;
+      this._cpuLoadSamples.push(Math.max(0, Math.min(1, ratio)));
       if (this._cpuLoadSamples.length > CPU_LOAD_BUFFER_SAMPLES) this._cpuLoadSamples.shift();
       this.cpuLoad = this._cpuLoadSamples.reduce((a, b) => a + b, 0) / this._cpuLoadSamples.length;
       this._cpuLoadSampleCycles = this.bus.cycles;
-      this._cpuLoadSampleWallMs = nowMs;
+      this._cpuLoadSampleHaltedCycles = this.cpu.haltedCycles;
     }
 
     reset() {
@@ -4703,7 +4716,7 @@
       // the warmup burst above, which isn't representative of ongoing cost).
       this._resetCpuLoad();
       this._cpuLoadSampleCycles = this.bus.cycles;
-      this._cpuLoadSampleWallMs = now();
+      this._cpuLoadSampleHaltedCycles = this.cpu.haltedCycles;
 
       const engine = this;
       const bus = this.bus;
@@ -4809,10 +4822,10 @@
             } else {
               for (let i = 0; i < 512; i++) engine.cpu.step();
             }
-            // Sampled on GBA cycles elapsed, not host wall-clock windows, so the ARM
-            // CPU-usage meter reflects actual emulated work instead of this loop's
-            // bursty produce/idle cadence (see _recordCpuLoadSample).
-            engine._recordCpuLoadSample(now());
+            // Sampled on GBA cycles busy vs halted, not host wall-clock, so the ARM
+            // CPU-usage meter reflects the emulated hardware's own duty cycle instead
+            // of this loop's bursty produce/idle cadence (see _recordCpuLoadSample).
+            engine._recordCpuLoadSample();
           }
           while (producedTotal() - stream.consumed >= SRC_NEEDED) scheduleChunk(OUT_CHUNK);
           if (reachedEnd()) {

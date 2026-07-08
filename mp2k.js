@@ -6015,8 +6015,8 @@ document.getElementById('engineSelect').addEventListener('change', e => {
   updateInfoText();
 });
 
-// Live GSF LLE stats: ARM7 CPU usage (cpuLoad, sampled on GBA cycles in
-// StandardGsfEngine.play()'s tick(), see gsf_emulator.js) and IWRAM/EWRAM footprint.
+// Live GSF LLE stats: ARM7 duty cycle (cpuLoad = busy/total GBA cycles, buffered in
+// StandardGsfEngine._recordCpuLoadSample, see gsf_emulator.js) and IWRAM/EWRAM footprint.
 // Polls rather than hooking every place GSF LLE playback can start/stop/end/switch
 // engines; shown whenever a GSF is loaded so RAM footprint stays visible while paused.
 setInterval(() => {

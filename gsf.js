@@ -125,13 +125,22 @@
     if (u8.byteLength < 12) throw new Error('GSF executable payload is shorter than 12 bytes');
     const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
     const entryAddr = dv.getUint32(0, true);
-    const loadAddr = dv.getUint32(4, true);
+    let loadAddr = dv.getUint32(4, true);
     const dataSize = dv.getUint32(8, true);
     if (dataSize > u8.byteLength - 12) {
       warnings.push(`declared ${dataSize} bytes but only ${u8.byteLength - 12} payload bytes are present`);
     }
     const clippedSize = Math.min(dataSize, Math.max(0, u8.byteLength - 12));
-    const region = gbaRegionFor(loadAddr, clippedSize);
+    let region = gbaRegionFor(loadAddr, clippedSize);
+    // Some minigsf patches (seen on non-MP2K drivers, e.g. a 1-byte "song index" trigger)
+    // encode a bare ROM-file-relative offset instead of a full 0x08000000-based GBA
+    // address. No real region starts below EWRAM at 0x02000000, so it's unambiguous to
+    // reinterpret an otherwise-unplaceable low address as a ROM offset before giving up.
+    if (!region && loadAddr < GBA_ROM_LIMIT) {
+      const romAddr = (GBA_ROM_BASE + loadAddr) >>> 0;
+      const romRegion = gbaRegionFor(romAddr, clippedSize);
+      if (romRegion) { loadAddr = romAddr; region = romRegion; }
+    }
     if (!region) warnings.push(`load address ${hex(loadAddr)} +${clippedSize} is outside a single known GBA memory region`);
     return {
       kind: source.kind || 'gsf-program',

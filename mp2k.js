@@ -4044,8 +4044,17 @@ class GS1Player {
       if (voiceSel) voiceSel.value = String(GBA_VOICE_LIMIT);
     }
     this.songTables = detectMp2kSongTables(this.rom);
-    if (!this.songTables.length) throw new Error('No MP2k song table found. Is this an MP2k GBA ROM?');
-    this._applySongTable(this.songTables[0]);
+    if (this.songTables.length) {
+      this._applySongTable(this.songTables[0]);
+    } else {
+      // No MP2k song table exists (e.g. a GSF set using a non-MP2K sound driver) — leave
+      // the HLE side empty so the caller can fall back to the GSF LLE engine instead of
+      // treating this as a load failure.
+      this.songTableAddr = null;
+      this.songs = [];
+      this.voiceGroupOff = 0;
+      this.voiceGroup = [];
+    }
     return this.songs.length;
   }
 
@@ -6861,9 +6870,41 @@ async function finishNonGbsLoad(count) {
   populateVoicePoolSelect();
   populateSongList(player.songs);
   player._debugEvent({ type: 'load', trackIdx: -1, tick: 0, message: `loaded ${count} songs, ${player.voiceGroup.length} instruments` });
-  setStatus(`${count} songs loaded — select one and press ▶`);
+
+  // Some GSF sets run a custom (non-MP2K) sound driver, so MP2K HLE detection finds no
+  // song table at all and there is nothing for it to play. Fall back to the GSF LLE
+  // engine, which just executes the real GBA program, and list its minigsf entries by
+  // name directly since there's no MP2K song table to map names from.
+  if (count === 0 && standardGsfEngine?.canPlay()) {
+    engineSel.value = 'gsf-lle';
+    populateGsfEntrySongList();
+    setStatus(`No MP2K song table found — using GSF LLE engine (${standardGsfEngine.entries.length} tracks)`);
+  } else if (count === 0) {
+    setStatus('No MP2K song table found. Is this an MP2k GBA ROM or valid GSF?');
+  } else {
+    setStatus(`${count} songs loaded — select one and press ▶`);
+  }
   document.getElementById('dropmsg').style.display = 'none';
   updateInfoText();
+}
+
+// Fills the song list directly from the GSF LLE engine's minigsf entries — used when a
+// GSF set has no MP2K song table (see finishNonGbsLoad), so there's no MP2K song to name
+// each entry after.
+function populateGsfEntrySongList() {
+  const sel = document.getElementById('songSelect');
+  sel.innerHTML = '';
+  const entries = standardGsfEngine?.entries || [];
+  entries.forEach((entry, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = entry.name || entry.key || `Track ${i + 1}`;
+    sel.appendChild(opt);
+  });
+  sel.disabled = entries.length <= 1;
+  sel.selectedIndex = 0;
+  document.getElementById('btnPlay').disabled = false;
+  currentSongListIdx = 0;
 }
 
 function populateVoicePoolSelect() {

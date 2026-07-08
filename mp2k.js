@@ -6015,6 +6015,34 @@ document.getElementById('engineSelect').addEventListener('change', e => {
   updateInfoText();
 });
 
+// Live GSF LLE stats: ARM7 CPU usage (cpuLoad, sampled on GBA cycles in
+// StandardGsfEngine.play()'s tick(), see gsf_emulator.js) and IWRAM/EWRAM footprint.
+// Polls rather than hooking every place GSF LLE playback can start/stop/end/switch
+// engines; shown whenever a GSF is loaded so RAM footprint stays visible while paused.
+setInterval(() => {
+  const armRow = document.getElementById('armCpuRow');
+  const iwramRow = document.getElementById('iwramRow');
+  const ewramRow = document.getElementById('ewramRow');
+  const loaded = document.getElementById('engineSelect')?.value === 'gsf-lle' && standardGsfEngine?.canPlay();
+  armRow.style.display = loaded ? '' : 'none';
+  iwramRow.style.display = loaded ? '' : 'none';
+  ewramRow.style.display = loaded ? '' : 'none';
+  if (!loaded) return;
+
+  const pct = Math.round((standardGsfEngine.cpuLoad || 0) * 100);
+  document.getElementById('armCpuFill').style.width = Math.min(100, pct) + '%';
+  document.getElementById('armCpuFill').style.background = pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#22c55e';
+  document.getElementById('armCpuLabel').textContent = `ARM CPU ${pct}%`;
+
+  const mem = standardGsfEngine.memoryUsage();
+  const iwramPct = Math.round(mem.iwram * 100);
+  const ewramPct = Math.round(mem.ewram * 100);
+  document.getElementById('iwramFill').style.width = iwramPct + '%';
+  document.getElementById('iwramLabel').textContent = `IWRAM ${iwramPct}%`;
+  document.getElementById('ewramFill').style.width = ewramPct + '%';
+  document.getElementById('ewramLabel').textContent = `EWRAM ${ewramPct}%`;
+}, 300);
+
 document.getElementById('btnDebug').addEventListener('click', () => {
   player.setDebug(!player.debugOpen);
 });

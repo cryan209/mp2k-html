@@ -30,6 +30,9 @@ h1 { font-size:13px; color:#6366f1; margin-bottom:12px; letter-spacing:2px; text
 .poly-bar-fill { height:100%; background:#6366f1; border-radius:3px; width:0; transition:width 60ms linear; }
 .poly-bar-peak { position:absolute; top:-2px; width:2px; height:9px; background:#f59e0b; border-radius:1px; left:0; }
 .poly-label { font-size:9px; color:#4b5563; white-space:nowrap; min-width:52px; text-align:right; }
+.cpu-bar-fill { height:100%; background:#22c55e; border-radius:3px; width:0; transition:width 200ms linear; }
+.iwram-bar-fill { height:100%; background:#3b82f6; border-radius:3px; width:0; transition:width 300ms linear; }
+.ewram-bar-fill { height:100%; background:#a855f7; border-radius:3px; width:0; transition:width 300ms linear; }
 .tracks-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:3px; margin-top:6px; }
 .track-cell { --track-color:#6366f1; --track-color-soft:rgba(99,102,241,.18); background:#0d1117; border:1px solid #1a1e2e; border-radius:3px; padding:4px; min-height:58px; position:relative; }
 .track-cell.active { border-color:var(--track-color); background:linear-gradient(180deg, var(--track-color-soft), #0d1117 62%); }
@@ -148,6 +151,24 @@ button.ctrl.active { background:#6366f1; border-color:#6366f1; color:#fff; }
       <div class="poly-bar-peak" id="polyPeak"></div>
     </div>
     <span class="poly-label" id="polyLabel">0 / 8</span>
+  </div>
+  <div class="poly-row" id="armCpuRow" style="display:none" title="Host CPU time spent stepping the emulated ARM7 core to keep the real-time GSF LLE stream fed">
+    <div class="poly-bar-wrap">
+      <div class="cpu-bar-fill" id="armCpuFill"></div>
+    </div>
+    <span class="poly-label" id="armCpuLabel">ARM CPU 0%</span>
+  </div>
+  <div class="poly-row" id="iwramRow" style="display:none" title="IWRAM footprint: fraction of the 32KB bank the running program currently holds non-zero data in">
+    <div class="poly-bar-wrap">
+      <div class="iwram-bar-fill" id="iwramFill"></div>
+    </div>
+    <span class="poly-label" id="iwramLabel">IWRAM 0%</span>
+  </div>
+  <div class="poly-row" id="ewramRow" style="display:none" title="EWRAM footprint: fraction of the 256KB bank the running program currently holds non-zero data in">
+    <div class="poly-bar-wrap">
+      <div class="ewram-bar-fill" id="ewramFill"></div>
+    </div>
+    <span class="poly-label" id="ewramLabel">EWRAM 0%</span>
   </div>
   <div class="tracks-grid" id="tracksGrid"></div>
   <div class="live-keyboard">

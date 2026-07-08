@@ -82,6 +82,12 @@
   const IO_DMA_END = 0x040000e0;
   const GBA_CPU_HZ = 16777216;
   const GBA_CYCLES_PER_FRAME = 280896;
+  // ARM CPU-usage meter: sample every N emulated frames (not on a host wall-clock
+  // timer) so the reading reflects actual GBA work done rather than the audio
+  // scheduler's bursty produce/idle cadence. Ring buffer holds ~2s of samples.
+  const CPU_LOAD_SAMPLE_FRAMES = 4;
+  const CPU_LOAD_SAMPLE_CYCLES = GBA_CYCLES_PER_FRAME * CPU_LOAD_SAMPLE_FRAMES;
+  const CPU_LOAD_BUFFER_SAMPLES = 30;
   // Maps GBA sound-register byte addresses (0x04000060-0x0400007F) to the shared PsgDmg
   // module's canonical DMG register offsets (relative to 0xFF10, i.e. 0x00=NR10..0x13=NR44).
   // -1 marks unused/padding bytes that don't correspond to any real PSG register.
@@ -4189,6 +4195,31 @@
       this.decodeReport = null;
       this.diagnostics = null;
       this.lastError = null;
+      this._resetCpuLoad();
+    }
+
+    // ARM CPU-usage meter state: a ring buffer of (wall ms / emulated ms) ratios, one
+    // sample per CPU_LOAD_SAMPLE_CYCLES of emulated time (see _recordCpuLoadSample).
+    // cpuLoad is the buffer's running average, so the UI reads a stable synchronized
+    // value instead of racing the audio-scheduler tick() loop directly.
+    _resetCpuLoad() {
+      this.cpuLoad = 0;
+      this._cpuLoadSamples = [];
+      this._cpuLoadSampleCycles = 0;
+      this._cpuLoadSampleWallMs = 0;
+    }
+
+    _recordCpuLoadSample(nowMs) {
+      const cyclesElapsed = this.bus.cycles - this._cpuLoadSampleCycles;
+      if (cyclesElapsed < CPU_LOAD_SAMPLE_CYCLES) return;
+      const emulatedMs = (cyclesElapsed / GBA_CPU_HZ) * 1000;
+      const wallMs = nowMs - this._cpuLoadSampleWallMs;
+      const ratio = emulatedMs > 0 ? wallMs / emulatedMs : 0;
+      this._cpuLoadSamples.push(Math.max(0, ratio));
+      if (this._cpuLoadSamples.length > CPU_LOAD_BUFFER_SAMPLES) this._cpuLoadSamples.shift();
+      this.cpuLoad = this._cpuLoadSamples.reduce((a, b) => a + b, 0) / this._cpuLoadSamples.length;
+      this._cpuLoadSampleCycles = this.bus.cycles;
+      this._cpuLoadSampleWallMs = nowMs;
     }
 
     reset() {
@@ -4203,6 +4234,7 @@
       this.decodeReport = null;
       this.diagnostics = null;
       this.lastError = null;
+      this._resetCpuLoad();
     }
 
     async loadBuffer(buf, source = {}) {
@@ -4299,6 +4331,29 @@
 
     canPlay() {
       return this.state === 'loaded' && !!this.memory && !!this.cpu && this.entries.length > 0;
+    }
+
+    isStreaming() {
+      return !!(this._stream && !this._stream.stopped);
+    }
+
+    // Footprint meters: fraction of each RAM region's bytes that are non-zero right now
+    // (a proxy for how much of IWRAM/EWRAM the running program has actually touched).
+    // Read from the bus's live working copies, not this.memory -- GbaMemoryBus clones
+    // memory.iwram/ewram into its own arrays at construction (see GbaMemoryBus ctor),
+    // and only those bus-owned arrays are actually read/written as the CPU runs.
+    memoryUsage() {
+      if (!this.bus) return { iwram: 0, ewram: 0 };
+      const nonZeroFraction = arr => {
+        if (!arr || !arr.length) return 0;
+        let n = 0;
+        for (let i = 0; i < arr.length; i++) if (arr[i] !== 0) n++;
+        return n / arr.length;
+      };
+      return {
+        iwram: nonZeroFraction(this.bus.iwram),
+        ewram: nonZeroFraction(this.bus.ewram),
+      };
     }
 
     _directSoundSampleRate(fallback = 13379) {
@@ -4644,6 +4699,11 @@
         underruns: 0,
       };
       this._stream = stream;
+      // Start the CPU-load ring buffer fresh at the steady-state streaming point (not
+      // the warmup burst above, which isn't representative of ongoing cost).
+      this._resetCpuLoad();
+      this._cpuLoadSampleCycles = this.bus.cycles;
+      this._cpuLoadSampleWallMs = now();
 
       const engine = this;
       const bus = this.bus;
@@ -4749,6 +4809,10 @@
             } else {
               for (let i = 0; i < 512; i++) engine.cpu.step();
             }
+            // Sampled on GBA cycles elapsed, not host wall-clock windows, so the ARM
+            // CPU-usage meter reflects actual emulated work instead of this loop's
+            // bursty produce/idle cadence (see _recordCpuLoadSample).
+            engine._recordCpuLoadSample(now());
           }
           while (producedTotal() - stream.consumed >= SRC_NEEDED) scheduleChunk(OUT_CHUNK);
           if (reachedEnd()) {
@@ -4788,6 +4852,7 @@
       }
       if (this._audioSrc) { try { this._audioSrc.stop(); } catch (_) {} this._audioSrc = null; }
       if (this._audioCtx) { this._audioCtx.close(); this._audioCtx = null; }
+      this._resetCpuLoad();
     }
 
     // Parse a GSF length tag ("m:ss", "m:ss.fff", or plain seconds) into seconds.

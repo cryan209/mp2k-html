@@ -1380,6 +1380,14 @@
       this.dmaSourceLatch[ch] = this._advanceDmaSource(ch, src, 16);
       // Don't disable — repeat bit is set, DMA stays active.
       this.stallCycles += 12; // ~2N+2S per word for a 4-word FIFO burst
+      // Real hardware fires the DMA IRQ on FIFO-timed transfers too, same as any other
+      // DMA, if the control register's IRQ-enable bit is set. Some drivers drive their
+      // "how many new samples are ready to mix" accumulator entirely off this IRQ (not
+      // VBlank) -- skipping it here left that accumulator permanently at 0, so the
+      // driver's mixer never saw enough pending samples to run and stayed silent forever
+      // even though the FIFO kept refilling (with stale/zero data).
+      const ctrlNow = this.read16(base + 10);
+      if (ctrlNow & 0x4000) this.requestIrq(1 << (8 + ch), `dma${ch}-fifo`);
     }
 
     _advanceDmaSource(ch, src, bytes) {
@@ -2524,7 +2532,14 @@
     }
 
     _reg(idx) {
-      return idx === 15 ? (this.regs[15] + 4) >>> 0 : this.regs[idx] >>> 0;
+      // R15-as-operand reads instruction address + 8 on ARM, +4 on Thumb. regs[15] is
+      // already advanced past the current instruction by the time _reg() runs (+4 for
+      // ARM, +2 for Thumb -- see step()), so the remaining offset differs by mode: +4
+      // for ARM, +2 for Thumb. Getting this wrong only bites Thumb hi-register ops that
+      // read PC (e.g. compiler-generated PIC jump tables via "add rd, pc"), which is why
+      // it can go unnoticed until a ROM actually uses that codegen pattern.
+      if (idx !== 15) return this.regs[idx] >>> 0;
+      return (this.regs[15] + (this.cpsr & CPSR_T ? 2 : 4)) >>> 0;
     }
 
     _armStoreRegValue(idx) {
